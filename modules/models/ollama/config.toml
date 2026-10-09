@@ -1,0 +1,9 @@
+[icedos.ai-tools.ollama]
+vulkan = true
+host = "127.0.0.1"
+port = 11434
+loadModels = [] # e.g. ["qwen2.5-coder"] to auto-pull on first rebuild
+
+# Skills for this module, name = full SKILL.md content. Added to the shared
+# icedos.ai-tools.skills pool, so every agent loads them.
+[icedos.ai-tools.ollama.skills]

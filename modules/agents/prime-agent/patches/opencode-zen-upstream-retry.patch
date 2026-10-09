@@ -1,0 +1,16 @@
+diff --git a/packages/ai/src/utils/stream-failure.ts b/packages/ai/src/utils/stream-failure.ts
+index 078ba8b..d420764 100644
+--- a/packages/ai/src/utils/stream-failure.ts
++++ b/packages/ai/src/utils/stream-failure.ts
+@@ -171,6 +171,11 @@ function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; d
+ 	if ((kind === "auth" || kind === "permission") && providerErrorType === undefined) {
+ 		kind = classifyStreamFailure(undefined, status);
+ 	}
++	// opencode zen reports flaky upstream rejections as a 400 that succeeds when resent.
++	const message = typeof bodyMessage === "string" ? bodyMessage : error.message;
++	if (kind === "invalid_request" && status === 400 && message.includes("Upstream request failed")) {
++		kind = "server_error";
++	}
+ 
+ 	return {
+ 		info: {

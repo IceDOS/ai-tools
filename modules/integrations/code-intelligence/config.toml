@@ -1,0 +1,4 @@
+[icedos.ai-tools.code-intelligence]
+# Languages whose code-intelligence-<lang> skill ships, plus a code-intelligence rule
+# telling agents to load them. LSP tools come from nix-shell on demand.
+languages = ["bash", "c-cpp", "javascript", "nix", "python", "typescript"]

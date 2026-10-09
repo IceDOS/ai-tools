@@ -1,0 +1,593 @@
+diff --git a/packages/ai/scripts/generate-models.ts b/packages/ai/scripts/generate-models.ts
+index 5a942ab..2b5f9bf 100644
+--- a/packages/ai/scripts/generate-models.ts
++++ b/packages/ai/scripts/generate-models.ts
+@@ -316,7 +316,12 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
+ 		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
+ 	}
+ 	const kimiK3Id = model.id.toLowerCase();
+-	if (!model.thinkingLevelMap && (/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id))) {
++	// Ollama cloud kimi-k3 ships without a level map (openai fallback handles it).
++	if (
++		model.provider !== "ollama" &&
++		!model.thinkingLevelMap &&
++		(/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id))
++	) {
+ 		mergeThinkingLevelMap(model, KIMI_K3_THINKING_LEVEL_MAP);
+ 	}
+ 	if (isGoogleThinkingApi(model) && isGemini3ProModel(model.id)) {
+@@ -917,6 +922,32 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
+ 			}
+ 		}
+ 
++		// Process Ollama Cloud models
++		if (data["ollama-cloud"]?.models) {
++			for (const [modelId, model] of Object.entries(data["ollama-cloud"].models)) {
++				const m = model as ModelsDevModel;
++				if (m.tool_call !== true) continue;
++
++				models.push({
++					id: modelId,
++					name: m.name || modelId,
++					api: "openai-completions",
++					provider: "ollama",
++					baseUrl: "https://ollama.com/v1",
++					reasoning: m.reasoning === true,
++					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
++					cost: {
++						input: m.cost?.input || 0,
++						output: m.cost?.output || 0,
++						cacheRead: m.cost?.cache_read || 0,
++						cacheWrite: m.cost?.cache_write || 0,
++					},
++					contextWindow: m.limit?.context || 4096,
++					maxTokens: m.limit?.output || 4096,
++				});
++			}
++		}
++
+ 		// Process Cerebras models
+ 		if (data.cerebras?.models) {
+ 			for (const [modelId, model] of Object.entries(data.cerebras.models)) {
+@@ -1801,7 +1832,12 @@ async function generateModels() {
+ 	allModels.push(...deepseekV4Models);
+ 
+ 	for (const candidate of allModels) {
+-		if (candidate.api === "openai-completions" && candidate.id.includes("deepseek-v4")) {
++		// Ollama cloud serves deepseek-v4 with plain reasoning_effort; no deepseek compat.
++		if (
++			candidate.api === "openai-completions" &&
++			candidate.id.includes("deepseek-v4") &&
++			candidate.provider !== "ollama"
++		) {
+ 			candidate.compat = {
+ 				...candidate.compat,
+ 				...(candidate.provider === "openrouter"
+diff --git a/packages/ai/src/env-api-keys.ts b/packages/ai/src/env-api-keys.ts
+index eaeae11..65a59e8 100644
+--- a/packages/ai/src/env-api-keys.ts
++++ b/packages/ai/src/env-api-keys.ts
+@@ -117,6 +117,7 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
+ 		"minimax-cn": "MINIMAX_CN_API_KEY",
+ 		moonshotai: "MOONSHOT_API_KEY",
+ 		"moonshotai-cn": "MOONSHOT_API_KEY",
++		ollama: "OLLAMA_API_KEY",
+ 		huggingface: "HF_TOKEN",
+ 		fireworks: "FIREWORKS_API_KEY",
+ 		opencode: "OPENCODE_API_KEY",
+diff --git a/packages/ai/src/models.generated.ts b/packages/ai/src/models.generated.ts
+index ff0f332..23923a1 100644
+--- a/packages/ai/src/models.generated.ts
++++ b/packages/ai/src/models.generated.ts
+@@ -7960,6 +7960,421 @@ export const MODELS = {
+ 			maxTokens: 131072,
+ 		} satisfies Model<"openai-completions">,
+ 	},
++	"ollama": {
++		"deepseek-v4-flash": {
++			id: "deepseek-v4-flash",
++			name: "deepseek-v4-flash",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 1048576,
++		} satisfies Model<"openai-completions">,
++		"deepseek-v4-flash:0731": {
++			id: "deepseek-v4-flash:0731",
++			name: "DeepSeek V4 Flash 0731",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 1048576,
++		} satisfies Model<"openai-completions">,
++		"deepseek-v4-pro": {
++			id: "deepseek-v4-pro",
++			name: "deepseek-v4-pro",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 1048576,
++		} satisfies Model<"openai-completions">,
++		"deepseek-v4-pro:0813": {
++			id: "deepseek-v4-pro:0813",
++			name: "DeepSeek V4 Pro 0813",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 1048576,
++		} satisfies Model<"openai-completions">,
++		"deepseek-v4.1-flash": {
++			id: "deepseek-v4.1-flash",
++			name: "DeepSeek V4.1 Flash",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 384000,
++		} satisfies Model<"openai-completions">,
++		"gemma4:31b": {
++			id: "gemma4:31b",
++			name: "gemma4:31b",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 262144,
++			maxTokens: 262144,
++		} satisfies Model<"openai-completions">,
++		"glm-5.1": {
++			id: "glm-5.1",
++			name: "glm-5.1",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 202752,
++			maxTokens: 131072,
++		} satisfies Model<"openai-completions">,
++		"glm-5.2": {
++			id: "glm-5.2",
++			name: "GLM-5.2",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 976000,
++			maxTokens: 131072,
++		} satisfies Model<"openai-completions">,
++		"glm-5.3": {
++			id: "glm-5.3",
++			name: "GLM-5.3",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 131072,
++		} satisfies Model<"openai-completions">,
++		"glm-5.3-flash": {
++			id: "glm-5.3-flash",
++			name: "GLM-5.3-Flash",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 1000000,
++			maxTokens: 131072,
++		} satisfies Model<"openai-completions">,
++		"gpt-oss:120b": {
++			id: "gpt-oss:120b",
++			name: "gpt-oss:120b",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 131072,
++			maxTokens: 32768,
++		} satisfies Model<"openai-completions">,
++		"gpt-oss:20b": {
++			id: "gpt-oss:20b",
++			name: "gpt-oss:20b",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 131072,
++			maxTokens: 32768,
++		} satisfies Model<"openai-completions">,
++		"kimi-k2.5": {
++			id: "kimi-k2.5",
++			name: "kimi-k2.5",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 262144,
++			maxTokens: 262144,
++		} satisfies Model<"openai-completions">,
++		"kimi-k2.6": {
++			id: "kimi-k2.6",
++			name: "kimi-k2.6",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 262144,
++			maxTokens: 262144,
++		} satisfies Model<"openai-completions">,
++		"kimi-k2.7-code": {
++			id: "kimi-k2.7-code",
++			name: "kimi-k2.7-code",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 262144,
++			maxTokens: 262144,
++		} satisfies Model<"openai-completions">,
++		"kimi-k3": {
++			id: "kimi-k3",
++			name: "kimi-k3",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 131072,
++		} satisfies Model<"openai-completions">,
++		"minimax-m2.5": {
++			id: "minimax-m2.5",
++			name: "minimax-m2.5",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 204800,
++			maxTokens: 131072,
++		} satisfies Model<"openai-completions">,
++		"minimax-m2.7": {
++			id: "minimax-m2.7",
++			name: "minimax-m2.7",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 196608,
++			maxTokens: 196608,
++		} satisfies Model<"openai-completions">,
++		"minimax-m3": {
++			id: "minimax-m3",
++			name: "minimax-m3",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 512000,
++			maxTokens: 131072,
++		} satisfies Model<"openai-completions">,
++		"mistral-large-3:675b": {
++			id: "mistral-large-3:675b",
++			name: "mistral-large-3:675b",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: false,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 262144,
++			maxTokens: 262144,
++		} satisfies Model<"openai-completions">,
++		"nemotron-3-nano:30b": {
++			id: "nemotron-3-nano:30b",
++			name: "nemotron-3-nano:30b",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 131072,
++		} satisfies Model<"openai-completions">,
++		"nemotron-3-super": {
++			id: "nemotron-3-super",
++			name: "nemotron-3-super",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 262144,
++			maxTokens: 65536,
++		} satisfies Model<"openai-completions">,
++		"nemotron-3-ultra": {
++			id: "nemotron-3-ultra",
++			name: "nemotron-3-ultra",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 262144,
++			maxTokens: 128000,
++		} satisfies Model<"openai-completions">,
++		"qwen3.5:397b": {
++			id: "qwen3.5:397b",
++			name: "qwen3.5:397b",
++			api: "openai-completions",
++			provider: "ollama",
++			baseUrl: "https://ollama.com/v1",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 262144,
++			maxTokens: 65536,
++		} satisfies Model<"openai-completions">,
++	},
+ 	"openai": {
+ 		"gpt-4": {
+ 			id: "gpt-4",
+diff --git a/packages/ai/src/providers/openai-completions.ts b/packages/ai/src/providers/openai-completions.ts
+index 64bb3be..d9491b5 100644
+--- a/packages/ai/src/providers/openai-completions.ts
++++ b/packages/ai/src/providers/openai-completions.ts
+@@ -1160,6 +1160,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
+ 	const isCloudflareWorkersAI = provider === "cloudflare-workers-ai" || baseUrl.includes("api.cloudflare.com");
+ 	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
+ 	const isPrimeInference = provider === "prime-inference" || baseUrl.includes("api.pinference.ai");
++	const isOllama = provider === "ollama" || baseUrl.includes("ollama.com");
+ 
+ 	const isNonStandard =
+ 		provider === "cerebras" ||
+@@ -1174,9 +1175,10 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
+ 		baseUrl.includes("opencode.ai") ||
+ 		isCloudflareWorkersAI ||
+ 		isCloudflareAiGateway ||
+-		isPrimeInference;
++		isPrimeInference ||
++		isOllama;
+ 
+-	const useMaxTokens = baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isPrimeInference;
++	const useMaxTokens = baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isPrimeInference || isOllama;
+ 
+ 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
+ 	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
+@@ -1187,6 +1189,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
+ 	return {
+ 		supportsStore: !isNonStandard,
+ 		supportsDeveloperRole: !isNonStandard,
++		// ollama.com/v1 accepts reasoning_effort (none/minimal/low/medium/high/max/xhigh/ultra).
+ 		supportsReasoningEffort: !isGrok && !isZai && !isMoonshot && !isCloudflareAiGateway,
+ 		supportsUsageInStreaming: true,
+ 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
+@@ -1204,7 +1207,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
+ 		openRouterRouting: {},
+ 		vercelGatewayRouting: {},
+ 		zaiToolStream: false,
+-		supportsStrictMode: !isMoonshot && !isCloudflareAiGateway && !isPrimeInference,
++		supportsStrictMode: !isMoonshot && !isCloudflareAiGateway && !isPrimeInference && !isOllama,
+ 		cacheControlFormat,
+ 		sendSessionAffinityHeaders: false,
+ 		supportsLongCacheRetention: !(isCloudflareWorkersAI || isCloudflareAiGateway),
+diff --git a/packages/ai/src/types.ts b/packages/ai/src/types.ts
+index f5744ba..2062bbc 100644
+--- a/packages/ai/src/types.ts
++++ b/packages/ai/src/types.ts
+@@ -38,6 +38,7 @@ export type KnownProvider =
+ 	| "minimax-cn"
+ 	| "moonshotai"
+ 	| "moonshotai-cn"
++	| "ollama"
+ 	| "huggingface"
+ 	| "fireworks"
+ 	| "opencode"
+diff --git a/packages/coding-agent/docs/providers.md b/packages/coding-agent/docs/providers.md
+index 1aaa6a2..71d22c9 100644
+--- a/packages/coding-agent/docs/providers.md
++++ b/packages/coding-agent/docs/providers.md
+@@ -51,6 +51,7 @@ prime-agent
+ | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
+ | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
+ | OpenAI | `OPENAI_API_KEY` | `openai` |
++| Ollama Cloud | `OLLAMA_API_KEY` | `ollama` |
+ | Prime Inference | `PRIME_API_KEY` | `prime-inference` |
+ | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` |
+ | Google Gemini | `GEMINI_API_KEY` | `google` |
+diff --git a/packages/coding-agent/src/core/model-resolver.ts b/packages/coding-agent/src/core/model-resolver.ts
+index 21f0763..81b0194 100644
+--- a/packages/coding-agent/src/core/model-resolver.ts
++++ b/packages/coding-agent/src/core/model-resolver.ts
+@@ -39,6 +39,7 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
+ 	"minimax-cn": "MiniMax-M2.7",
+ 	moonshotai: "kimi-k2.6",
+ 	"moonshotai-cn": "kimi-k2.6",
++	ollama: "gpt-oss:120b",
+ 	huggingface: "moonshotai/Kimi-K2.6",
+ 	fireworks: "accounts/fireworks/models/kimi-k2p6",
+ 	opencode: "kimi-k2.6",
+diff --git a/packages/coding-agent/src/core/provider-display-names.ts b/packages/coding-agent/src/core/provider-display-names.ts
+index 9cae04a..d104b7a 100644
+--- a/packages/coding-agent/src/core/provider-display-names.ts
++++ b/packages/coding-agent/src/core/provider-display-names.ts
+@@ -17,6 +17,7 @@ export const BUILT_IN_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+ 	"minimax-cn": "MiniMax (China)",
+ 	moonshotai: "Moonshot AI",
+ 	"moonshotai-cn": "Moonshot AI (China)",
++	ollama: "Ollama",
+ 	opencode: "OpenCode Zen",
+ 	"opencode-go": "OpenCode Go",
+ 	openai: "OpenAI",

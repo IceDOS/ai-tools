@@ -1,0 +1,18 @@
+[icedos.ai-tools.peon-ping.users.username]
+defaultPack = "peon"
+volume = 0.5
+desktopNotifications = false
+claudeCodeIntegration = false
+suppressSubagentComplete = true
+silentWindowSeconds = 0
+packs = ["peon"]
+
+[icedos.ai-tools.peon-ping.users.username.categories]
+"session.start" = false
+"task.error" = false
+"resource.limit" = false
+"user.spam" = false
+
+# Skills for this module, name = full SKILL.md content. Added to the shared
+# icedos.ai-tools.skills pool, so every agent loads them.
+[icedos.ai-tools.peon-ping.skills]

@@ -1,0 +1,20 @@
+[icedos.ai-tools.alimit.users.username]
+# Seconds between polls; 180 is the Claude usage endpoint's rate-limit floor.
+interval = 180
+alerts = true
+widget = true
+
+# Render alimit's usage bar in every agent that has one: Claude Code's status line,
+# prime-agent's footer and opencode's sidebar. Antigravity's bar always uses alimit.
+statusLine = true
+
+# Providers the timer polls. Antigravity is recorded by its own status line.
+providers = ["claude", "opencode-go", "ollama", "openrouter"]
+
+alertUrgency = "normal"
+alertTimeout = 10
+alertTransient = false
+
+# Zed keybind to spawn the alimit dashboard (ctrl-alt-v; ctrl-alt-l collides
+# with Zed default lsp_tool::ToggleMenu + KDE lock).
+keybind = "ctrl-alt-v"

@@ -1,0 +1,37 @@
+--- a/packages/coding-agent/src/core/settings-manager.ts
++++ b/packages/coding-agent/src/core/settings-manager.ts
+@@ -60,6 +60,7 @@
+ 	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
+ 	fullscreen?: boolean; // default: true (alternate-screen rendering with scrollable transcript)
+ 	fullscreenMouse?: boolean; // default: true
++	speed?: boolean; // default: false (footer tok/s readout; toggled at runtime with /speed)
+ }
+ 
+ export interface ImageSettings {
+@@ -1339,6 +1340,10 @@
+ 		return this.settings.terminal?.fullscreenMouse ?? true;
+ 	}
+ 
++	getSpeed(): boolean {
++		return this.settings.terminal?.speed ?? false;
++	}
++
+ 	setFullscreenMouse(enabled: boolean): void {
+ 		if (!this.globalSettings.terminal) {
+ 			this.globalSettings.terminal = {};
+
+--- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+@@ -1861,6 +1861,11 @@
+ 		if (this.fullscreenEnabled) {
+ 			this.applyFullscreen(true);
+ 		}
++		// /speed default from settings (terminal.speed); the runtime command still toggles it.
++		if (this.settingsManager.getSpeed()) {
++			this.speedDisplayEnabled = true;
++			this.footer.setSpeedEnabled(true);
++		}
+ 		this.isInitialized = true;
+ 
+ 		await this.rebindCurrentSession();
+

@@ -1,0 +1,18 @@
+# Whether `icedos gc` prunes stale claude session data (unshade-style).
+[icedos.ai-tools.claude-code]
+includeInIcedosGc = false
+# Retain session transcripts/history newer than this many days on GC.
+sessionRetentionDays = 30
+# Whether the launcher shows a desktop entry that opens in the default terminal.
+desktopEntry = true
+
+[[icedos.ai-tools.claude-code.users.username.marketplaces]]
+name = ""
+source = ""
+owner = ""
+repo = ""
+url = ""
+path = ""
+domain = ""
+rev = ""
+hash = ""

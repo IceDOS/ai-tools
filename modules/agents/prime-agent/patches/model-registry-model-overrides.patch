@@ -1,0 +1,32 @@
+--- a/packages/coding-agent/src/core/model-registry.ts
++++ b/packages/coding-agent/src/core/model-registry.ts
+@@ -532,6 +532,10 @@
+ 		const builtInModels = [...this.loadBuiltInModels(overrides, modelOverrides), ...getPrivatePrimeInferenceModels()];
+ 		let combined = this.mergeCustomModels(builtInModels, customModels);
+ 
++		// Apply modelOverrides after merging so custom models (from models[] in
++		// models.json) also respect the overrides (e.g. contextWindow cap).
++		combined = this.applyModelOverrides(combined, modelOverrides);
++
+ 		for (const oauthProvider of this.authStorage.getOAuthProviders()) {
+ 			const cred = this.authStorage.get(oauthProvider.id);
+ 			if (cred?.type === "oauth" && oauthProvider.modifyModels) {
+@@ -573,6 +577,18 @@
+ 		});
+ 	}
+ 
++	/** Apply modelOverrides to all models (built-in and custom). */
++	private applyModelOverrides(
++		models: Model<Api>[],
++		modelOverrides: Map<string, Map<string, ModelOverride>>,
++	): Model<Api>[] {
++		return models.map((m) => {
++			const perModelOverrides = modelOverrides.get(m.provider);
++			const modelOverride = perModelOverrides?.get(m.id);
++			return modelOverride ? applyModelOverride(m, modelOverride) : m;
++		});
++	}
++
+ 	/** Merge custom models into built-in list by provider+id (custom wins on conflicts). */
+ 	private mergeCustomModels(builtInModels: Model<Api>[], customModels: Model<Api>[]): Model<Api>[] {
+ 		const merged = [...builtInModels];

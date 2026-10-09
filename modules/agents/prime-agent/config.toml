@@ -1,0 +1,159 @@
+[icedos.ai-tools.prime-agent]
+# Install a desktop entry that launches the interactive TUI in the default
+# terminal (Terminal=true, so the desktop environment picks the user's
+# preferred terminal emulator).
+desktopEntry = true
+
+# Spawn this agent in a new Zed agent-panel terminal (agent.terminal_init_command
+# = "prime-agent", ctrl-n in the agent panel) instead of using ACP. Only applies
+# when the zed module is loaded.
+zedAgentPanelTerminal = true
+
+# Whether `icedos gc` prunes stale prime-agent session data.
+includeInIcedosGc = false
+
+# GC retention: prune sessions/logs older than this many days.
+sessionRetentionDays = 30
+
+# Status glyph ahead of the terminal title (Zed terminal threads show it as a
+# status marker). Working frames cycle per pulse tick; repeat one to hold it
+# longer. Use glyphs of one width in the title font, or the title text shifts.
+[icedos.ai-tools.prime-agent.terminalTitle]
+idleGlyph = "❄"
+workingGlyphs = ["❅", "❅", "❆", "❆"]
+
+# Seeded defaultProvider/defaultModel in settings.json; empty keeps the TUI's choice.
+[icedos.ai-tools.prime-agent.default]
+model = ""
+provider = ""
+
+[icedos.ai-tools.prime-agent.extensions]
+# Built-in prime-agent example extensions to load (names under examples/extensions/).
+builtin = []
+
+# Inline .ts sources for auto-loaded local extensions (like Claude skills).
+inline = {}
+
+# Plain-text rules, name = markdown, each appended to the system prompt every turn
+# (generated as an inline extension named rule-<name>). Shared icedos.ai-tools.rules land here too.
+rules = {}
+
+# Install the peon-ping companion extension (session-event bridge to peon.sh).
+peonPing = true
+
+[icedos.ai-tools.prime-agent.extensions.context-window-cap]
+enable = false
+# Cap every model's contextWindow at this percentage of its native context
+# (context-cap extension). llamacpp models are excluded; the local server owns
+# context. Models with an explicit contextWindow override in models.json keep it.
+percent = 30
+
+[icedos.ai-tools.prime-agent.extensions.context-language-models]
+enable = false
+overflow = "withhold"
+oneToolPerTurn = false
+sizeTrailer = false
+nativeCompaction = "auto"
+
+[icedos.ai-tools.prime-agent.extensions.prompt-suggestions]
+# Install the prompt-suggest extension: after each reply, one extra model call
+# predicts your next message and shows it as dim text in the empty prompt; Tab
+# accepts it. /suggest on|off toggles it at runtime.
+enable = false
+
+# "provider/model-id" making the prediction; "" uses the session model. A cheap
+# or free model keeps the per-turn cost down.
+model = ""
+
+[icedos.ai-tools.prime-agent.extensions.meters]
+# Install the cost-footer extension: live session cost (USD or € for metered
+# local models) in the TUI bottom bar, with token totals and the active model;
+# /cost toggles it at runtime. The tok/s readout is native (/speed).
+cost = true
+
+[icedos.ai-tools.prime-agent.extensions.meters.power]
+# Meter GPU electricity for locally-served models; the footer shows measured
+# electricity instead of "free". Requires meters.cost = true.
+enable = false
+
+# While the kde wattmeter service runs, the footer shows its local-AI watts and
+# costs (its tariff, windows and gpuIdleWatts) and this meter records nothing.
+# card, rateKwh, idleWatts, currency and windows apply whenever it is not running.
+
+# DRM card to read (e.g. "card1"); empty autodetects the first GPU exposing an
+# average-power sensor. Only amdgpu-style hwmon power1_average is supported.
+card = ""
+
+# Price per kWh, in whatever currency `currency` names. Required (> 0) when enabled.
+rateKwh = 0
+
+# The card's idle draw, subtracted from every sample so the meter reports the
+# marginal cost of inference. Zero by default; read an idle sensor and set it.
+idleWatts = 0
+
+# Currency symbol shown next to the cost (e.g. "€"). Required when enabled.
+currency = ""
+
+# Providers served by the local GPU; anything else is left unmetered. Empty by
+# default: a module that serves models locally (llamacpp) adds itself.
+providers = []
+
+# Rolling cost windows shown in the footer, in order. Each is a positive integer
+# plus a unit: s, m (minutes), h, d, w or M (calendar months), e.g. "1s", "15m",
+# "24h", "1M". Empty uses ["1h", "24h", "7d", "30d"].
+windows = []
+
+[icedos.ai-tools.prime-agent.providers]
+ollama = true
+
+[icedos.ai-tools.prime-agent.settings]
+# "" means $XDG_CONFIG_HOME/prime-agent; $XDG_CONFIG_HOME / $XDG_DATA_HOME / $HOME / ~ expand per user.
+dataDir = ""
+
+# MCP tool-call timeout in seconds (60–3600), set as callTimeoutMs on each configured server. Heavy reviews may need more.
+mcpCallTimeout = 900
+
+# Per-provider overrides merged into models.json (partial merge).
+providers = {}
+
+# Recursion depth ceiling for rlm() subagents, exported as RLM_MAX_DEPTH. A
+# /rlm-max-depth set globally in the TUI outranks this. 2 is the floor for the
+# code-review skill: root spawns the orchestrator, the orchestrator spawns reviewers.
+rlmMaxDepth = 2
+
+# Send session traces (full transcripts, cwd, git repo/commit) to Prime Intellect to
+# train open-source LLMs. Off by default; /traces on in the TUI toggles it at runtime.
+shareTraces = false
+
+# Send product analytics (token usage, model/provider categories) to Prime Intellect.
+# Off by default; flips prime-agent's upstream `telemetry.enabled` (default true).
+telemetry = false
+
+# Start every session with the native /speed footer readout (output tok/s per
+# response + session average). /speed on|off still toggles it at runtime.
+speed = true
+
+# "provider/model-id" for refine, compaction and branch summaries. "" keeps the
+# session model (and any /settings choice).
+auxiliaryModel = ""
+
+# "provider/model-id" serving turns that carry images when the session model is
+# text-only. "" leaves it unset (and any /settings choice).
+imageModel = ""
+
+[icedos.ai-tools.prime-agent.settings.ports]
+base = 8850
+overrides = {}
+
+[icedos.ai-tools.prime-agent.skills]
+# Extra built-in skills: name -> full SKILL.md content, shipped into dist/skills so
+# they autoload on start; each needs frontmatter `description` (loader skips without).
+extraBuiltin = {}
+
+# Extra skill directories, seeded as `skills` in settings.json.
+dirs = []
+
+[icedos.ai-tools.prime-agent.skills.code]
+# Ship the code-review skill: two-pass diff/PR review that fans reviewer children
+# out per dimension, then scores every finding and drops those below 80.
+review = true

@@ -1,0 +1,14 @@
+.icedos-core/
+# Python
+__pycache__/
+*.py[cod]
+
+# Build artifacts (hatchling)
+/modules/mcp-server/src/build/
+/modules/mcp-server/src/dist/
+*.egg-info/
+.venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+node_modules/

@@ -1,0 +1,32 @@
+[icedos.ai-tools.antigravity.extraMcpServers]
+
+# Global rules, name = markdown, written to ~/.gemini/config/rules/<name>.md.
+# Text without frontmatter gets `trigger: always_on`. agy truncates a file past 24,000 bytes.
+[icedos.ai-tools.antigravity.rules]
+
+# Global skills, name = full SKILL.md content, written to ~/.gemini/antigravity-cli/skills/<name>/SKILL.md.
+[icedos.ai-tools.antigravity.skills]
+
+[icedos.ai-tools.antigravity]
+# Whether to wire Home Manager's shared programs.mcp.servers registry
+# into ~/.gemini/config/mcp_config.json for Antigravity.
+enableMcpIntegration = true
+
+# Play peon-ping sounds for agy sessions, for users with icedos.ai-tools.peon-ping configured.
+# Runs upstream's antigravity watcher as a systemd user service.
+peonPing = true
+
+# Antigravity CLI bottom status bar (/statusline), rendered by alimit like the other agents' bars;
+# configured via agy's own settings.json.
+statusLine = true
+
+# Render the bar below agy's built-in header instead of replacing it.
+statusLineStackWithDefault = false
+
+# Terminal title "<status glyph> <conversation title>", as Claude Code and prime-agent set it
+# (Zed terminal threads show the glyph as a status marker). The status line command drives it,
+# so it also works with statusLine = false. Use glyphs of one width in the title font.
+[icedos.ai-tools.antigravity.terminalTitle]
+enable = true
+idleGlyph = "◉"
+workingGlyphs = ["◐", "◓", "◑", "◒"]

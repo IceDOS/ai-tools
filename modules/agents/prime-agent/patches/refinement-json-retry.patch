@@ -1,0 +1,153 @@
+diff --git a/packages/coding-agent/src/core/refinement/refinement.ts b/packages/coding-agent/src/core/refinement/refinement.ts
+index 41fcecf..b2ddb16 100644
+--- a/packages/coding-agent/src/core/refinement/refinement.ts
++++ b/packages/coding-agent/src/core/refinement/refinement.ts
+@@ -1281,38 +1281,45 @@ export async function planRefinement(
+ 	const maxTokens =
+ 		reasoning === "off" ? Math.min(requestModel.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS) : requestModel.maxTokens;
+ 
+-	const response = await completeWithProviderRetry(
+-		() =>
+-			completeSimple(
+-				requestModel,
+-				{
+-					systemPrompt: REFINEMENT_SYSTEM_PROMPT,
+-					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+-				},
+-				{
+-					reasoning,
+-					maxTokens,
+-					signal,
+-					apiKey,
+-					headers,
+-					sessionId,
+-				},
+-			),
+-		{ policy: options.retry, signal },
+-	);
++	// A sampled reply can miss the JSON shape (prose, leaked tool-call markup), so resend once.
++	for (let attempt = 0; ; attempt++) {
++		const response = await completeWithProviderRetry(
++			() =>
++				completeSimple(
++					requestModel,
++					{
++						systemPrompt: REFINEMENT_SYSTEM_PROMPT,
++						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
++					},
++					{
++						reasoning,
++						maxTokens,
++						signal,
++						apiKey,
++						headers,
++						sessionId,
++					},
++				),
++			{ policy: options.retry, signal },
++		);
+ 
+-	if (response.stopReason === "error") {
+-		throw new Error(`Refinement failed: ${response.errorMessage || "Unknown error"}`);
+-	}
+-	if (response.stopReason === "length") {
+-		throw new Error(`Refinement failed: ${TRUNCATED_JSON_ERROR}`);
+-	}
++		if (response.stopReason === "error") {
++			throw new Error(`Refinement failed: ${response.errorMessage || "Unknown error"}`);
++		}
++		if (response.stopReason === "length") {
++			throw new Error(`Refinement failed: ${TRUNCATED_JSON_ERROR}`);
++		}
+ 
+-	const text = response.content
+-		.filter((content): content is { type: "text"; text: string } => content.type === "text")
+-		.map((content) => content.text)
+-		.join("\n");
+-	return { proposal: parseProposal(text), id };
++		const text = response.content
++			.filter((content): content is { type: "text"; text: string } => content.type === "text")
++			.map((content) => content.text)
++			.join("\n");
++		try {
++			return { proposal: parseProposal(text), id };
++		} catch (error) {
++			if (attempt > 0 || signal?.aborted) throw error;
++		}
++	}
+ }
+ 
+ function parseAutoRefineReview(text: string): AutoRefineReview {
+@@ -1370,36 +1377,43 @@ ${conversation}
+ 		reasoning === "off"
+ 			? Math.min(requestModel.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS)
+ 			: requestModel.maxTokens;
+-	const response = await completeWithProviderRetry(
+-		() =>
+-			completeSimple(
+-				requestModel,
+-				{
+-					systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
+-					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+-				},
+-				{
+-					reasoning,
+-					maxTokens,
+-					signal,
+-					apiKey,
+-					headers,
+-					sessionId,
+-				},
+-			),
+-		{ policy: retry, signal },
+-	);
+-	if (response.stopReason === "error") {
+-		throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);
+-	}
+-	if (response.stopReason === "length") {
+-		throw new Error(`Auto-refine review failed: ${TRUNCATED_JSON_ERROR}`);
++	// A sampled reply can miss the JSON shape (prose, leaked tool-call markup), so resend once.
++	for (let attempt = 0; ; attempt++) {
++		const response = await completeWithProviderRetry(
++			() =>
++				completeSimple(
++					requestModel,
++					{
++						systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
++						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
++					},
++					{
++						reasoning,
++						maxTokens,
++						signal,
++						apiKey,
++						headers,
++						sessionId,
++					},
++				),
++			{ policy: retry, signal },
++		);
++		if (response.stopReason === "error") {
++			throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);
++		}
++		if (response.stopReason === "length") {
++			throw new Error(`Auto-refine review failed: ${TRUNCATED_JSON_ERROR}`);
++		}
++		const text = response.content
++			.filter((content): content is { type: "text"; text: string } => content.type === "text")
++			.map((content) => content.text)
++			.join("\n");
++		try {
++			return parseAutoRefineReview(text);
++		} catch (error) {
++			if (attempt > 0 || signal?.aborted) throw error;
++		}
+ 	}
+-	const text = response.content
+-		.filter((content): content is { type: "text"; text: string } => content.type === "text")
+-		.map((content) => content.text)
+-		.join("\n");
+-	return parseAutoRefineReview(text);
+ }
+ 
+ export async function refineHarness(

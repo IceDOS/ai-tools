@@ -1,0 +1,11 @@
+
+# Shared AI agent rules: name = markdown. Every agent module in this repo
+# loads them (prime-agent as system-prompt extensions, antigravity as
+# ~/.gemini/config/rules/<name>.md, opencode as instructions), and claude-code
+# gets them as ~/.claude/rules/<name>.md. A per-agent rule of the same name wins.
+[icedos.ai-tools.rules]
+
+# Shared AI agent skills: name = full SKILL.md content (frontmatter included).
+# Written for claude-code, antigravity, opencode and prime-agent. A per-agent
+# skill of the same name wins.
+[icedos.ai-tools.skills]

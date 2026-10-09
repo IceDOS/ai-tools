@@ -1,0 +1,18 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "KPlugin": {
+    "Id": "org.icedos.alimit",
+    "Name": "alimit",
+    "Description": "AI usage limits and burn rate across agents and providers",
+    "Icon": "speedometer",
+    "Category": "System Information",
+    "Version": "0.1.0",
+    "License": "MIT",
+    "Authors": [
+      {
+        "Name": "IceDOS"
+      }
+    ]
+  },
+  "X-Plasma-API-Minimum-Version": "6.0"
+}

@@ -1,0 +1,21 @@
+--- a/packages/coding-agent/src/modes/daemon/daemon-supervisor-ownership.ts
++++ b/packages/coding-agent/src/modes/daemon/daemon-supervisor-ownership.ts
+@@ -316,7 +316,17 @@
+  * per-invocation agent dir.
+  */
+ function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
+-	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV] ?? join(homedir(), ".prime", "supervisor-owners");
++	const overridden = environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV];
++	if (overridden) return overridden;
++	// IceDOS: follow the agent data dir (PRIME_AGENT_CODING_AGENT_DIR) so the
++	// per-user registry lives under the configured dataDir, keeping ~/.prime empty.
++	const agentDir = environment.PRIME_AGENT_CODING_AGENT_DIR;
++	if (agentDir) {
++		const expanded =
++			agentDir === "~" ? homedir() : agentDir.startsWith("~/") ? join(homedir(), agentDir.slice(2)) : agentDir;
++		return join(expanded, "supervisor-owners");
++	}
++	return join(homedir(), ".prime", "supervisor-owners");
+ }
+
+ /** Read-only legacy registry location, disabled when the registry is overridden. */

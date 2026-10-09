@@ -1,0 +1,30 @@
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -12066,6 +12066,15 @@
+ 						}
+ 						touchRlmChildActivity(run);
+ 						emitChildUpdate();
++					} else if (event.type === "auto_retry_start") {
++						// Surface provider retries and quota waits in the parent's collect/list snapshots.
++						const note = `provider retry ${event.attempt}/${event.maxAttempts} in ${Math.ceil(event.delayMs / 1000)}s: ${event.errorMessage}`;
++						run.progressNotes.push(note.slice(0, 512));
++						if (run.progressNotes.length > RLM_CHILD_PROGRESS_NOTE_RING_MAX) {
++							run.progressNotes.shift();
++						}
++						touchRlmChildActivity(run);
++						emitChildUpdate();
+ 					} else if (event.type === "message_end" && event.message.role === "assistant") {
+ 						const assistant = event.message as AssistantMessage;
+ 						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
+@@ -12150,6 +12159,11 @@
+ 				});
+ 				await child.waitForRlmQuiescence();
+ 				if (run.error) throw new Error(run.error);
++				// A provider error ends the turn without throwing; report it as a failure unless the child already replied.
++				const lastAssistant = [...child.messages].reverse().find((m) => m.role === "assistant") as AssistantMessage | undefined;
++				if (lastAssistant?.stopReason === "error" && child._parentReplyCount === parentReplyCountBeforeRun) {
++					throw new Error(lastAssistant.errorMessage || "child turn ended with a provider error");
++				}
+ 				run.status = "done";
+ 				// Only successful completions return; the edge lands on the parent's next commit.
+ 				const childLastCommitted = child.semanticEdges.lastCommittedRequestId;

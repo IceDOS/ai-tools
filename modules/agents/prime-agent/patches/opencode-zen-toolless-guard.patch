@@ -1,0 +1,80 @@
+diff --git a/packages/ai/src/providers/openai-completions.ts b/packages/ai/src/providers/openai-completions.ts
+index 532d28d..1e57687 100644
+--- a/packages/ai/src/providers/openai-completions.ts
++++ b/packages/ai/src/providers/openai-completions.ts
+@@ -35,13 +35,16 @@ import { AssistantMessageEventStream } from "../utils/event-stream.js";
+ import { headersToRecord } from "../utils/headers.js";
+ import { parseStreamingJson } from "../utils/json-parse.js";
+ import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+-import { recordStreamFailure } from "../utils/stream-failure.js";
++import { recordStreamFailure, StreamFailureError } from "../utils/stream-failure.js";
+ import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
+ import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
+ import {
++	hasLeakedToolCallMarkup,
+ 	isOpenCodeProvider,
+ 	missingOpenCodeTools,
+ 	OPENCODE_STUB_TOOL_DESCRIPTION,
++	OPENCODE_TOOLLESS_STUB_DESCRIPTION,
++	OPENCODE_TOOLLESS_SYSTEM_NOTE,
+ 	withOpenCodeHeaders,
+ } from "./opencode-headers.js";
+ import { applyServiceTierPricing } from "./service-tier-pricing.js";
+@@ -486,6 +489,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
+ 			if (output.stopReason === "error") {
+ 				throw new Error(output.errorMessage || "Provider returned an error stop reason");
+ 			}
++			if (
++				isOpenCodeProvider(model.provider) &&
++				!context.tools?.length &&
++				output.content.some((block) => block.type === "text" && hasLeakedToolCallMarkup(block.text))
++			) {
++				throw new StreamFailureError("Model emitted a tool call on a tool-less request", {
++					kind: "malformed_response",
++				});
++			}
+ 
+ 			stream.push({ type: "done", reason: output.stopReason, message: output });
+ 			stream.end();
+@@ -663,12 +675,20 @@ function buildParams(
+ 					type: "function" as const,
+ 					function: {
+ 						name,
+-						description: OPENCODE_STUB_TOOL_DESCRIPTION,
++						description: hadTools ? OPENCODE_STUB_TOOL_DESCRIPTION : OPENCODE_TOOLLESS_STUB_DESCRIPTION,
+ 						parameters: { type: "object", properties: {} },
+ 					},
+ 				})),
+ 			];
+-			if (!hadTools) params.tool_choice = "none";
++			if (!hadTools) {
++				params.tool_choice = "none";
++				const system = messages.find((message) => message.role === "system" || message.role === "developer");
++				if (system && typeof system.content === "string") {
++					system.content += `\n\n${OPENCODE_TOOLLESS_SYSTEM_NOTE}`;
++				} else {
++					messages.unshift({ role: "system", content: OPENCODE_TOOLLESS_SYSTEM_NOTE });
++				}
++			}
+ 		}
+ 	}
+ 
+diff --git a/packages/ai/src/providers/opencode-headers.ts b/packages/ai/src/providers/opencode-headers.ts
+index 1f8946f..4a62baf 100644
+--- a/packages/ai/src/providers/opencode-headers.ts
++++ b/packages/ai/src/providers/opencode-headers.ts
+@@ -29,3 +29,14 @@ export function missingOpenCodeTools(present: Iterable<string>): string[] {
+ 	const have = new Set(present);
+ 	return OPENCODE_REQUIRED_TOOLS.filter((name) => !have.has(name));
+ }
++
++// Stubs on a tool-less request exist only to pass zen's check; the model must answer in text.
++export const OPENCODE_TOOLLESS_STUB_DESCRIPTION = "Unavailable. Never call this tool; reply with plain text only.";
++
++export const OPENCODE_TOOLLESS_SYSTEM_NOTE =
++	"No tools are available for this request. Reply with plain text only and never emit tool calls.";
++
++// DeepSeek-based zen models (big-pickle) can ignore tool_choice "none" and leak DSML tool-call markup as text.
++export function hasLeakedToolCallMarkup(text: string): boolean {
++	return text.includes("｜DSML｜");
++}

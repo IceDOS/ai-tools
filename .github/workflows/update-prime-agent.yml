@@ -1,0 +1,21 @@
+name: Update prime-agent
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml. The
+# updater opens a PR and cache-server's external build gates the merge, so this
+# repo's main only advances after a green build.
+on:
+  schedule:
+    # GitHub may delay or skip scheduled runs, and they only run on the default branch.
+    - cron: "20 3 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: prime-agent
+      paths: modules/agents/prime-agent
+      command: nix-shell modules/agents/prime-agent/update.sh
+      version-file: modules/agents/prime-agent/source.json
+    secrets: inherit

@@ -1,0 +1,15 @@
+diff --git a/packages/coding-agent/src/core/provider-model-catalog.ts b/packages/coding-agent/src/core/provider-model-catalog.ts
+index 9beaaa5..dfecd89 100644
+--- a/packages/coding-agent/src/core/provider-model-catalog.ts
++++ b/packages/coding-agent/src/core/provider-model-catalog.ts
+@@ -24,5 +24,10 @@ export function parseProviderModelCatalog(payload: unknown, bundledModels: reado
+ 		});
+ 	}
+ 	if (models.length === 0) throw new Error("Catalog has no models supported by this client");
++	// Keep installed providers the catalog does not list (the patched-in Ollama Cloud).
++	const listed = new Set(catalog.models.map((model) => model.provider));
++	for (const model of bundledModels) {
++		if (model.provider !== "prime-inference" && !listed.has(model.provider)) models.push(model);
++	}
+ 	return models;
+ }

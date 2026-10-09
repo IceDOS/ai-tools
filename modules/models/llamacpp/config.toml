@@ -1,0 +1,90 @@
+[icedos.ai-tools.llamacpp]
+# [{ url, hash }] for fetchpatch. Prefer commit URLs: a PR .diff changes on every push, breaking its hash.
+patches = []
+
+# Usernames, or "all", allowed the negative nice that priority.process needs. Applies at next login.
+priorityUsers = []
+
+service = false
+
+# Starts the server when prime-agent uses its model and stops it after `idle` seconds of idle /slots.
+# Needs the prime-agent module and settings.model.path.
+[icedos.ai-tools.llamacpp.lifecycle]
+enable = true
+
+# 0 never stops the server.
+idle = 300
+
+[icedos.ai-tools.llamacpp.settings]
+flashAttn = false
+gpuLayers = 99
+threads = -1
+
+[icedos.ai-tools.llamacpp.settings.batch]
+size = 2048
+ubatchSize = 512
+
+[icedos.ai-tools.llamacpp.settings.cache]
+typeK = ""
+typeV = ""
+
+[icedos.ai-tools.llamacpp.settings.mmproj]
+offload = true
+path = ""
+
+[icedos.ai-tools.llamacpp.settings.model]
+contextSize = 4096
+
+# Output cap per response.
+maxTokens = 16384
+
+# Display name; defaults to the file name of path, which is also the model id.
+name = ""
+
+path = ""
+
+# Whether the model emits reasoning content.
+reasoning = true
+
+# Maps prime-agent thinking levels to the reasoning_effort this model accepts; unmapped levels pass through.
+[icedos.ai-tools.llamacpp.settings.model.thinking-level-map]
+
+# llama.cpp --prio (-1 to 3) and --prio-batch (0 to 3).
+[icedos.ai-tools.llamacpp.settings.priority]
+process = 2
+batch = 3
+
+[icedos.ai-tools.llamacpp.settings.reasoning]
+budgetDivider = 1.25
+preserve = true
+
+[icedos.ai-tools.llamacpp.settings.server]
+host = "127.0.0.1"
+port = 8080
+
+# Server slots; 0 lets llama.cpp choose. Each draft-mtp slot gets its own draft context, so 1 saves VRAM.
+parallel = 0
+
+# Idle seconds before the server unloads the model (~13 GiB freed, ~34 s to wake); -1 or 0 disables.
+# Conflicts with lifecycle, whose /slots polling keeps waking the server.
+sleepIdleSeconds = -1
+
+# llama.cpp --spec-type list: ngram-* need no draft model, draft-mtp uses the model's MTP layers.
+[icedos.ai-tools.llamacpp.settings.spec]
+type = "" # e.g. "ngram-simple"
+
+# nMax and pMin at 0 keep llama.cpp's defaults (n-max 3, p-min 0.00). sampling "probabilistic"
+# verifies the draft by rejection sampling instead of matching its argmax, which holds acceptance
+# up when sampling above temperature 0; it needs the #27694 patch, and "" leaves the flag off.
+[icedos.ai-tools.llamacpp.settings.spec.draft]
+nMax = 0
+pMin = 0
+sampling = ""
+
+[icedos.ai-tools.llamacpp.settings.vulkan]
+disableHostVisibleVidmem = false
+radvNoGttSpill = false
+
+# Skills for this module, name = full SKILL.md content. Added to the shared
+# icedos.ai-tools.skills pool, so every agent loads them.
+[icedos.ai-tools.llamacpp.skills]
