@@ -2,12 +2,7 @@
 # Install a desktop entry that launches the interactive TUI in the default
 # terminal (Terminal=true, so the desktop environment picks the user's
 # preferred terminal emulator).
-desktopEntry = true
-
-# Spawn this agent in a new Zed agent-panel terminal (agent.terminal_init_command
-# = "prime-agent", ctrl-n in the agent panel) instead of using ACP. Only applies
-# when the zed module is loaded.
-zedAgentPanelTerminal = true
+desktopEntry = false
 
 # Whether `icedos gc` prunes stale prime-agent session data.
 includeInIcedosGc = false

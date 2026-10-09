@@ -271,11 +271,6 @@ in
               }) ids
             );
 
-          hasZed = icedosLib.hasModule {
-            inherit config;
-            url = "github:icedos/apps";
-            name = "zed";
-          };
         in
         {
           # Rule 1 (core/AGENTS.md): fill every normal user so marketplaces get their defaults.
@@ -283,15 +278,14 @@ in
             inherit (config.icedos) users;
           };
 
-          icedos.applications = lib.optionalAttrs hasZed {
-            zed.agentBridge.agents.claude = {
-              command = lib.mkDefault [ "claude" ];
-              resumeArgs = lib.mkDefault [
-                "--resume"
-                "{id}"
-              ];
-              locator = lib.mkDefault "claude";
-            };
+          icedos.ai-tools.agent-launch.agents.claude = {
+            command = lib.mkDefault [ "claude" ];
+            resumeArgs = lib.mkDefault [
+              "--resume"
+              "{id}"
+            ];
+            locator = lib.mkDefault "claude";
+            label = lib.mkDefault "Claude Code";
           };
 
           # `icedos gc` prunes stale claude session data per user (unshade-style).
@@ -391,5 +385,8 @@ in
       )
     ];
 
-  meta.name = "claude-code";
+  meta = {
+    name = "claude-code";
+    dependencies = [ { modules = [ "agent-launch" ]; } ];
+  };
 }

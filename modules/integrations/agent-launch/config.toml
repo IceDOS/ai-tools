@@ -1,0 +1,12 @@
+[icedos.ai-tools.agent-launch]
+# Agent started without asking; "" = show the fzf picker every time.
+defaultAgent = ""
+
+# Whether the launcher shows an "Agent Launcher" entry that opens in the default terminal.
+desktopEntry = true
+
+# Agents in the picker, filled by the agent modules. Each entry:
+# command = argv, label = picker text ("" = title-cased name),
+# resumeArgs = extra argv to resume a session ("{id}" = session ID),
+# locator = session store name, used by extensions such as the zed agent bridge.
+[icedos.ai-tools.agent-launch.agents]

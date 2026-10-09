@@ -12,6 +12,7 @@
         ;
 
       inherit ((importTOML ./config.toml).icedos.ai-tools.antigravity)
+        desktopEntry
         enableMcpIntegration
         extraMcpServers
         peonPing
@@ -23,6 +24,9 @@
         ;
     in
     {
+      # Whether the launcher installs a desktop entry opening in the default terminal.
+      desktopEntry = mkBoolOption { default = desktopEntry; };
+
       # Whether to wire Home Manager's shared programs.mcp.servers registry
       # into ~/.gemini/config/mcp_config.json for Antigravity.
       enableMcpIntegration = mkBoolOption { default = enableMcpIntegration; };
@@ -69,6 +73,7 @@
 
         let
           inherit (config.icedos.ai-tools.antigravity)
+            desktopEntry
             enableMcpIntegration
             extraMcpServers
             peonPing
@@ -144,23 +149,17 @@
             ++ lib.optional (!statusLine) "--no-bar"
           );
 
-          hasZed = icedosLib.hasModule {
-            inherit config;
-            url = "github:icedos/apps";
-            name = "zed";
-          };
         in
         {
-          icedos.applications = lib.optionalAttrs hasZed {
-            zed.agentBridge.agents.antigravity = {
-              command = lib.mkDefault [ "agy" ];
-              resumeArgs = lib.mkDefault [
-                "--conversation"
-                "{id}"
-              ];
-              locator = lib.mkDefault "antigravity";
-              label = lib.mkDefault "Antigravity CLI";
-            };
+          icedos.ai-tools.agent-launch.agents.antigravity = {
+            # agy is not on PATH; this module only wires its config.
+            command = lib.mkDefault [ "${pkgs.antigravity-cli}/bin/agy" ];
+            resumeArgs = lib.mkDefault [
+              "--conversation"
+              "{id}"
+            ];
+            locator = lib.mkDefault "antigravity";
+            label = lib.mkDefault "Antigravity CLI";
           };
 
           home-manager.sharedModules = [
@@ -227,6 +226,19 @@
                   name: text: nameValuePair ".gemini/antigravity-cli/skills/${name}/SKILL.md" { inherit text; }
                 ) skills;
 
+                # Terminal=true: the desktop environment launches the user's default terminal.
+                xdg.desktopEntries.antigravity-cli = mkIf desktopEntry {
+                  name = "Antigravity CLI";
+                  comment = "AI coding assistant (terminal UI)";
+                  icon = "utilities-terminal";
+                  exec = "${pkgs.antigravity-cli}/bin/agy";
+                  terminal = true;
+                  categories = [
+                    "Development"
+                    "Utility"
+                  ];
+                };
+
                 # agy owns ~/.gemini/antigravity-cli/settings.json (it writes on settings
                 # changes), so Home Manager only merges/removes its statusLine key.
                 home.activation.icedosAntigravityStatusLine = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
@@ -267,5 +279,8 @@
       )
     ];
 
-  meta.name = "antigravity";
+  meta = {
+    name = "antigravity";
+    dependencies = [ { modules = [ "agent-launch" ]; } ];
+  };
 }

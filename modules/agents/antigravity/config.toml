@@ -8,6 +8,9 @@
 [icedos.ai-tools.antigravity.skills]
 
 [icedos.ai-tools.antigravity]
+# Whether the launcher shows a desktop entry that opens in the default terminal.
+desktopEntry = false
+
 # Whether to wire Home Manager's shared programs.mcp.servers registry
 # into ~/.gemini/config/mcp_config.json for Antigravity.
 enableMcpIntegration = true

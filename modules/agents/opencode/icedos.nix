@@ -11,6 +11,7 @@
       inherit (lib) importTOML;
 
       inherit ((importTOML ./config.toml).icedos.ai-tools.opencode)
+        desktopEntry
         extraSettings
         includeInIcedosGc
         peonPingOverrides
@@ -19,6 +20,9 @@
         ;
     in
     {
+      # Whether the launcher installs a desktop entry opening in the default terminal.
+      desktopEntry = mkBoolOption { default = desktopEntry; };
+
       extraSettings = mkAttrsOfOption { default = extraSettings; } lib.types.anything;
 
       # Merged on top of the resolved peon-ping user settings when generating
@@ -61,6 +65,7 @@
         let
           inherit (lib) recursiveUpdate;
           inherit (config.icedos.ai-tools.opencode)
+            desktopEntry
             extraSettings
             includeInIcedosGc
             peonPingOverrides
@@ -128,6 +133,12 @@
           '';
         in
         {
+          # No locator: the zed agent bridge cannot resume opencode sessions yet.
+          icedos.ai-tools.agent-launch.agents.opencode = {
+            command = lib.mkDefault [ "opencode" ];
+            label = lib.mkDefault "OpenCode";
+          };
+
           # `icedos gc` prunes stale opencode data per user (unshade-style).
           icedos.system.gc.hooks.postGc = lib.mkIf includeInIcedosGc [ opencodeGcHook ];
           home-manager.sharedModules = [
@@ -172,6 +183,19 @@
                 xdg.configFile = lib.mapAttrs' (
                   name: text: lib.nameValuePair "opencode/rules/${name}.md" { inherit text; }
                 ) rules;
+
+                # Terminal=true: the desktop environment launches the user's default terminal.
+                xdg.desktopEntries.opencode = lib.mkIf desktopEntry {
+                  name = "OpenCode";
+                  comment = "AI coding assistant (terminal UI)";
+                  icon = "utilities-terminal";
+                  exec = lib.getExe config.programs.opencode.package;
+                  terminal = true;
+                  categories = [
+                    "Development"
+                    "Utility"
+                  ];
+                };
               }
             )
 
@@ -233,5 +257,8 @@
       )
     ];
 
-  meta.name = "opencode";
+  meta = {
+    name = "opencode";
+    dependencies = [ { modules = [ "agent-launch" ]; } ];
+  };
 }

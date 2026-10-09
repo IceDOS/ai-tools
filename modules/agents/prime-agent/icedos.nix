@@ -21,7 +21,6 @@
         providers
         sessionRetentionDays
         terminalTitle
-        zedAgentPanelTerminal
         ;
 
       defaults = (importTOML ./config.toml).icedos.ai-tools.prime-agent.default;
@@ -54,10 +53,6 @@
         source = ./config.toml;
         default = sessionRetentionDays;
       } 1 3650;
-
-      # Spawn this agent in a new Zed agent-panel terminal (agent.terminal_init_command
-      # = "prime-agent", ctrl-n in the agent panel) instead of using ACP.
-      zedAgentPanelTerminal = mkBoolOption { default = zedAgentPanelTerminal; };
 
       # Status glyph ahead of the terminal title. Working frames cycle per pulse tick
       # (repeat one to hold it longer); give every glyph the same width in the title font.
@@ -415,13 +410,6 @@
           # peon-ping is a standalone module and may not be loaded at all.
           peonPingEnabled = (config.icedos.ai-tools.peon-ping.users or { }) != { };
 
-          # zed is a standalone module; only wire the panel terminal when loaded.
-          hasZed = icedosLib.hasModule {
-            inherit config;
-            url = "github:icedos/apps";
-            name = "zed";
-          };
-
           # Prune stale prime-agent session data during `icedos gc`.
           primeAgentGcHook = ''
             D='${prime-agent.settings.dataDir}'
@@ -552,20 +540,14 @@
             inherit (config.icedos) users;
           };
 
-          # Spawn this agent in a new Zed agent-panel terminal (Ctrl+N) instead of using
-          # ACP; the zed module owns the agent.terminal_init_command wiring. optionalAttrs,
-          # not mkIf: mkIf still resolves the option path, which fails without zed.
-          icedos.applications = lib.optionalAttrs hasZed {
-            zed.terminalInitCommand = mkIf prime-agent.zedAgentPanelTerminal (lib.mkDefault "prime-agent");
-            zed.agentBridge.agents.prime-agent = {
-              command = lib.mkDefault [ "prime-agent" ];
-              resumeArgs = lib.mkDefault [
-                "--resume"
-                "{id}"
-              ];
-              locator = lib.mkDefault "prime-agent";
-              label = lib.mkDefault "Prime Agent";
-            };
+          icedos.ai-tools.agent-launch.agents.prime-agent = {
+            command = lib.mkDefault [ "prime-agent" ];
+            resumeArgs = lib.mkDefault [
+              "--resume"
+              "{id}"
+            ];
+            locator = lib.mkDefault "prime-agent";
+            label = lib.mkDefault "Prime Agent";
           };
 
           # `icedos gc` prunes stale prime-agent sessions per user (unshade-style).
@@ -1528,5 +1510,8 @@
 
     ];
 
-  meta.name = "prime-agent";
+  meta = {
+    name = "prime-agent";
+    dependencies = [ { modules = [ "agent-launch" ]; } ];
+  };
 }

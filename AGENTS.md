@@ -15,8 +15,8 @@
 ## Purpose
 AI agents, local model servers and their glue: `claude-code`, `antigravity`, `opencode`, `prime-agent`
 (agents), `llamacpp`, `ollama` (model servers), `peon-ping` (agent-event audio),
-`mcp-server` (`icedos mcp serve`), `alimit` (usage limits for every agent and provider) and
-`code-intelligence` (per-language LSP skills).
+`mcp-server` (`icedos mcp serve`), `alimit` (usage limits for every agent and provider),
+`agent-launch` (fzf agent picker) and `code-intelligence` (per-language LSP skills).
 
 ## Namespace
 Every option here lives under `icedos.ai-tools`: the shared `rules` and `skills`, and one
@@ -27,7 +27,7 @@ attrset per module (`icedos.ai-tools.prime-agent`, ...).
 `icedosLib.scanModules { path = ./modules; filename = "icedos.nix"; }`, which recurses, and
 `meta.name` (not the folder) names the module. The categories are `agents` (antigravity,
 claude-code, opencode, prime-agent), `models` (llamacpp, ollama), `mcp` (icedos-mcp, whose
-module name is `mcp-server`) and `integrations` (alimit, code-intelligence, peon-ping).
+module name is `mcp-server`) and `integrations` (agent-launch, alimit, code-intelligence, peon-ping).
 `modules/default` loads whenever the repo is listed and owns the shared options.
 
 ## Shared options (`icedos.ai-tools.*`)
@@ -43,6 +43,12 @@ module name is `mcp-server`) and `integrations` (alimit, code-intelligence, peon
   `prime-agent.skills.extraBuiltin`).
 - Non-agent modules (`llamacpp`, `ollama`, `peon-ping`, `mcp-server`) have a `skills`
   option that adds to `icedos.ai-tools.skills`, so a skill ships with the module it documents.
+
+## Agent registry
+`agent-launch` owns `icedos.ai-tools.agent-launch.agents.<name>` (`command`, `label`,
+`resumeArgs`, `locator`) and the `agent-launch` fzf picker. Every agent module lists it in
+`meta.dependencies` and registers itself there. Don't set `zed.terminalInitCommand` from an
+agent module: zed's agent bridge extends agent-launch and reads this registry.
 
 ## Cross-repo checks
 `zed` stays in `apps`, so `hasModule` calls for it pass `url = "github:icedos/apps"`

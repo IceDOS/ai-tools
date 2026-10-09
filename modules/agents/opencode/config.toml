@@ -7,5 +7,8 @@
 [icedos.ai-tools.opencode]
 includeInIcedosGc = false
 
+# Whether the launcher shows a desktop entry that opens in the default terminal.
+desktopEntry = false
+
 # Retain runtime files/logs newer than this many days when GC runs.
 sessionRetentionDays = 30
