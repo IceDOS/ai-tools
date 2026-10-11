@@ -60,7 +60,7 @@ class MainTest(unittest.TestCase):
         out = io.StringIO()
         with redirect_stdout(out):
             self.assertEqual(al.main(["--config", self.cfg, "--print"]), 0)
-        self.assertEqual(json.loads(out.getvalue()), {"agent": "prime-agent", "argv": ["prime-agent"]})
+        self.assertEqual(json.loads(out.getvalue()), {"agent": "prime-agent", "argv": ["prime-agent"], "account": None, "env": {}})
 
     def test_launch_execs_agent(self):
         with mock.patch.object(al.os, "execvp") as execvp:
@@ -70,3 +70,42 @@ class MainTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+ROWS = [
+    {"account": "default", "label": "default", "loggedIn": True, "maxUtil": 80.0, "sticky": False, "next": False},
+    {"account": "work", "label": "Work", "loggedIn": True, "maxUtil": 10.0, "sticky": False, "next": True},
+]
+
+
+class AccountStepTest(unittest.TestCase):
+    def test_no_accounts_skips(self):
+        self.assertIsNone(al.pick_account("claude", lister=lambda n: [], picker=mock.Mock()))
+
+    def test_single_account_skips(self):
+        picker = mock.Mock()
+        self.assertIsNone(al.pick_account("claude", lister=lambda n: ROWS[:1], picker=picker))
+        picker.assert_not_called()
+
+    def test_picker_lines_and_choice(self):
+        seen = {}
+
+        def picker(lines):
+            seen["lines"] = lines
+            return lines[1]
+
+        self.assertEqual(al.pick_account("claude", lister=lambda n: ROWS, picker=picker), "work")
+        self.assertIn("10%", seen["lines"][1])
+        self.assertIn("(auto)", seen["lines"][1])
+
+    def test_print_includes_account_env(self):
+        cfg = {"defaultAgent": "claude", "agents": AGENTS}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(cfg, f)
+        buf = io.StringIO()
+        with mock.patch.object(al, "pick_account", return_value="work"), redirect_stdout(buf):
+            al.main(["--config", f.name, "--print"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["account"], "work")
+        self.assertEqual(out["env"], {"AI_ACCOUNT_CLAUDE": "work"})
+

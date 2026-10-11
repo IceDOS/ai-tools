@@ -68,3 +68,35 @@ class TestWindowClassification(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAccountKeys(unittest.TestCase):
+    def test_split_and_with_account_roundtrip(self):
+        cases = [
+            ("five_hour", "work", "claude@work/five_hour"),
+            ("weekly_scoped:claude_opus_4.5", "work", "claude@work/weekly_scoped:claude_opus_4.5"),
+            ("ollama/weekly", "home", "ollama@home/weekly"),
+            ("opencode-go/rolling", "opencode.work", "opencode-go@opencode.work/rolling"),
+        ]
+        for base, tag, key in cases:
+            self.assertEqual(config.with_account(base, tag), key)
+            self.assertEqual(config.split_account(key), (base, tag))
+
+    def test_default_keys_unchanged(self):
+        self.assertEqual(config.with_account("five_hour", "default"), "five_hour")
+        self.assertEqual(config.split_account("ollama/weekly"), ("ollama/weekly", "default"))
+        self.assertEqual(config.split_account("five_hour"), ("five_hour", "default"))
+
+    def test_provider_of_ignores_account(self):
+        self.assertEqual(config.provider_of("ollama@home/weekly"), "ollama")
+        self.assertEqual(config.provider_of("claude@work/five_hour"), "claude")
+
+    def test_label_appends_account(self):
+        self.assertEqual(config.label("claude@work/five_hour"), config.label("five_hour") + " · work")
+        self.assertTrue(config.is_known_window("claude@work/five_hour"))
+        self.assertFalse(config.is_known_window("claude@work/bogus"))
+
+    def test_account_tag(self):
+        self.assertEqual(config.account_tag("claude", "work"), "work")
+        self.assertEqual(config.account_tag("opencode", "work"), "opencode.work")
+        self.assertEqual(config.account_tag("ollama", "default"), "default")

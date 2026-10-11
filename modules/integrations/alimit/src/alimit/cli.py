@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-from . import __version__, config, poller, sources, speed, store
+from . import __version__, accounts, config, poller, sources, speed, store
 from .rates import compute, to_ms
 
 
@@ -83,25 +83,46 @@ def _col_width() -> int:
     return max(10, min(cols, 108) // len(METRIC_LABELS))
 
 
-def collect(con, now_ms: int, lookback: int = 60, providers=None):
+def collect(con, now_ms: int, lookback: int = 60, providers=None, tags=None):
     """The windows and rates every surface shows (terminal, widget, status line, alerts).
 
-    Claude's windows come first, then each other provider's; `providers` limits the list."""
-    present = [
-        w for w in store.windows_present(con)
-        if config.is_known_window(w) and (not providers or config.provider_of(w) in providers)
-    ]
+    Claude's default windows come first, then Claude accounts, then each other provider's;
+    `providers` limits the list and `tags` keeps one account per provider."""
+    def keep(w):
+        p = config.provider_of(w)
+        if providers and p not in providers:
+            return False
+        return tags is None or config.split_account(w)[1] == tags.get(p, "default")
+
+    present = [w for w in store.windows_present(con) if config.is_known_window(w) and keep(w)]
     order = [w for w in config.WINDOW_ORDER if w in present]
     scoped = sorted(
         (w for w in present if w.startswith(config.WEEKLY_SCOPED_PREFIX)),
         key=lambda w: config.window_display_name(w),
     )
+
+    def claude_rank(w):
+        base = config.split_account(w)[0]
+        idx = config.WINDOW_ORDER.index(base) if base in config.WINDOW_ORDER else len(config.WINDOW_ORDER)
+        return (config.split_account(w)[1], idx, config.window_display_name(base))
+
+    claude_accounts = sorted(
+        (w for w in present if config.provider_of(w) == "claude" and config.split_account(w)[1] != "default"),
+        key=claude_rank,
+    )
     others = sorted(
         (w for w in present if config.provider_of(w) != "claude"),
-        key=lambda w: (list(config.PROVIDERS).index(config.provider_of(w)), config.provider_window_rank(w), w),
+        key=lambda w: (
+            list(config.PROVIDERS).index(config.provider_of(w)),
+            config.split_account(w)[1] != "default",
+            config.split_account(w)[1],
+            config.provider_window_rank(w),
+            w,
+        ),
     )
+    present_order = order + scoped + claude_accounts + others
     out = []
-    for w in store.prune_retired(con, order + scoped + others, now_ms):
+    for w in store.prune_retired(con, present_order, now_ms):
         rows = store.samples_for(con, w, since_ts=now_ms - config.HISTORY_MS)
         r = compute(w, rows, now_ms, lookback_min=lookback)
         if r:
@@ -145,7 +166,12 @@ def _metric_values(r, now_ms: int):
     )
 
 
-def render_section(r, now_ms: int, col: int) -> str:
+def _mark(r, marks) -> str:
+    key = accounts.agent_account(r.window)
+    return (marks or {}).get(key, "") if key else ""
+
+
+def render_section(r, now_ms: int, col: int, mark: str = "") -> str:
     """One window as a block: heading + used%, full-width bar, metric strip.
 
     Mirrors the Plasma widget's popup (plasmoid/contents/ui/main.qml).
@@ -153,7 +179,7 @@ def render_section(r, now_ms: int, col: int) -> str:
     code = _util_code(r.util)
     width = col * len(METRIC_LABELS)
 
-    name = config.label(r.window) + (" ·stale" if r.stale else "")
+    name = config.label(r.window) + (f" {mark}" if mark else "") + (" ·stale" if r.stale else "")
     used = f"{r.util:.0f}%"
     warn = "⚠ hits cap before reset" if r.will_exhaust_before_reset else ""
     # pad on the plain text, colour afterwards, so the escapes never shift columns
@@ -170,7 +196,7 @@ def render_section(r, now_ms: int, col: int) -> str:
     return "\n".join([head, _c(code, bar(r.util, width)), "", _c("2", labels), "".join(cells)])
 
 
-def render_table(rlist, now_ms: int) -> str:
+def render_table(rlist, now_ms: int, marks=None) -> str:
     rlist = shown(rlist)
     if not rlist:
         return "no usage yet. Run Claude Code, or check `systemctl --user status alimit.timer`."
@@ -180,7 +206,7 @@ def render_table(rlist, now_ms: int) -> str:
     for reset_ts, rates in group_by_reset(rlist):
         title = f"{_reset_word(rates)} {fmt_dur(reset_ts - now_ms)} " if reset_ts else "no reset "
         blocks.append(_c("2", title + "─" * max(0, width - len(title))))
-        blocks.append("\n\n".join(render_section(r, now_ms, col) for r in rates))
+        blocks.append("\n\n".join(render_section(r, now_ms, col, _mark(r, marks)) for r in rates))
     return "\n\n".join(blocks)
 
 
@@ -451,7 +477,7 @@ def render_cross(rlist) -> str | None:
     return _c("2", line)
 
 
-def render_json(rlist, now_ms: int) -> str:
+def render_json(rlist, now_ms: int, marks=None) -> str:
     cross = cross_metric(rlist)
     rlist = shown(rlist)
     group_of = {r.window: i for i, (_, rates) in enumerate(group_by_reset(rlist)) for r in rates}
@@ -466,6 +492,8 @@ def render_json(rlist, now_ms: int) -> str:
                     "short_label": config.short_label(r.window),
                     "bar_label": _bar_label(r.window, single),
                     "reset_group": group_of[r.window],
+                    "account": config.split_account(r.window)[1],
+                    "mark": _mark(r, marks),
                 }
                 for r in rlist
             ],
@@ -480,12 +508,13 @@ def cmd_status(args) -> int:
     con = store.connect()
     now = _now_ms()
     rlist = collect(con, now, lookback=args.lookback, providers=_providers(args))
+    marks = accounts.marks(con, now)
     if args.json:
-        print(render_json(rlist, now))
+        print(render_json(rlist, now, marks=marks))
     elif args.statusline:
         print(render_statusline(rlist, now))
     else:
-        print(render_table(rlist, now))
+        print(render_table(rlist, now, marks=marks))
         cross = render_cross(rlist)
         if cross:
             print()
@@ -500,10 +529,11 @@ def cmd_watch(args) -> int:
         while True:
             now = _now_ms()
             rlist = collect(con, now, lookback=args.lookback)
+            marks = accounts.marks(con, now)
             sys.stdout.write("\033[2J\033[H")
             print(_c("2", f"{time.strftime('%H:%M:%S')}   "
                           f"(refresh {refresh}s · Ctrl-C to quit)\n"))
-            print(render_table(rlist, now))
+            print(render_table(rlist, now, marks=marks))
             cross = render_cross(rlist)
             if cross:
                 print()
@@ -534,6 +564,8 @@ def _record_payload(con, agent: str, payload, now: int) -> None:
         windows = providers.PAYLOAD_PARSERS[agent](payload, now)
     # An idle session keeps its last windows; once one has reset it is history.
     windows = {k: w for k, w in windows.items() if (to_ms(w["resets_at"]) or now + 1) > now}
+    tags = accounts.env_tags() or {}
+    windows = {config.with_account(k, tags.get(config.provider_of(k), "default")): w for k, w in windows.items()}
     if windows:
         store.record(con, now, windows, "statusline")
 
@@ -555,14 +587,14 @@ def cmd_statusline(args) -> int:
     now = _now_ms()
     con = store.connect()
     _record_payload(con, args.agent, payload, now)
-    rlist = collect(con, now, providers=_providers(args, {args.agent}))
+    rlist = collect(con, now, providers=_providers(args, {args.agent}), tags=accounts.env_tags())
     print(render_prompt(payload, rlist, now, agent=args.agent))
     return 0
 
 
 def cmd_bar(args) -> int:
     now = _now_ms()
-    print(render_bar(collect(store.connect(), now, providers=_providers(args)), now))
+    print(render_bar(collect(store.connect(), now, providers=_providers(args), tags=accounts.env_tags()), now))
     return 0
 
 
@@ -593,8 +625,22 @@ def cmd_poll(args) -> int:
 def cmd_contrib(args) -> int:
     from . import contrib
 
-    acc = contrib.analyze(hours=args.hours)
+    root = accounts.state_dir() / "claude" / args.account / "projects" if args.account else None
+    acc = contrib.analyze(hours=args.hours, root=root)
     print(contrib.to_json(acc, args.hours) if args.json else contrib.render(acc, args.hours))
+    return 0
+
+
+def cmd_headroom(args) -> int:
+    con = store.connect()
+    now = _now_ms()
+    names = [n for n in args.eligible.split(",") if n]
+    rows = accounts.headroom(con, args.agent, names, now)
+    print(_json.dumps({
+        "agent": args.agent,
+        "pick": accounts.rank(rows, args.threshold, names),
+        "accounts": [dataclasses.asdict(r) for r in rows],
+    }))
     return 0
 
 
@@ -642,6 +688,12 @@ def build_parser() -> argparse.ArgumentParser:
     cb = sub.add_parser("contrib", help="what's contributing to your usage (local, approximate)")
     cb.add_argument("--hours", type=int, default=24, help="lookback window in hours (default 24)")
     cb.add_argument("--json", action="store_true", help="machine-readable output")
+    cb.add_argument("--account", help="an ai-accounts Claude account (default: the real ~/.claude)")
+
+    hr = sub.add_parser("headroom", help="per-account usage for ai-account's auto-pick, as JSON")
+    hr.add_argument("--agent", required=True, choices=sorted(config.AGENT_PROVIDERS))
+    hr.add_argument("--threshold", type=float, default=90)
+    hr.add_argument("--eligible", default="default", help="comma list of logged-in accounts, in preference order")
     return p
 
 
@@ -659,6 +711,7 @@ def main(argv=None) -> int:
         "record": cmd_record,
         "poll": cmd_poll,
         "contrib": cmd_contrib,
+        "headroom": cmd_headroom,
     }[args.cmd](args) or 0
 
 

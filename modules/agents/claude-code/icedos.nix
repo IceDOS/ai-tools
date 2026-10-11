@@ -97,7 +97,7 @@ in
   };
 
   outputs.nixosModules =
-    { ... }:
+    { repoUrl, ... }:
     [
       (
         {
@@ -123,6 +123,13 @@ in
             optionalAttrs
             unique
             ;
+
+          hasAccounts = import ../../integrations/ai-accounts/lib/has-accounts.nix { inherit lib; } config;
+          wrapAccounts = import ../../integrations/ai-accounts/lib/wrap.nix { inherit lib pkgs; };
+          aiAccountsOn = icedosLib.hasModule {
+            inherit config repoUrl;
+            name = "ai-accounts";
+          };
 
           claudeUsers = config.icedos.ai-tools.claude-code.users;
           gcDays = config.icedos.ai-tools.claude-code.sessionRetentionDays;
@@ -359,24 +366,35 @@ in
               { config, lib, ... }:
 
               {
-                programs.claude-code = {
-                  enable = lib.mkDefault true;
-                  enableMcpIntegration = true;
-                  # Shared icedos.ai-tools entries; mkDefault lets a same-named programs.claude-code entry win.
-                  rules = lib.mapAttrs (_: lib.mkDefault) rules;
-                  skills = lib.mapAttrs (_: lib.mkDefault) skills;
+                options.icedos.managedSettings.claude = icedosLib.mkAttrsOption {
+                  default = config.programs.claude-code.settings;
                 };
-                # Terminal=true: the desktop environment launches the user's default terminal.
-                xdg.desktopEntries."claude-code" = lib.mkIf (desktopEntry && config.programs.claude-code.enable) {
-                  name = "Claude Code";
-                  comment = "AI coding assistant (terminal UI)";
-                  icon = "utilities-terminal";
-                  exec = "claude";
-                  terminal = true;
-                  categories = [
-                    "Development"
-                    "Utility"
-                  ];
+
+                config = {
+                  programs.claude-code = {
+                    package = lib.mkIf (aiAccountsOn && hasAccounts "claude") (wrapAccounts {
+                      agent = "claude";
+                      package = pkgs.claude-code;
+                      bin = "claude";
+                    });
+                    enable = lib.mkDefault true;
+                    enableMcpIntegration = true;
+                    # Shared icedos.ai-tools entries; mkDefault lets a same-named programs.claude-code entry win.
+                    rules = lib.mapAttrs (_: lib.mkDefault) rules;
+                    skills = lib.mapAttrs (_: lib.mkDefault) skills;
+                  };
+                  # Terminal=true: the desktop environment launches the user's default terminal.
+                  xdg.desktopEntries."claude-code" = lib.mkIf (desktopEntry && config.programs.claude-code.enable) {
+                    name = "Claude Code";
+                    comment = "AI coding assistant (terminal UI)";
+                    icon = "utilities-terminal";
+                    exec = "claude";
+                    terminal = true;
+                    categories = [
+                      "Development"
+                      "Utility"
+                    ];
+                  };
                 };
               }
             )

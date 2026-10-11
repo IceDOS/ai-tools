@@ -351,7 +351,7 @@
     };
 
   outputs.nixosModules =
-    { ... }:
+    { repoUrl, ... }:
     [
       (
         {
@@ -376,6 +376,13 @@
             substring
             toUpper
             ;
+
+          hasAccounts = import ../../integrations/ai-accounts/lib/has-accounts.nix { inherit lib; } config;
+          wrapAccounts = import ../../integrations/ai-accounts/lib/wrap.nix { inherit lib pkgs; };
+          aiAccountsOn = icedosLib.hasModule {
+            inherit config repoUrl;
+            name = "ai-accounts";
+          };
 
           cfg = config.icedos.ai-tools.prime-agent;
 
@@ -534,7 +541,18 @@
             })
           ];
 
-          environment.systemPackages = [ pkgs.prime-agent ];
+          environment.systemPackages = [
+            (
+              if aiAccountsOn && hasAccounts "prime-agent" then
+                wrapAccounts {
+                  agent = "prime-agent";
+                  package = pkgs.prime-agent;
+                  bin = "prime-agent";
+                }
+              else
+                pkgs.prime-agent
+            )
+          ];
 
           icedos.ai-tools.prime-agent.users = icedosLib.users.genDefaults {
             inherit (config.icedos) users;
@@ -1278,210 +1296,215 @@
                   "${relDataDir}/extensions/${name}.ts".text = src;
                 }) prime-agent.extensions.inline;
               in
-              mkIf (userCfg != null) {
-                assertions = [
-                  {
-                    assertion = lib.hasPrefix (config.home.homeDirectory + "/") dataDir && relDataDir != "";
-                    message = ''
-                      icedos.ai-tools.prime-agent.settings.dataDir must expand to a
-                      path inside the home directory so the MCP skill files can
-                      be installed via home.file (got "${dataDir}" from
-                      "${prime-agent.settings.dataDir}"). Use an in-home path, e.g.
-                      "$XDG_CONFIG_HOME/prime-agent".
-                    '';
-                  }
-                  # A pin is only validated by the user that enables the server; another
-                  # user's pin is checked in that user's own sharedModule.
-                  {
-                    assertion = lib.all (n: !(enabled ? ${n}) || localServers ? ${n}) (
-                      lib.attrNames prime-agent.settings.ports.overrides
-                    );
-                    message = ''
-                      prime-agent ports.overrides pins a server that is enabled
-                      but not a local (stdio) bridge: ${
-                        builtins.concatStringsSep ", " (
-                          lib.filter (n: enabled ? ${n} && !(localServers ? ${n})) (
-                            lib.attrNames prime-agent.settings.ports.overrides
-                          )
-                        )
-                      }. ports.overrides only applies to local MCP servers
-                      bridged by mcp-proxy; remote (url) servers have no
-                      port.
-                    '';
-                  }
-                  {
-                    assertion = duplicatePorts == [ ];
-                    message = ''
-                      prime-agent MCP bridge port collision: ${
-                        builtins.concatStringsSep ", " (map (e: "${e.name} -> ${toString e.p}") duplicatePorts)
-                      }. ports.overrides pins are honored verbatim, so two
-                      servers resolving to one port must be re-pinned.
-                    '';
-                  }
-                  {
-                    assertion = missingExtensions == [ ];
-                    message = ''
-                      icedos.ai-tools.prime-agent.extensions.builtin references upstream
-                      prime-agent example extensions that do not exist:
-                      ${builtins.concatStringsSep ", " missingExtensions}
-                      Each name is a folder/file under
-                      <prime-agent>/lib/prime-agent/examples/extensions/.
-                    '';
-                  }
-                  {
-                    assertion =
-                      prime-agent.extensions.meters.power.idleWatts >= 0
-                      && prime-agent.extensions.meters.power.rateKwh >= 0;
-                    message = ''
-                      icedos.ai-tools.prime-agent.extensions.meters.power.idleWatts and
-                      rateKwh must not be negative: a negative idle floor is
-                      added to every sample rather than subtracted, and a negative
-                      rate reports negative cost.
-                    '';
-                  }
-                  {
-                    assertion = builtins.all (
-                      w: builtins.match "[1-9][0-9]*[smhdwM]" w != null
-                    ) prime-agent.extensions.meters.power.windows;
-                    message = ''
-                      icedos.ai-tools.prime-agent.extensions.meters.power.windows entries
-                      must be a positive integer followed by s, m, h, d, w or M (e.g. "1s",
-                      "15m", "24h", "1M"), got: ${builtins.concatStringsSep ", " prime-agent.extensions.meters.power.windows}
-                    '';
-                  }
-                  {
-                    # No sensible default price or currency exists, so the user must set both.
-                    assertion =
-                      !prime-agent.extensions.meters.power.enable
-                      || (
-                        prime-agent.extensions.meters.power.rateKwh > 0
-                        && prime-agent.extensions.meters.power.currency != ""
-                      );
-                    message = ''
-                      icedos.ai-tools.prime-agent.extensions.meters.power is enabled
-                      but rateKwh (${toString prime-agent.extensions.meters.power.rateKwh}) or
-                      currency ("${prime-agent.extensions.meters.power.currency}") is unset.
-                      Set rateKwh to your price per kWh (> 0) and currency to its symbol.
-                    '';
-                  }
-                  {
-                    # Substituted into a JS string literal, so it must be a plain id.
-                    assertion =
-                      prime-agent.extensions.prompt-suggestions.model == ""
-                      ||
-                        builtins.match "[A-Za-z0-9._-]+/[A-Za-z0-9._:/@-]+" prime-agent.extensions.prompt-suggestions.model
-                        != null;
-                    message = ''
-                      icedos.ai-tools.prime-agent.extensions.prompt-suggestions.model must be
-                      "" or "provider/model-id" (got "${prime-agent.extensions.prompt-suggestions.model}").
-                    '';
-                  }
-                  {
-                    # The meter renders inside the cost footer, so it has
-                    # nowhere to appear without it.
-                    assertion = prime-agent.extensions.meters.cost || !prime-agent.extensions.meters.power.enable;
-                    message = ''
-                      icedos.ai-tools.prime-agent.extensions.meters.power.enable needs
-                      meters.cost = true: the GPU electricity meter is rendered
-                      as part of the cost footer.
-                    '';
-                  }
-                  {
-                    # Both load a "cost-footer" extension and would double-render.
-                    assertion = !prime-agent.extensions.meters.cost || !(prime-agent.extensions.inline ? "cost-footer");
-                    message = ''
-                      icedos.ai-tools.prime-agent.extensions.inline already declares
-                      "cost-footer"; the built-in cost footer ships the same
-                      extension. Remove the inline declaration or set
-                      meters.cost = false.
-                    '';
-                  }
-                  {
-                    # registerProvider replaces the whole stored request config, so
-                    # zen-session.ts drops any apiKey or headers models.json set for opencode.
-                    assertion =
-                      let
-                        oc = prime-agent.settings.providers.opencode or { };
-                      in
-                      (oc.apiKey or null) == null && (oc.headers or { }) == { };
-                    message = ''
-                      icedos.ai-tools.prime-agent.settings.providers.opencode sets apiKey or
-                      headers, which the zen-session extension drops when it refreshes the
-                      session header. Keep the key in prime-agent's auth store, and set
-                      extra opencode headers from an extension instead.
-                    '';
-                  }
-                  {
-                    assertion = lib.all (n: builtins.match "[A-Za-z0-9._-]+" n != null) (
-                      lib.attrNames prime-agent.extensions.inline
-                    );
-                    message = ''
-                      icedos.ai-tools.prime-agent.extensions.inline names must be
-                      simple: ${
-                        builtins.concatStringsSep ", " (
-                          lib.filter (n: builtins.match "[A-Za-z0-9._-]+" n == null) (
-                            lib.attrNames prime-agent.extensions.inline
-                          )
-                        )
-                      }
-                    '';
-                  }
-                ];
+              {
+                options.icedos.managedSettings.prime-agent = icedosLib.mkAttrsOption {
+                  default = seedSettings;
+                };
 
-                # Login shells read home.sessionVariables; the graphical session needs systemd.user.
-                home.sessionVariables = primeEnv;
-                systemd.user.sessionVariables = primeEnv;
-
-                home.file = mkMerge (
-                  (lib.mapAttrsToList skillFiles enabled)
-                  ++ extensionHomeFiles
-                  ++ extensionLocalHomeFiles
-                  ++ [
-                    # No shell hooks; extensions auto-load from <agentDir>/extensions/*.ts.
-                    (mkIf (peonPingEnabled && prime-agent.extensions.peonPing) {
-                      "${relDataDir}/extensions/peon-ping.ts".source = pkgs.replaceVars ./extensions/peon-ping.ts {
-                        # Installed by peon-ping's hm module; bin/peon carries its own PATH.
-                        peonSh = "${config.home.homeDirectory}/.openpeon/peon.sh";
-                      };
-                    })
-
-                    # Live session cost (USD, or € for metered local models) in the TUI bottom bar.
-                    (mkIf prime-agent.extensions.meters.cost {
-                      "${relDataDir}/extensions/cost-footer".source = costFooterSrc;
-                    })
-
-                    # Mints a fresh zen session id per pi session; models.json cannot.
+                config = mkIf (userCfg != null) {
+                  assertions = [
                     {
-                      "${relDataDir}/extensions/zen-session.ts".source = zenSessionSrc;
+                      assertion = lib.hasPrefix (config.home.homeDirectory + "/") dataDir && relDataDir != "";
+                      message = ''
+                        icedos.ai-tools.prime-agent.settings.dataDir must expand to a
+                        path inside the home directory so the MCP skill files can
+                        be installed via home.file (got "${dataDir}" from
+                        "${prime-agent.settings.dataDir}"). Use an in-home path, e.g.
+                        "$XDG_CONFIG_HOME/prime-agent".
+                      '';
                     }
+                    # A pin is only validated by the user that enables the server; another
+                    # user's pin is checked in that user's own sharedModule.
+                    {
+                      assertion = lib.all (n: !(enabled ? ${n}) || localServers ? ${n}) (
+                        lib.attrNames prime-agent.settings.ports.overrides
+                      );
+                      message = ''
+                        prime-agent ports.overrides pins a server that is enabled
+                        but not a local (stdio) bridge: ${
+                          builtins.concatStringsSep ", " (
+                            lib.filter (n: enabled ? ${n} && !(localServers ? ${n})) (
+                              lib.attrNames prime-agent.settings.ports.overrides
+                            )
+                          )
+                        }. ports.overrides only applies to local MCP servers
+                        bridged by mcp-proxy; remote (url) servers have no
+                        port.
+                      '';
+                    }
+                    {
+                      assertion = duplicatePorts == [ ];
+                      message = ''
+                        prime-agent MCP bridge port collision: ${
+                          builtins.concatStringsSep ", " (map (e: "${e.name} -> ${toString e.p}") duplicatePorts)
+                        }. ports.overrides pins are honored verbatim, so two
+                        servers resolving to one port must be re-pinned.
+                      '';
+                    }
+                    {
+                      assertion = missingExtensions == [ ];
+                      message = ''
+                        icedos.ai-tools.prime-agent.extensions.builtin references upstream
+                        prime-agent example extensions that do not exist:
+                        ${builtins.concatStringsSep ", " missingExtensions}
+                        Each name is a folder/file under
+                        <prime-agent>/lib/prime-agent/examples/extensions/.
+                      '';
+                    }
+                    {
+                      assertion =
+                        prime-agent.extensions.meters.power.idleWatts >= 0
+                        && prime-agent.extensions.meters.power.rateKwh >= 0;
+                      message = ''
+                        icedos.ai-tools.prime-agent.extensions.meters.power.idleWatts and
+                        rateKwh must not be negative: a negative idle floor is
+                        added to every sample rather than subtracted, and a negative
+                        rate reports negative cost.
+                      '';
+                    }
+                    {
+                      assertion = builtins.all (
+                        w: builtins.match "[1-9][0-9]*[smhdwM]" w != null
+                      ) prime-agent.extensions.meters.power.windows;
+                      message = ''
+                        icedos.ai-tools.prime-agent.extensions.meters.power.windows entries
+                        must be a positive integer followed by s, m, h, d, w or M (e.g. "1s",
+                        "15m", "24h", "1M"), got: ${builtins.concatStringsSep ", " prime-agent.extensions.meters.power.windows}
+                      '';
+                    }
+                    {
+                      # No sensible default price or currency exists, so the user must set both.
+                      assertion =
+                        !prime-agent.extensions.meters.power.enable
+                        || (
+                          prime-agent.extensions.meters.power.rateKwh > 0
+                          && prime-agent.extensions.meters.power.currency != ""
+                        );
+                      message = ''
+                        icedos.ai-tools.prime-agent.extensions.meters.power is enabled
+                        but rateKwh (${toString prime-agent.extensions.meters.power.rateKwh}) or
+                        currency ("${prime-agent.extensions.meters.power.currency}") is unset.
+                        Set rateKwh to your price per kWh (> 0) and currency to its symbol.
+                      '';
+                    }
+                    {
+                      # Substituted into a JS string literal, so it must be a plain id.
+                      assertion =
+                        prime-agent.extensions.prompt-suggestions.model == ""
+                        ||
+                          builtins.match "[A-Za-z0-9._-]+/[A-Za-z0-9._:/@-]+" prime-agent.extensions.prompt-suggestions.model
+                          != null;
+                      message = ''
+                        icedos.ai-tools.prime-agent.extensions.prompt-suggestions.model must be
+                        "" or "provider/model-id" (got "${prime-agent.extensions.prompt-suggestions.model}").
+                      '';
+                    }
+                    {
+                      # The meter renders inside the cost footer, so it has
+                      # nowhere to appear without it.
+                      assertion = prime-agent.extensions.meters.cost || !prime-agent.extensions.meters.power.enable;
+                      message = ''
+                        icedos.ai-tools.prime-agent.extensions.meters.power.enable needs
+                        meters.cost = true: the GPU electricity meter is rendered
+                        as part of the cost footer.
+                      '';
+                    }
+                    {
+                      # Both load a "cost-footer" extension and would double-render.
+                      assertion = !prime-agent.extensions.meters.cost || !(prime-agent.extensions.inline ? "cost-footer");
+                      message = ''
+                        icedos.ai-tools.prime-agent.extensions.inline already declares
+                        "cost-footer"; the built-in cost footer ships the same
+                        extension. Remove the inline declaration or set
+                        meters.cost = false.
+                      '';
+                    }
+                    {
+                      # registerProvider replaces the whole stored request config, so
+                      # zen-session.ts drops any apiKey or headers models.json set for opencode.
+                      assertion =
+                        let
+                          oc = prime-agent.settings.providers.opencode or { };
+                        in
+                        (oc.apiKey or null) == null && (oc.headers or { }) == { };
+                      message = ''
+                        icedos.ai-tools.prime-agent.settings.providers.opencode sets apiKey or
+                        headers, which the zen-session extension drops when it refreshes the
+                        session header. Keep the key in prime-agent's auth store, and set
+                        extra opencode headers from an extension instead.
+                      '';
+                    }
+                    {
+                      assertion = lib.all (n: builtins.match "[A-Za-z0-9._-]+" n != null) (
+                        lib.attrNames prime-agent.extensions.inline
+                      );
+                      message = ''
+                        icedos.ai-tools.prime-agent.extensions.inline names must be
+                        simple: ${
+                          builtins.concatStringsSep ", " (
+                            lib.filter (n: builtins.match "[A-Za-z0-9._-]+" n == null) (
+                              lib.attrNames prime-agent.extensions.inline
+                            )
+                          )
+                        }
+                      '';
+                    }
+                  ];
 
-                    # Caps model context windows at extensions.context-window-cap.percent of native.
-                    (mkIf prime-agent.extensions.context-window-cap.enable {
-                      "${relDataDir}/extensions/context-cap.ts".source = contextCapSrc;
-                    })
+                  # Login shells read home.sessionVariables; the graphical session needs systemd.user.
+                  home.sessionVariables = primeEnv;
+                  systemd.user.sessionVariables = primeEnv;
 
-                    # The model curates its own context in a mirrored file (pi-clm).
-                    (mkIf prime-agent.extensions.context-language-models.enable {
-                      "${relDataDir}/extensions/pi-clm".source = clmSrc;
-                    })
+                  home.file = mkMerge (
+                    (lib.mapAttrsToList skillFiles enabled)
+                    ++ extensionHomeFiles
+                    ++ extensionLocalHomeFiles
+                    ++ [
+                      # No shell hooks; extensions auto-load from <agentDir>/extensions/*.ts.
+                      (mkIf (peonPingEnabled && prime-agent.extensions.peonPing) {
+                        "${relDataDir}/extensions/peon-ping.ts".source = pkgs.replaceVars ./extensions/peon-ping.ts {
+                          # Installed by peon-ping's hm module; bin/peon carries its own PATH.
+                          peonSh = "${config.home.homeDirectory}/.openpeon/peon.sh";
+                        };
+                      })
 
-                    # Predicted next prompt as ghost text in the empty editor; Tab accepts.
-                    (mkIf prime-agent.extensions.prompt-suggestions.enable {
-                      "${relDataDir}/extensions/prompt-suggest.ts".source =
-                        pkgs.replaceVars ./extensions/prompt-suggest.ts
-                          {
-                            suggestModel = prime-agent.extensions.prompt-suggestions.model;
-                          };
-                    })
-                  ]
-                );
+                      # Live session cost (USD, or € for metered local models) in the TUI bottom bar.
+                      (mkIf prime-agent.extensions.meters.cost {
+                        "${relDataDir}/extensions/cost-footer".source = costFooterSrc;
+                      })
 
-                systemd.user.services = mkMerge (lib.mapAttrsToList service localServers);
+                      # Mints a fresh zen session id per pi session; models.json cannot.
+                      {
+                        "${relDataDir}/extensions/zen-session.ts".source = zenSessionSrc;
+                      }
 
-                home.activation.seed-prime-agent = lib.hm.dag.entryAfter [
-                  "writeBoundary"
-                ] seedScript;
+                      # Caps model context windows at extensions.context-window-cap.percent of native.
+                      (mkIf prime-agent.extensions.context-window-cap.enable {
+                        "${relDataDir}/extensions/context-cap.ts".source = contextCapSrc;
+                      })
 
+                      # The model curates its own context in a mirrored file (pi-clm).
+                      (mkIf prime-agent.extensions.context-language-models.enable {
+                        "${relDataDir}/extensions/pi-clm".source = clmSrc;
+                      })
+
+                      # Predicted next prompt as ghost text in the empty editor; Tab accepts.
+                      (mkIf prime-agent.extensions.prompt-suggestions.enable {
+                        "${relDataDir}/extensions/prompt-suggest.ts".source =
+                          pkgs.replaceVars ./extensions/prompt-suggest.ts
+                            {
+                              suggestModel = prime-agent.extensions.prompt-suggestions.model;
+                            };
+                      })
+                    ]
+                  );
+
+                  systemd.user.services = mkMerge (lib.mapAttrsToList service localServers);
+
+                  home.activation.seed-prime-agent = lib.hm.dag.entryAfter [
+                    "writeBoundary"
+                  ] seedScript;
+                };
               }
             )
           ];

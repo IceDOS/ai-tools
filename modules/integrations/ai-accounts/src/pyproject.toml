@@ -1,0 +1,16 @@
+[project]
+name = "ai-accounts"
+version = "0.1.0"
+description = "Run coding agents under several accounts."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+ai-account = "ai_accounts.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ai_accounts*"]

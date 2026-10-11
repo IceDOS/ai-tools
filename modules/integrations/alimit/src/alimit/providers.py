@@ -113,8 +113,16 @@ def parse_opencode_go(data) -> dict:
     return out
 
 
-def fetch_opencode_go() -> dict:
-    keys = _keys("OPENCODE_API_KEY", ("opencode-go", "opencode"), ("opencode-go", "opencode"))
+# auth.json entry names holding each provider's key, in prime-agent and opencode.
+KEY_NAMES = {
+    "opencode-go": ("opencode-go", "opencode"),
+    "ollama": ("ollama",),
+    "openrouter": ("openrouter",),
+}
+
+
+def fetch_opencode_go(keys=None) -> dict:
+    keys = keys or _keys("OPENCODE_API_KEY", KEY_NAMES["opencode-go"], KEY_NAMES["opencode-go"])
     try:
         return parse_opencode_go(_first_working(config.OPENCODE_GO_USAGE_URL, keys))
     except FetchError as e:
@@ -147,8 +155,9 @@ def parse_ollama(data) -> dict:
     return out
 
 
-def fetch_ollama() -> dict:
-    return parse_ollama(_first_working(config.OLLAMA_BALANCE_URL, _keys("OLLAMA_API_KEY", ("ollama",))))
+def fetch_ollama(keys=None) -> dict:
+    keys = keys or _keys("OLLAMA_API_KEY", KEY_NAMES["ollama"])
+    return parse_ollama(_first_working(config.OLLAMA_BALANCE_URL, keys))
 
 
 # ---------- OpenRouter ----------
@@ -187,8 +196,9 @@ def parse_openrouter(data, now: datetime | None = None) -> dict:
     return out
 
 
-def fetch_openrouter() -> dict:
-    return parse_openrouter(_first_working(config.OPENROUTER_KEY_URL, _keys("OPENROUTER_API_KEY", ("openrouter",))))
+def fetch_openrouter(keys=None) -> dict:
+    keys = keys or _keys("OPENROUTER_API_KEY", KEY_NAMES["openrouter"])
+    return parse_openrouter(_first_working(config.OPENROUTER_KEY_URL, keys))
 
 
 # ---------- Antigravity (status line payload) ----------

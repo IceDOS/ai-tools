@@ -60,7 +60,7 @@
     };
 
   outputs.nixosModules =
-    { ... }:
+    { repoUrl, ... }:
     [
       (
         {
@@ -72,6 +72,13 @@
         }:
 
         let
+          hasAccounts = import ../../integrations/ai-accounts/lib/has-accounts.nix { inherit lib; } config;
+          wrapAccounts = import ../../integrations/ai-accounts/lib/wrap.nix { inherit lib pkgs; };
+          aiAccountsOn = icedosLib.hasModule {
+            inherit config repoUrl;
+            name = "ai-accounts";
+          };
+
           inherit (config.icedos.ai-tools.antigravity)
             desktopEntry
             enableMcpIntegration
@@ -149,11 +156,22 @@
             ++ lib.optional (!statusLine) "--no-bar"
           );
 
+          agyBin =
+            if aiAccountsOn && hasAccounts "antigravity" then
+              "${
+                wrapAccounts {
+                  agent = "antigravity";
+                  package = pkgs.antigravity-cli;
+                  bin = "agy";
+                }
+              }/bin/agy"
+            else
+              "${pkgs.antigravity-cli}/bin/agy";
         in
         {
           icedos.ai-tools.agent-launch.agents.antigravity = {
             # agy is not on PATH; this module only wires its config.
-            command = lib.mkDefault [ "${pkgs.antigravity-cli}/bin/agy" ];
+            command = lib.mkDefault [ agyBin ];
             resumeArgs = lib.mkDefault [
               "--conversation"
               "{id}"
@@ -212,62 +230,82 @@
                 mcpConfig = {
                   mcpServers = mapAttrs (_: transformServer) enabledServers;
                 };
+
               in
               {
-                home.file = {
-                  ".gemini/config/mcp_config.json" = mkIf (enabledServers != { }) {
-                    source = jsonFormat.generate "antigravity-mcp-config.json" mcpConfig;
-                  };
-                }
-                // mapAttrs' (
-                  name: text: nameValuePair ".gemini/config/rules/${name}.md" { text = withTrigger text; }
-                ) rules
-                // mapAttrs' (
-                  name: text: nameValuePair ".gemini/antigravity-cli/skills/${name}/SKILL.md" { inherit text; }
-                ) skills;
-
-                # Terminal=true: the desktop environment launches the user's default terminal.
-                xdg.desktopEntries.antigravity-cli = mkIf desktopEntry {
-                  name = "Antigravity CLI";
-                  comment = "AI coding assistant (terminal UI)";
-                  icon = "utilities-terminal";
-                  exec = "${pkgs.antigravity-cli}/bin/agy";
-                  terminal = true;
-                  categories = [
-                    "Development"
-                    "Utility"
-                  ];
+                # The same block `statusline.py --setup` writes; null clears agy's key.
+                options.icedos.managedSettings.antigravity = icedosLib.mkAttrsOption {
+                  default =
+                    if statusLine || terminalTitle.enable then
+                      {
+                        statusLine = {
+                          type = "command";
+                          command = statusLineCommand;
+                        }
+                        // lib.optionalAttrs (statusLineStackWithDefault || !statusLine) {
+                          stack_with_default = true;
+                        };
+                      }
+                    else
+                      { statusLine = null; };
                 };
 
-                # agy owns ~/.gemini/antigravity-cli/settings.json (it writes on settings
-                # changes), so Home Manager only merges/removes its statusLine key.
-                home.activation.icedosAntigravityStatusLine = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-                  run ${statusLinePkg}/bin/antigravity-statusline --setup ${
-                    if statusLine || terminalTitle.enable then "on" else "off"
-                  } ${lib.escapeShellArg statusLineCommand}${
-                    lib.optionalString (statusLineStackWithDefault || !statusLine) " --stack"
-                  }
-                '';
-
-                systemd.user.services.peon-ping-antigravity =
-                  mkIf (peonPing && peonPingUsers ? ${config.home.username})
-                    {
-                      Unit = {
-                        Description = "peon-ping sounds for Antigravity CLI";
-                        After = [ "graphical-session.target" ];
-                        PartOf = [ "graphical-session.target" ];
-                      };
-                      Service = {
-                        ExecStart = lib.getExe (peonWatcher config.programs.peon-ping.package);
-                        Environment = [
-                          "CLAUDE_PEON_DIR=%h/.openpeon"
-                          "PEON_DIR=%h/.openpeon"
-                        ];
-                        Restart = "on-failure";
-                        RestartSec = 5;
-                      };
-                      Install.WantedBy = [ "graphical-session.target" ];
+                config = {
+                  home.file = {
+                    ".gemini/config/mcp_config.json" = mkIf (enabledServers != { }) {
+                      source = jsonFormat.generate "antigravity-mcp-config.json" mcpConfig;
                     };
+                  }
+                  // mapAttrs' (
+                    name: text: nameValuePair ".gemini/config/rules/${name}.md" { text = withTrigger text; }
+                  ) rules
+                  // mapAttrs' (
+                    name: text: nameValuePair ".gemini/antigravity-cli/skills/${name}/SKILL.md" { inherit text; }
+                  ) skills;
+
+                  # Terminal=true: the desktop environment launches the user's default terminal.
+                  xdg.desktopEntries.antigravity-cli = mkIf desktopEntry {
+                    name = "Antigravity CLI";
+                    comment = "AI coding assistant (terminal UI)";
+                    icon = "utilities-terminal";
+                    exec = agyBin;
+                    terminal = true;
+                    categories = [
+                      "Development"
+                      "Utility"
+                    ];
+                  };
+
+                  # agy owns ~/.gemini/antigravity-cli/settings.json (it writes on settings
+                  # changes), so Home Manager only merges/removes its statusLine key.
+                  home.activation.icedosAntigravityStatusLine = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+                    run ${statusLinePkg}/bin/antigravity-statusline --setup ${
+                      if statusLine || terminalTitle.enable then "on" else "off"
+                    } ${lib.escapeShellArg statusLineCommand}${
+                      lib.optionalString (statusLineStackWithDefault || !statusLine) " --stack"
+                    }
+                  '';
+
+                  systemd.user.services.peon-ping-antigravity =
+                    mkIf (peonPing && peonPingUsers ? ${config.home.username})
+                      {
+                        Unit = {
+                          Description = "peon-ping sounds for Antigravity CLI";
+                          After = [ "graphical-session.target" ];
+                          PartOf = [ "graphical-session.target" ];
+                        };
+                        Service = {
+                          ExecStart = lib.getExe (peonWatcher config.programs.peon-ping.package);
+                          Environment = [
+                            "CLAUDE_PEON_DIR=%h/.openpeon"
+                            "PEON_DIR=%h/.openpeon"
+                          ];
+                          Restart = "on-failure";
+                          RestartSec = 5;
+                        };
+                        Install.WantedBy = [ "graphical-session.target" ];
+                      };
+                };
               }
             )
           ];

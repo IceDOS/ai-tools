@@ -53,7 +53,7 @@
     };
 
   outputs.nixosModules =
-    { inputs, ... }:
+    { inputs, repoUrl, ... }:
     [
       (
         {
@@ -63,6 +63,13 @@
           ...
         }:
         let
+          hasAccounts = import ../../integrations/ai-accounts/lib/has-accounts.nix { inherit lib; } config;
+          wrapAccounts = import ../../integrations/ai-accounts/lib/wrap.nix { inherit lib pkgs; };
+          aiAccountsOn = icedosLib.hasModule {
+            inherit config repoUrl;
+            name = "ai-accounts";
+          };
+
           inherit (lib) recursiveUpdate;
           inherit (config.icedos.ai-tools.opencode)
             desktopEntry
@@ -151,6 +158,11 @@
 
               {
                 programs.opencode = {
+                  package = lib.mkIf (aiAccountsOn && hasAccounts "opencode") (wrapAccounts {
+                    agent = "opencode";
+                    package = pkgs.opencode;
+                    bin = "opencode";
+                  });
                   enable = true;
 
                   # Pull every server from the shared programs.mcp.servers

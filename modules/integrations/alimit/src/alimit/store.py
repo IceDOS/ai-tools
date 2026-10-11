@@ -110,7 +110,8 @@ def prune_retired(con: sqlite3.Connection, windows, now_ms: int):
     cutoff = now_ms - days * 86_400_000
     return [
         w for w in windows
-        if not w.startswith(config.WEEKLY_SCOPED_PREFIX) or (latest_ts(con, w) or 0) >= cutoff
+        if not config.split_account(w)[0].startswith(config.WEEKLY_SCOPED_PREFIX)
+        or (latest_ts(con, w) or 0) >= cutoff
     ]
 
 

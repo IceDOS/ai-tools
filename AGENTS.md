@@ -16,7 +16,8 @@
 AI agents, local model servers and their glue: `claude-code`, `antigravity`, `opencode`, `prime-agent`
 (agents), `llamacpp`, `ollama` (model servers), `peon-ping` (agent-event audio),
 `mcp-server` (`icedos mcp serve`), `alimit` (usage limits for every agent and provider),
-`agent-launch` (fzf agent picker) and `code-intelligence` (per-language LSP skills).
+`ai-accounts` (several accounts per agent), `agent-launch` (fzf agent picker) and
+`code-intelligence` (per-language LSP skills).
 
 ## Namespace
 Every option here lives under `icedos.ai-tools`: the shared `rules` and `skills`, and one
@@ -27,7 +28,7 @@ attrset per module (`icedos.ai-tools.prime-agent`, ...).
 `icedosLib.scanModules { path = ./modules; filename = "icedos.nix"; }`, which recurses, and
 `meta.name` (not the folder) names the module. The categories are `agents` (antigravity,
 claude-code, opencode, prime-agent), `models` (llamacpp, ollama), `mcp` (icedos-mcp, whose
-module name is `mcp-server`) and `integrations` (agent-launch, alimit, code-intelligence, peon-ping).
+module name is `mcp-server`) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence, peon-ping).
 `modules/default` loads whenever the repo is listed and owns the shared options.
 
 ## Shared options (`icedos.ai-tools.*`)
@@ -83,6 +84,26 @@ Point this repo's `overrideUrl` at the local checkout in the config root
     `path` is copied into the store at eval time, and pure eval forbids host paths there.
   - It declares no hooks. peon-ping registers its own via
     `icedos.ai-tools.peon-ping.users.<u>.claudeCodeIntegration`.
+- `ai-accounts` — **standalone** module that owns `icedos.ai-tools.ai-accounts.users.<name>`
+  (self-materialised via `genDefaults`). `ai-account exec <agent> --` picks an account (flag,
+  `AI_ACCOUNT_<AGENT>`, sticky, alimit headroom, `default`) and execs the real binary with
+  per-account env. Agent modules wrap their package through `lib/wrap.nix` only when
+  `lib/has-accounts.nix` finds declared accounts; `prime-agent` and `opencode` also count as
+  declaring when `ollama` does, because they pass its key in.
+  - State lives in `~/.local/state/ai-accounts/<agent>/<account>/`. Shared mode links the real dir
+    except `adapters.*_PRIVATE` (never linked) and `adapters.*_SEED` (copied once, then owned by the
+    account, because agents rewrite those files by renaming over the target).
+  - A logged-out account fails with exit 3 when stdin is not a tty. On a tty the launch signs in
+    first: ollama prompts for the key, opencode runs `opencode auth login`, the other agents start
+    and show their own sign-in. A prime-agent or opencode launch also prompts for the key of the
+    ollama account it tags, when that account has no key.
+  - alimit keys for non-default accounts are `<provider>@<tag>/<window>`. Status lines read
+    `AI_ACCOUNT_TAGS`, and `alimit headroom` feeds auto-pick.
+  - Per-account `settings` merge over the agent module's `icedos.managedSettings.<agent>` into the
+    account's own settings file on each launch, recorded in `.ai-account-settings.json` so removing
+    an override restores the value it replaced.
+  - Antigravity accounts run behind `xdg-dbus-proxy`, which hides `org.freedesktop.secrets` so agy
+    stores its token in the account's `~/.gemini`. `antigravity.busTalk` lists the reachable names.
 - `alimit` — **standalone** module that owns `icedos.ai-tools.alimit.users.<name>`
   (self-materialised via `genDefaults`). One SQLite DB at `~/.local/share/alimit/usage.db`
   holds usage windows keyed `<provider>/<window>` (Claude keeps bare keys). Status lines

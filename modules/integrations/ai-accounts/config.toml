@@ -1,0 +1,21 @@
+[icedos.ai-tools.ai-accounts.antigravity]
+# Bus names agy and its children reach through the proxy that hides the keyring.
+busTalk = ["org.freedesktop.Notifications", "org.freedesktop.portal.*", "org.kde.*"]
+
+[icedos.ai-tools.ai-accounts.users.username]
+# "manual" = flag or sticky only; "auto" = alimit headroom picks when no sticky is set.
+select = "auto"
+
+# Usage percent at which auto-pick skips an account.
+threshold = 90
+
+# Agents: claude, prime-agent, opencode, antigravity, ollama. "default" is the real config dir.
+[icedos.ai-tools.ai-accounts.users.username.agents.agentname.accounts.accountname]
+# "shared" links settings, skills and history from the real dir; "isolated" keeps them separate.
+mode = "shared"
+
+# Picker text; "" uses the account name.
+label = ""
+
+# Keys merged over the agent's own settings file for this account only.
+[icedos.ai-tools.ai-accounts.users.username.agents.agentname.accounts.accountname.settings]

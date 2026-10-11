@@ -13,13 +13,14 @@ class AuthError(Exception):
     pass
 
 
-def get_access_token() -> str:
+def get_access_token(path=None) -> str:
     """Return the stored access token, or raise AuthError if it is missing or expired."""
+    path = path or config.CREDS_PATH
     try:
-        with open(config.CREDS_PATH) as f:
+        with open(path) as f:
             oauth = json.load(f).get("claudeAiOauth") or {}
     except FileNotFoundError as e:
-        raise AuthError(f"not logged in ({config.CREDS_PATH} missing); run claude and /login") from e
+        raise AuthError(f"not logged in ({path} missing); run claude and /login") from e
     except (OSError, json.JSONDecodeError, AttributeError) as e:
         raise AuthError(f"cannot read credentials: {e}") from e
 

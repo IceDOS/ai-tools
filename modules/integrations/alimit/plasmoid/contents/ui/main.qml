@@ -395,7 +395,7 @@ PlasmoidItem {
                                         // prefer the CLI's own label (weekly_scoped windows and
                                         // any future key) so panel and CLI never diverge; fall
                                         // back to labelFor for label-less JSON from older alimit
-                                        text: section.win.label || root.labelFor(section.win.window)
+                                        text: (section.win.label || root.labelFor(section.win.window)) + (section.win.mark ? " " + section.win.mark : "")
                                     }
                                     PlasmaComponents.Label {
                                         visible: section.win.stale

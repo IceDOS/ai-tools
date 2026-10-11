@@ -35,6 +35,42 @@ def pick_agent(cfg: dict) -> str | None:
     return None
 
 
+def list_accounts(name: str) -> list:
+    try:
+        proc = subprocess.run(["ai-account", "list", "--agent", name, "--json"],
+                              capture_output=True, text=True, check=False, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    try:
+        return json.loads(proc.stdout).get(name, []) if proc.returncode == 0 else []
+    except ValueError:
+        return []
+
+
+def fzf_account(lines: list) -> str | None:
+    if not sys.stdin.isatty():
+        return None
+    proc = subprocess.run(["fzf", "--height=40%", "--layout=reverse", "--border", "--prompt=account> "],
+                          input="\n".join(lines), text=True, stdout=subprocess.PIPE, check=False)
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _account_line(r: dict) -> str:
+    util = "\u2014" if r.get("maxUtil") is None else f"{r['maxUtil']:.0f}%"
+    tail = " (auto)" if r.get("next") else " (sticky)" if r.get("sticky") else ""
+    login = "" if r.get("loggedIn") else "  needs login"
+    return f"{r['label']:<12} {util:>5}{tail}{login}"
+
+
+def pick_account(name: str, lister=None, picker=None) -> str | None:
+    rows = (lister or list_accounts)(name)
+    if len(rows) < 2:
+        return None
+    lines = [_account_line(r) for r in rows]
+    chosen = (picker or fzf_account)(lines)
+    return rows[lines.index(chosen)]["account"] if chosen in lines else None
+
+
 def choose(cfg: dict, picker=None) -> tuple[str | None, list[str] | None]:
     agents = cfg.get("agents", {})
     default = cfg.get("defaultAgent", "")
@@ -54,9 +90,12 @@ def main(argv: list[str]) -> int:
     name, cmd = choose(cfg)
     if not name or not cmd:
         return 1
+    account = pick_account(name)
+    env = {"AI_ACCOUNT_" + name.upper().replace("-", "_"): account} if account else {}
     if args.print:
-        print(json.dumps({"agent": name, "argv": cmd}), flush=True)
+        print(json.dumps({"agent": name, "argv": cmd, "account": account, "env": env}), flush=True)
         return 0
+    os.environ.update(env)
     os.execvp(cmd[0], cmd)
 
 

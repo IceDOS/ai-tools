@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -243,3 +244,48 @@ class TestShortPath(unittest.TestCase):
     def test_outside_project_falls_back(self):
         self.assertEqual(cli._short_path("/a/projx", "/a/proj"), "/a/projx")
         self.assertEqual(cli._short_path("/a/b", None), "/a/b")
+
+
+class TestCollectAccounts(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.con = store.connect(Path(self.tmp.name) / "u.db")
+        w = {"util": 40.0, "resets_at": "2099-01-01T00:00:00+00:00"}
+        store.record(self.con, 1000, {"five_hour": w, "claude@work/five_hour": w,
+                                      "ollama/weekly": w, "ollama@home/weekly": w}, "poll")
+
+    def tearDown(self):
+        self.con.close()
+        self.tmp.cleanup()
+
+    def test_order_default_then_accounts(self):
+        names = [r.window for r in cli.collect(self.con, 2000)]
+        self.assertEqual(names, ["five_hour", "claude@work/five_hour", "ollama/weekly", "ollama@home/weekly"])
+
+    def test_tags_filter_per_provider(self):
+        names = [r.window for r in cli.collect(self.con, 2000, tags={"claude": "work"})]
+        self.assertEqual(names, ["claude@work/five_hour", "ollama/weekly"])
+
+    def test_table_shows_account_and_mark(self):
+        rl = cli.collect(self.con, 2000)
+        out = cli.render_table(rl, 2000, marks={("claude", "work"): "★"})
+        self.assertIn("· work ★", out)
+
+    def test_json_has_account_and_mark(self):
+        rl = cli.collect(self.con, 2000)
+        data = json.loads(cli.render_json(rl, 2000, marks={("ollama", "home"): "→"}))
+        by = {w["window"]: w for w in data["windows"]}
+        self.assertEqual(by["ollama@home/weekly"]["account"], "home")
+        self.assertEqual(by["ollama@home/weekly"]["mark"], "→")
+        self.assertEqual(by["five_hour"]["account"], "default")
+        self.assertEqual(by["five_hour"]["mark"], "")
+
+
+class TestContribAccount(unittest.TestCase):
+    def test_account_sets_root(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(os.environ, {"AI_ACCOUNTS_STATE": tmp}), \
+             mock.patch("alimit.contrib.analyze", return_value={}) as analyze, \
+             mock.patch("alimit.contrib.render", return_value=""):
+            cli.main(["contrib", "--account", "solo"])
+        self.assertEqual(analyze.call_args.kwargs["root"], Path(tmp) / "claude" / "solo" / "projects")

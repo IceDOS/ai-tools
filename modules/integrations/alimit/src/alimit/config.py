@@ -80,7 +80,7 @@ def window_display_name(window: str) -> str:
     return " ".join(w.title() for w in slug.split("_"))
 
 
-def is_known_window(window: str) -> bool:
+def _is_known_base(window: str) -> bool:
     """True for windows alimit should render: the stable dict windows plus any
     synthesized weekly_scoped key. Keeps phantom/promotional keys (incl. leftover
     historical DB rows) out of every surface."""
@@ -91,7 +91,11 @@ def is_known_window(window: str) -> bool:
     )
 
 
-def label(window: str) -> str:
+def is_known_window(window: str) -> bool:
+    return _is_known_base(split_account(window)[0])
+
+
+def _base_label(window: str) -> str:
     if provider_of(window) != "claude":
         provider, family, part = _provider_parts(window)
         name = PROVIDER_WINDOWS[part][0] if part in PROVIDER_WINDOWS else part
@@ -103,7 +107,13 @@ def label(window: str) -> str:
     return window
 
 
-def short_label(window: str) -> str:
+def label(window: str) -> str:
+    base, tag = split_account(window)
+    text = _base_label(base)
+    return text if tag == "default" else f"{text} · {tag}"
+
+
+def _base_short_label(window: str) -> str:
     if provider_of(window) != "claude":
         provider, family, part = _provider_parts(window)
         name = PROVIDER_WINDOWS[part][1] if part in PROVIDER_WINDOWS else part[:3]
@@ -125,6 +135,12 @@ def short_label(window: str) -> str:
     return window[:3]
 
 
+def short_label(window: str) -> str:
+    base, tag = split_account(window)
+    text = _base_short_label(base)
+    return text if tag == "default" else f"{text} {tag}"
+
+
 # --- other providers: windows stored as "<provider>/<window>" ---
 PROVIDER_SEP = "/"
 
@@ -136,6 +152,41 @@ PROVIDERS = {
     "openrouter": "OpenRouter",
 }
 PROVIDER_SHORT = {"antigravity": "ag", "opencode-go": "go", "ollama": "ol", "openrouter": "or"}
+
+# Non-default accounts: "<provider>@<tag>/<window>"; Claude's bare keys become "claude@<tag>/<key>".
+ACCOUNT_SEP = "@"
+# Agents whose auth file holds several providers tag their windows "<agent>.<account>".
+MULTI_PROVIDER_AGENTS = ("opencode", "prime-agent")
+AGENT_PROVIDERS = {
+    "claude": ("claude",),
+    "antigravity": ("antigravity",),
+    "ollama": ("ollama",),
+    "opencode": ("opencode-go", "openrouter"),
+    "prime-agent": ("opencode-go", "openrouter"),
+}
+
+
+def account_tag(agent: str, account: str) -> str:
+    if account == "default":
+        return "default"
+    return f"{agent}.{account}" if agent in MULTI_PROVIDER_AGENTS else account
+
+
+def split_account(window: str):
+    head, sep, rest = window.partition(PROVIDER_SEP)
+    provider, at, tag = head.partition(ACCOUNT_SEP)
+    if not (sep and at and tag):
+        return window, "default"
+    return (rest if provider == "claude" else provider + PROVIDER_SEP + rest), tag
+
+
+def with_account(window: str, tag: str) -> str:
+    if not tag or tag == "default":
+        return window
+    head, sep, rest = window.partition(PROVIDER_SEP)
+    if sep and head in PROVIDERS:
+        return f"{head}{ACCOUNT_SEP}{tag}{PROVIDER_SEP}{rest}"
+    return f"claude{ACCOUNT_SEP}{tag}{PROVIDER_SEP}{window}"
 
 # Comma list limiting which providers the timer polls ("" = all with credentials).
 ENABLED_PROVIDERS = tuple(p for p in os.environ.get("ALIMIT_PROVIDERS", "").split(",") if p)
@@ -166,7 +217,7 @@ FAMILY_LABELS = {"gemini": ("Gemini", "gem"), "3p": ("third-party", "3p")}
 
 
 def provider_of(window: str) -> str:
-    head, sep, _ = window.partition(PROVIDER_SEP)
+    head, sep, _ = split_account(window)[0].partition(PROVIDER_SEP)
     return head if sep and head in PROVIDERS else "claude"
 
 
@@ -180,5 +231,5 @@ def _provider_parts(window: str):
 
 
 def provider_window_rank(window: str) -> int:
-    _, _, part = _provider_parts(window)
+    _, _, part = _provider_parts(split_account(window)[0])
     return PROVIDER_WINDOWS.get(part, ("", "", 9))[2]

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from alimit import auth, config, poller, sources, store
+from alimit import auth, config, poller, providers, sources, store
 
 WINDOWS = {"five_hour": {"util": 10.0, "resets_at": "2026-09-15T11:50:00+00:00"}}
 
@@ -51,3 +51,30 @@ class TestPollOnce(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAccountPolling(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.con = store.connect(Path(self.tmp.name) / "u.db")
+
+    def tearDown(self):
+        self.con.close()
+        self.tmp.cleanup()
+
+    def test_provider_account_keys_and_meta(self):
+        fake = mock.Mock(return_value={"ollama/weekly": {"util": 10.0, "resets_at": None}})
+        with mock.patch.dict(providers.POLLERS, {"ollama": fake}):
+            status, n = poller.poll_provider(self.con, "ollama", 1_000_000, keys=["k"], tag="home")
+        self.assertEqual((status, n), ("poll", 1))
+        fake.assert_called_once_with(keys=["k"])
+        self.assertIn("ollama@home/weekly", store.windows_present(self.con))
+        self.assertGreater(store.get_meta_int(self.con, "ollama@home_next_ms"), 0)
+        self.assertEqual(store.get_meta_int(self.con, "ollama_next_ms"), 0)
+
+    def test_claude_account_reads_its_creds(self):
+        with mock.patch.object(poller.auth, "get_access_token", return_value="t") as tok, \
+             mock.patch.object(poller.sources, "fetch_live", return_value={"five_hour": {"util": 5.0, "resets_at": None}}):
+            poller.poll_once(self.con, 1_000_000, creds=Path("/c.json"), tag="work")
+        tok.assert_called_once_with(Path("/c.json"))
+        self.assertIn("claude@work/five_hour", store.windows_present(self.con))

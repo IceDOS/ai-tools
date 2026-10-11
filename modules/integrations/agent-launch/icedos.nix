@@ -34,7 +34,7 @@
     };
 
   outputs.nixosModules =
-    { ... }:
+    { repoUrl, ... }:
     [
       (
         { config, pkgs, ... }:
@@ -42,12 +42,20 @@
         let
           cfg = config.icedos.ai-tools.agent-launch;
 
+          aiAccountsOn = icedosLib.hasModule {
+            inherit config repoUrl;
+            name = "ai-accounts";
+          };
+          aiAccountPkg = pkgs.callPackage ../ai-accounts/package.nix { };
+
           launcherConfig = pkgs.writeText "agent-launch.json" (
             builtins.toJSON { inherit (cfg) agents defaultAgent; }
           );
 
           agentLaunch = pkgs.writeShellScriptBin "agent-launch" ''
-            export PATH=${lib.makeBinPath [ pkgs.fzf ]}"''${PATH:+:$PATH}"
+            export PATH=${
+              lib.makeBinPath ([ pkgs.fzf ] ++ lib.optional aiAccountsOn aiAccountPkg)
+            }"''${PATH:+:$PATH}"
             exec ${pkgs.python3Minimal}/bin/python3 ${./lib/agent_launch.py} --config ${launcherConfig} "$@"
           '';
 
