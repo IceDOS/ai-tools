@@ -1,153 +1,194 @@
-diff --git a/packages/coding-agent/src/core/refinement/refinement.ts b/packages/coding-agent/src/core/refinement/refinement.ts
-index 41fcecf..b2ddb16 100644
---- a/packages/coding-agent/src/core/refinement/refinement.ts
-+++ b/packages/coding-agent/src/core/refinement/refinement.ts
-@@ -1281,38 +1281,45 @@ export async function planRefinement(
- 	const maxTokens =
- 		reasoning === "off" ? Math.min(requestModel.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS) : requestModel.maxTokens;
+Index: prime-agent-src/crates/pa-core/src/refinement/executor.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/refinement/executor.rs
++++ prime-agent-src/crates/pa-core/src/refinement/executor.rs
+@@ -128,13 +128,14 @@ pub fn history_for_prompt(history: &[Ref
+ /// model (output budget pre-clamped), the call's system prompt, and the
+ /// user prompt; returns the reply text.
+ pub type RefinerFn = Box<
+-    dyn FnOnce(
++    dyn Fn(
+             pa_types::ai::Model,
+             &'static str,
+             String,
+         ) -> std::pin::Pin<
+             Box<dyn std::future::Future<Output = anyhow::Result<AssistantMessage>> + Send>,
+-        > + Send,
++        > + Send
++        + Sync,
+ >;
  
--	const response = await completeWithProviderRetry(
--		() =>
--			completeSimple(
--				requestModel,
--				{
--					systemPrompt: REFINEMENT_SYSTEM_PROMPT,
--					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
--				},
--				{
--					reasoning,
--					maxTokens,
--					signal,
--					apiKey,
--					headers,
--					sessionId,
--				},
--			),
--		{ policy: options.retry, signal },
--	);
-+	// A sampled reply can miss the JSON shape (prose, leaked tool-call markup), so resend once.
-+	for (let attempt = 0; ; attempt++) {
-+		const response = await completeWithProviderRetry(
-+			() =>
-+				completeSimple(
-+					requestModel,
-+					{
-+						systemPrompt: REFINEMENT_SYSTEM_PROMPT,
-+						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
-+					},
-+					{
-+						reasoning,
-+						maxTokens,
-+						signal,
-+						apiKey,
-+						headers,
-+						sessionId,
-+					},
-+				),
-+			{ policy: options.retry, signal },
-+		);
+ #[must_use]
+@@ -257,16 +258,44 @@ pub async fn plan_refinement(
+     let mut request_model = model.clone();
+     request_model.max_tokens = request_max_tokens.min(REFINEMENT_MAX_OUTPUT_TOKENS);
  
--	if (response.stopReason === "error") {
--		throw new Error(`Refinement failed: ${response.errorMessage || "Unknown error"}`);
--	}
--	if (response.stopReason === "length") {
--		throw new Error(`Refinement failed: ${TRUNCATED_JSON_ERROR}`);
--	}
-+		if (response.stopReason === "error") {
-+			throw new Error(`Refinement failed: ${response.errorMessage || "Unknown error"}`);
-+		}
-+		if (response.stopReason === "length") {
-+			throw new Error(`Refinement failed: ${TRUNCATED_JSON_ERROR}`);
-+		}
- 
--	const text = response.content
--		.filter((content): content is { type: "text"; text: string } => content.type === "text")
--		.map((content) => content.text)
--		.join("\n");
--	return { proposal: parseProposal(text), id };
-+		const text = response.content
-+			.filter((content): content is { type: "text"; text: string } => content.type === "text")
-+			.map((content) => content.text)
-+			.join("\n");
-+		try {
-+			return { proposal: parseProposal(text), id };
-+		} catch (error) {
-+			if (attempt > 0 || signal?.aborted) throw error;
-+		}
-+	}
+-    let reply = refine_call(request_model, REFINEMENT_SYSTEM_PROMPT, user_prompt).await?;
+-    let text = assistant_text(&reply);
++    let proposal = call_and_parse(
++        &refine_call,
++        &request_model,
++        REFINEMENT_SYSTEM_PROMPT,
++        &user_prompt,
++        |text| parse_proposal(text).map_err(anyhow::Error::msg),
++    )
++    .await?;
+     Ok(RefinementPlan {
+-        proposal: parse_proposal(&text).map_err(anyhow::Error::msg)?,
++        proposal,
+         id,
+         rollback_of: None,
+         rollback_scope: None,
+     })
  }
  
- function parseAutoRefineReview(text: string): AutoRefineReview {
-@@ -1370,36 +1377,43 @@ ${conversation}
- 		reasoning === "off"
- 			? Math.min(requestModel.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS)
- 			: requestModel.maxTokens;
--	const response = await completeWithProviderRetry(
--		() =>
--			completeSimple(
--				requestModel,
--				{
--					systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
--					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
--				},
--				{
--					reasoning,
--					maxTokens,
--					signal,
--					apiKey,
--					headers,
--					sessionId,
--				},
--			),
--		{ policy: retry, signal },
--	);
--	if (response.stopReason === "error") {
--		throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);
--	}
--	if (response.stopReason === "length") {
--		throw new Error(`Auto-refine review failed: ${TRUNCATED_JSON_ERROR}`);
-+	// A sampled reply can miss the JSON shape (prose, leaked tool-call markup), so resend once.
-+	for (let attempt = 0; ; attempt++) {
-+		const response = await completeWithProviderRetry(
-+			() =>
-+				completeSimple(
-+					requestModel,
-+					{
-+						systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
-+						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
-+					},
-+					{
-+						reasoning,
-+						maxTokens,
-+						signal,
-+						apiKey,
-+						headers,
-+						sessionId,
-+					},
-+				),
-+			{ policy: retry, signal },
-+		);
-+		if (response.stopReason === "error") {
-+			throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);
-+		}
-+		if (response.stopReason === "length") {
-+			throw new Error(`Auto-refine review failed: ${TRUNCATED_JSON_ERROR}`);
-+		}
-+		const text = response.content
-+			.filter((content): content is { type: "text"; text: string } => content.type === "text")
-+			.map((content) => content.text)
-+			.join("\n");
-+		try {
-+			return parseAutoRefineReview(text);
-+		} catch (error) {
-+			if (attempt > 0 || signal?.aborted) throw error;
-+		}
- 	}
--	const text = response.content
--		.filter((content): content is { type: "text"; text: string } => content.type === "text")
--		.map((content) => content.text)
--		.join("\n");
--	return parseAutoRefineReview(text);
++/// One refiner call parsed by `parse`. A sampled reply can miss the JSON shape (prose,
++/// leaked tool-call markup), so an unparseable reply is resent once; a truncated one is not.
++async fn call_and_parse<T>(
++    refine_call: &RefinerFn,
++    model: &pa_types::ai::Model,
++    system_prompt: &'static str,
++    user_prompt: &str,
++    parse: impl Fn(&str) -> anyhow::Result<T>,
++) -> anyhow::Result<T> {
++    let mut attempt = 0;
++    loop {
++        let reply = refine_call(model.clone(), system_prompt, user_prompt.to_string()).await?;
++        match parse(&assistant_text(&reply)) {
++            Ok(value) => return Ok(value),
++            Err(error) if attempt > 0 || reply.stop_reason == pa_types::ai::StopReason::Length => {
++                return Err(error)
++            }
++            Err(_) => attempt += 1,
++        }
++    }
++}
++
+ fn assistant_text(reply: &AssistantMessage) -> String {
+     reply
+         .content
+@@ -382,8 +411,14 @@ pub async fn review_auto_refine(
+     )?;
+     let mut request_model = model.clone();
+     request_model.max_tokens = request_max_tokens.min(AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS);
+-    let reply = review_call(request_model, AUTO_REFINE_REVIEW_SYSTEM_PROMPT, user_prompt).await?;
+-    parse_auto_refine_review(&assistant_text(&reply))
++    call_and_parse(
++        &review_call,
++        &request_model,
++        AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
++        &user_prompt,
++        parse_auto_refine_review,
++    )
++    .await
  }
  
- export async function refineHarness(
+ #[cfg(test)]
+@@ -416,7 +451,7 @@ mod tests {
+     fn seam(text: &str) -> RefinerFn {
+         let text = text.to_string();
+         Box::new(move |_model, _system, _prompt| {
+-            let text = text;
++            let text = text.clone();
+             Box::pin(async move { Ok(text_message(&text)) })
+         })
+     }
+@@ -460,7 +495,7 @@ mod tests {
+         let reply = r#"{"summary":"s","edits":[]}"#.to_string();
+         let plan_call: RefinerFn = Box::new(move |_model, system, _prompt| {
+             plan_recorder.lock().unwrap().push(system);
+-            let reply = reply;
++            let reply = reply.clone();
+             Box::pin(async move { Ok(text_message(&reply)) })
+         });
+         let state = super::super::empty_harness_state();
+@@ -618,6 +653,58 @@ mod tests {
+         assert_eq!(rejected.instructions, None);
+     }
+ 
++    /// A seam answering each call with the next scripted reply, counting the calls.
++    fn scripted(
++        replies: &'static [&'static str],
++    ) -> (RefinerFn, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
++        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
++        let counter = std::sync::Arc::clone(&calls);
++        let seam: RefinerFn = Box::new(move |_model, _system, _prompt| {
++            let index = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            let reply = replies[index.min(replies.len() - 1)];
++            Box::pin(async move { Ok(text_message(reply)) })
++        });
++        (seam, calls)
++    }
++
++    #[tokio::test]
++    async fn an_unparseable_reply_is_resent_once() {
++        let state = super::super::empty_harness_state();
++        let (seam, calls) = scripted(&[
++            "Sure, here is my plan.",
++            r#"{"summary":"second","edits":[]}"#,
++        ]);
++        let plan = plan_refinement(
++            &[],
++            &state,
++            &[],
++            &test_model(),
++            &RefineOptions::default(),
++            seam,
++        )
++        .await
++        .unwrap();
++        assert_eq!(plan.proposal.summary, "second");
++        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
++
++        // Two bad replies fail after exactly one resend.
++        let (seam, calls) = scripted(&["no json", "still no json"]);
++        let review = review_auto_refine(
++            &[],
++            &state,
++            &[],
++            &test_model(),
++            &AutoRefineReviewContext {
++                reason: "checkpoint".to_string(),
++                turns_since_last_review: 1,
++            },
++            seam,
++        )
++        .await;
++        assert!(review.is_err());
++        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
++    }
++
+     fn test_model() -> pa_types::ai::Model {
+         pa_types::ai::Model {
+             id: "test".to_string(),
+Index: prime-agent-src/crates/pa-core/src/session_engine/refine.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/refine.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/refine.rs
+@@ -588,7 +588,7 @@ impl AgentSession {
+ #[must_use]
+ pub fn default_refiner_call(api_key: Option<String>) -> crate::refinement::executor::RefinerFn {
+     Box::new(move |model, system_prompt, prompt| {
+-        let api_key = api_key;
++        let api_key = api_key.clone();
+         Box::pin(async move {
+             let context = pa_types::ai::Context {
+                 system_prompt: Some(system_prompt.to_string()),
+@@ -641,7 +641,7 @@ mod tests {
+     fn seam(text: &str) -> RefinerFn {
+         let text = text.to_string();
+         Box::new(move |_model, _system, _prompt| {
+-            let text = text;
++            let text = text.clone();
+             Box::pin(async move { Ok(text_assistant(&text)) })
+         })
+     }
+@@ -1085,7 +1085,7 @@ Reviewer instructions: record it"
+                         system,
+                         user: prompt,
+                     });
+-                    let reply = reply;
++                    let reply = reply.clone();
+                     Box::pin(async move { Ok(text_assistant(&reply)) })
+                 }),
+                 None,

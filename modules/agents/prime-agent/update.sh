@@ -1,5 +1,5 @@
 #!/usr/bin/env nix-shell
-#! nix-shell -i bash -p curl git jq nix nix-prefetch-git npm-lockfile-fix prefetch-npm-deps
+#! nix-shell -i bash -p curl git jq nix nix-prefetch-git
 
 set -euo pipefail
 
@@ -38,40 +38,34 @@ main() {
   # Upstream tags `vX.Y.Z`; the derivation's `version` carries no prefix.
   local version="${tag#v}"
 
-  # global on purpose: the EXIT trap fires after main() returns,
-  # where a `local` would already be out of scope (set -u)
-  tmpdir=$(mktemp -d)
-  trap 'rm -rf "$tmpdir"' EXIT
-
-  git clone --depth 1 --branch "$tag" "https://github.com/$REPO.git" "$tmpdir/repo" 2>/dev/null
-  # package.nix runs npm-lockfile-fix in fetchFromGitHub's postFetch, so the source
-  # hash must cover the fixed tree: raw nix-prefetch-git hashes differ after the fix.
-  npm-lockfile-fix "$tmpdir/repo/package-lock.json"
-  rm -rf "$tmpdir/repo/.git"
-
-  info "  Computing source hash (tree after npm-lockfile-fix)..."
+  info "  Computing source hash..."
   local hash
-  hash=$(nix hash path "$tmpdir/repo" || echo "")
+  hash=$(nix-prefetch-git --quiet "https://github.com/$REPO.git" "refs/tags/$tag" | jq -r .hash || echo "")
   require_nonempty prime-agent "$version" "$tag" "$hash"
   info "  Hash: $hash"
 
-  # npmDepsHash from the same fixed lockfile: buildNpmPackage defaults to
-  # NPM_FETCHER_VERSION=2 while prefetch-npm-deps defaults to v1, so set it.
-  info "  Computing npmDepsHash..."
-  local npmDepsHash
-  npmDepsHash=$(NPM_FETCHER_VERSION=2 prefetch-npm-deps "$tmpdir/repo/package-lock.json" 2>/dev/null || echo "")
-  require_nonempty prime-agent-npm "$version" "$tag" "$npmDepsHash"
-  info "  npmDepsHash: $npmDepsHash"
+  # fetchCargoVendor is a FOD: build it against a fake hash and read the real one back.
+  info "  Computing cargoHash..."
+  local cargoHash
+  cargoHash=$(nix build --no-link --impure --expr "
+    let pkgs = import <nixpkgs> { }; in
+    pkgs.rustPlatform.fetchCargoVendor {
+      src = pkgs.fetchFromGitHub { owner = "PrimeIntellect-ai"; repo = "prime-agent"; tag = "$tag"; hash = "$hash"; };
+      hash = pkgs.lib.fakeHash;
+    }" 2>&1 | sed -n 's/.*got: *\(sha256-[A-Za-z0-9+/=]*\).*/\1/p' | head -1)
+  require_nonempty prime-agent-cargo "$version" "$tag" "$cargoHash"
+  info "  cargoHash: $cargoHash"
 
   info "  Pinning prime-agent-catalog HEAD..."
   local catalogRev catalogHash
   catalogRev=$(git ls-remote "https://github.com/$CATALOG_REPO.git" HEAD | cut -f1)
   catalogHash=$(nix-prefetch-git --quiet "https://github.com/$CATALOG_REPO.git" "$catalogRev" | jq -r .hash)
   require_nonempty prime-agent-catalog "$version" "$catalogRev" "$catalogHash"
+  info "  Upstream patches: re-run 'quilt push -a' in prime-agent-src at $tag and refresh any that fail."
 
-  jq -n --arg version "$version" --arg rev "$tag" --arg hash "$hash" --arg npmDepsHash "$npmDepsHash" \
+  jq -n --arg version "$version" --arg rev "$tag" --arg hash "$hash" --arg cargoHash "$cargoHash" \
     --arg catalogRev "$catalogRev" --arg catalogHash "$catalogHash" \
-    '{version: $version, rev: $rev, hash: $hash, npmDepsHash: $npmDepsHash, catalogRev: $catalogRev, catalogHash: $catalogHash}' | write_pin "$PIN"
+    '{version: $version, rev: $rev, hash: $hash, cargoHash: $cargoHash, catalogRev: $catalogRev, catalogHash: $catalogHash}' | write_pin "$PIN"
 
   # Update pi-clm extension
   info "Updating pi-clm extension..."

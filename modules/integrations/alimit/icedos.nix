@@ -85,7 +85,6 @@
             mkDefault
             mkIf
             optional
-            optionalAttrs
             replaceStrings
             ;
 
@@ -98,20 +97,6 @@
             "ollama"
             "openrouter"
           ];
-
-          hasPrimeAgent = icedosLib.hasModule {
-            inherit config repoUrl;
-            name = "prime-agent";
-          };
-
-          # cost-footer already shows the opencode-go plan rows.
-          primeAgentSkip = optional (
-            hasPrimeAgent && config.icedos.ai-tools.prime-agent.extensions.meters.cost
-          ) "opencode-go";
-
-          primeAgentExtension =
-            replaceStrings [ "@alimit@" "@skip@" ] [ alimit (builtins.toJSON primeAgentSkip) ]
-              (builtins.readFile ./prime-agent.ts);
 
           opencodePlugin = pkgs.writeText "alimit-opencode.tsx" (
             replaceStrings [ "@alimit@" ] [ alimit ] (builtins.readFile ./opencode.tsx)
@@ -142,11 +127,6 @@
             alimit.users = icedosLib.users.genDefaults {
               inherit (config.icedos) users;
             };
-          }
-          // optionalAttrs hasPrimeAgent {
-            prime-agent.extensions.inline.alimit = mkIf (any (u: u.statusLine) (attrValues alimitUsers)) (
-              mkDefault primeAgentExtension
-            );
           };
 
           icedos.system.toolset.commands = mkIf (alimitUsers != { }) [

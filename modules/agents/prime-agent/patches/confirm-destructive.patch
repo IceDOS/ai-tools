@@ -1,0 +1,311 @@
+Index: prime-agent-src/crates/pa-cli/src/client_settings.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-cli/src/client_settings.rs
++++ prime-agent-src/crates/pa-cli/src/client_settings.rs
+@@ -134,6 +134,15 @@ impl ClientSettings for CliClientSetting
+         }
+     }
+ 
++    fn confirm_destructive(&self) -> bool {
++        self.manager()
++            .settings()
++            .extra
++            .get("confirmDestructive")
++            .and_then(serde_json::Value::as_bool)
++            .unwrap_or(true)
++    }
++
+     fn prompt_suggester(&self) -> Option<std::sync::Arc<dyn pa_tui::prompt_suggest::PromptSuggester>> {
+         Some(std::sync::Arc::new(crate::prompt_suggest::CliPromptSuggester {
+             agent_dir: self.agent_dir.clone(),
+@@ -438,10 +447,16 @@ mod tests {
+         let config = settings.status_command().expect("configured");
+         assert_eq!(config.command, ["helper", "--config", "/c.json"]);
+         assert_eq!(config.busy_interval, std::time::Duration::from_millis(1500));
+-        assert_eq!(config.interval, std::time::Duration::from_millis(30_000));
++        assert_eq!(config.interval, std::time::Duration::from_secs(30));
+         assert!(config.visible);
+         assert!(cli_settings_with(r#"{"statusCommand":{"command":[]}}"#)
+             .status_command()
+             .is_none());
+     }
++
++    #[test]
++    fn confirm_destructive_defaults_on() {
++        assert!(cli_settings_with("{}").confirm_destructive());
++        assert!(!cli_settings_with(r#"{"confirmDestructive":false}"#).confirm_destructive());
++    }
+ }
+Index: prime-agent-src/crates/pa-tui/src/client_settings.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/client_settings.rs
++++ prime-agent-src/crates/pa-tui/src/client_settings.rs
+@@ -46,6 +46,10 @@ pub trait ClientSettings: Send + Sync {
+     fn prompt_suggestions(&self) -> crate::prompt_suggest::PromptSuggestConfig {
+         crate::prompt_suggest::PromptSuggestConfig { enabled: false, model: None }
+     }
++    /// `confirmDestructive` (top-level key, default true): ask before leaving a busy session.
++    fn confirm_destructive(&self) -> bool {
++        true
++    }
+     /// The model call behind suggestions; `None` disables the feature.
+     fn prompt_suggester(&self) -> Option<std::sync::Arc<dyn crate::prompt_suggest::PromptSuggester>> {
+         None
+Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui.rs
+@@ -12,6 +12,7 @@ mod commands;
+ mod factory;
+ mod heartbeats;
+ mod keys;
++mod leave_guard;
+ mod lifecycle;
+ mod model_picker;
+ mod notes;
+Index: prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/commands.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
+@@ -6,6 +6,7 @@ use super::{
+     PendingConfirm, RebuildKind, Result, SessionUi, SlashCommandExecution, SlashCommandRegistry,
+     StatusKind, SubmitBehavior, Value, UI_REQUEST_TIMEOUT_MS,
+ };
++use super::settings::LeaveTarget;
+ 
+ impl SessionUi {
+     /// Slash-command dispatch: builtin client commands without a UI report unavailability, session
+@@ -50,7 +51,10 @@ impl SessionUi {
+             "switch" => {
+                 if args.is_empty() {
+                     self.note("usage: /switch <n|id> (run /list first)", view);
+-                } else {
++                } else if !self.park_leave(
++                    PendingConfirm::LeaveSession { target: LeaveTarget::Switch(args.clone()) },
++                    view,
++                ) {
+                     self.switch_to(&args, view).await?;
+                 }
+                 return Ok(());
+@@ -128,7 +132,9 @@ impl SessionUi {
+                 self.note("Usage: /clear", view);
+             }
+             "new" => {
+-                self.start_new_session(view).await?;
++                if !self.park_leave(PendingConfirm::NewSession, view) {
++                    self.start_new_session(view).await?;
++                }
+             }
+             // `/quit` detaches and exits (the session keeps running in the daemon).
+             "quit" => {
+@@ -136,13 +142,25 @@ impl SessionUi {
+             }
+             "resume" => {
+                 if resolved.args.is_empty() {
+-                    self.open_agents_view = true;
+-                    self.exit_requested = true;
++                    if !self.park_leave(
++                        PendingConfirm::LeaveSession { target: LeaveTarget::AgentsView },
++                        view,
++                    ) {
++                        self.open_agents_view = true;
++                        self.exit_requested = true;
++                    }
+                 } else {
+                     match self.resolve_resume_selector(&resolved.args) {
+                         Some(selection) => {
+-                            self.pending_selection = Some(selection);
+-                            self.exit_requested = true;
++                            if !self.park_leave(
++                                PendingConfirm::LeaveSession {
++                                    target: LeaveTarget::Resume(selection.clone()),
++                                },
++                                view,
++                            ) {
++                                self.pending_selection = Some(selection);
++                                self.exit_requested = true;
++                            }
+                         }
+                         None => {
+                             self.note(
+Index: prime-agent-src/crates/pa-tui/src/session_ui/keys.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/keys.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/keys.rs
+@@ -5,6 +5,7 @@ use super::{
+     EffortPickerAction, Instant, KeyEvent, Map, QueueBrowseDirection, QueueLane, Result, SessionUi,
+     StatusKind, SubmitBehavior,
+ };
++use super::settings::{LeaveTarget, PendingConfirm};
+ 
+ /// How long the Ctrl+C exit hint arms the second-press exit.
+ const CTRL_C_EXIT_HINT_MS: u64 = 2_000;
+@@ -704,7 +705,9 @@ impl SessionUi {
+         }
+         // The `/new` flow; fires with a draft too (no editor-text gate).
+         if view.editor.keybindings().matches(&id, "app.session.new") {
+-            self.start_new_session(view).await?;
++            if !self.park_leave(PendingConfirm::NewSession, view) {
++                self.start_new_session(view).await?;
++            }
+             self.dirty = true;
+             return Ok(());
+         }
+@@ -712,8 +715,13 @@ impl SessionUi {
+         // on the exit path and returns when the chat reopens.
+         if view.editor.keybindings().matches(&id, "app.session.resume") {
+             if self.return_to_agents_view {
+-                self.open_agents_view = true;
+-                self.exit_requested = true;
++                if !self.park_leave(
++                    PendingConfirm::LeaveSession { target: LeaveTarget::AgentsView },
++                    view,
++                ) {
++                    self.open_agents_view = true;
++                    self.exit_requested = true;
++                }
+             } else {
+                 self.note(
+                     "The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
+Index: prime-agent-src/crates/pa-tui/src/session_ui/leave_guard.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-tui/src/session_ui/leave_guard.rs
+@@ -0,0 +1,101 @@
++//! confirm-destructive: ask before `/new`, `/resume` or `/switch` leaves a busy session.
++
++use anyhow::Result;
++
++use super::settings::{LeaveTarget, PendingConfirm};
++use super::{AgentView, SessionUi};
++use crate::chat::ChatEntry;
++
++/// The newest row that is not a status note is the user's prompt.
++pub(crate) fn has_unreplied_user_message(chat: &[ChatEntry]) -> bool {
++    chat.iter()
++        .rev()
++        .find(|entry| !matches!(entry, ChatEntry::Status { .. }))
++        .is_some_and(|entry| matches!(entry, ChatEntry::User { .. }))
++}
++
++impl SessionUi {
++    fn leave_needs_confirm(&self, view: &AgentView) -> bool {
++        let enabled = self
++            .client_settings
++            .as_ref()
++            .is_none_or(|settings| settings.confirm_destructive());
++        enabled
++            && (self.turn_active
++                || view.working.is_some()
++                || self.work_in_flight()
++                || has_unreplied_user_message(&view.chat))
++    }
++
++    /// `true` when a confirm now owns the frame; its `Yes` runs the leave.
++    pub(super) fn park_leave(&mut self, pending: PendingConfirm, view: &mut AgentView) -> bool {
++        if !self.leave_needs_confirm(view) {
++            return false;
++        }
++        view.confirm = Some(crate::confirm::ConfirmPanel::yes_no(
++            "Leave session",
++            "This session has a running turn or an unanswered message.\nLeave it anyway? It keeps running in the daemon.",
++        ));
++        self.pending_confirm = Some(pending);
++        self.dirty = true;
++        true
++    }
++
++    pub(super) async fn run_leave(&mut self, pending: PendingConfirm, view: &mut AgentView) -> Result<()> {
++        match pending {
++            PendingConfirm::NewSession => self.start_new_session(view).await?,
++            PendingConfirm::LeaveSession { target: LeaveTarget::AgentsView } => {
++                self.open_agents_view = true;
++                self.exit_requested = true;
++            }
++            PendingConfirm::LeaveSession { target: LeaveTarget::Resume(selection) } => {
++                self.pending_selection = Some(selection);
++                self.exit_requested = true;
++            }
++            PendingConfirm::LeaveSession { target: LeaveTarget::Switch(target) } => {
++                self.switch_to(&target, view).await?;
++            }
++            _ => {}
++        }
++        self.dirty = true;
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::chat::StatusKind;
++    use crate::theme::{ColorMode, Theme};
++    use std::path::PathBuf;
++
++    fn user(text: &str) -> ChatEntry {
++        ChatEntry::User { text: text.to_string() }
++    }
++
++    fn status(text: &str) -> ChatEntry {
++        ChatEntry::Status { text: text.to_string(), kind: StatusKind::Info }
++    }
++
++    #[test]
++    fn a_trailing_user_row_is_unreplied_even_behind_status_notes() {
++        assert!(!has_unreplied_user_message(&[]));
++        assert!(has_unreplied_user_message(&[user("go")]));
++        assert!(has_unreplied_user_message(&[user("go"), status("retrying")]));
++        assert!(!has_unreplied_user_message(&[status("started session")]));
++    }
++
++    #[test]
++    fn a_running_turn_parks_the_leave_and_an_idle_session_does_not() {
++        let mut session = SessionUi::test_new(PathBuf::from("/test/repo"));
++        let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
++        assert!(!session.park_leave(PendingConfirm::NewSession, &mut view));
++        assert!(view.confirm.is_none());
++
++        session.turn_active = true;
++        let target = PendingConfirm::LeaveSession { target: LeaveTarget::Switch("2".to_string()) };
++        assert!(session.park_leave(target.clone(), &mut view));
++        assert!(view.confirm.is_some());
++        assert_eq!(session.pending_confirm, Some(target));
++    }
++}
+Index: prime-agent-src/crates/pa-tui/src/session_ui/settings.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/settings.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/settings.rs
+@@ -25,6 +25,21 @@ pub(super) enum PendingConfirm {
+     Update,
+     /// Forking from a checkpointed prompt: `Yes` forks and restores the code, `No` only forks.
+     ForkCheckpoint { entry_id: String, checkpoint_ref: String },
++    /// `/new` or `app.session.new` while the session is busy.
++    NewSession,
++    /// `/resume` or `/switch` while the session is busy.
++    LeaveSession { target: LeaveTarget },
++}
++
++/// Where a confirmed leave goes.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(super) enum LeaveTarget {
++    /// The agents view (`/resume` without an argument, or `app.session.resume`).
++    AgentsView,
++    /// `/resume <selector>`.
++    Resume(crate::interactive::SessionSelection),
++    /// `/switch <n|id>`.
++    Switch(String),
+ }
+ 
+ impl SessionUi {
+@@ -98,6 +113,9 @@ impl SessionUi {
+                         Some(PendingConfirm::Update) => {
+                             self.spawn_update(view);
+                         }
++                        Some(pending @ (PendingConfirm::NewSession | PendingConfirm::LeaveSession { .. })) => {
++                            self.run_leave(pending, view).await?;
++                        }
+                         Some(PendingConfirm::ForkCheckpoint { .. }) | None => {}
+                     }
+                 }

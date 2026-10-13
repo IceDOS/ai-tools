@@ -1,0 +1,2086 @@
+Index: prime-agent-src/crates/pa-types/src/clm_view.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-types/src/clm_view.rs
+@@ -0,0 +1,111 @@
++//! Wire shape of the `/clm` panel (`get_clm_view` reply).
++
++use serde::{Deserialize, Serialize};
++
++#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ClmView {
++    pub status: ClmStatus,
++    pub settings: Vec<ClmSetting>,
++    /// Revisions with an accepted edit, oldest first.
++    pub revisions: Vec<u64>,
++    /// The revision `edits` belongs to.
++    pub revision: Option<u64>,
++    pub edits: Vec<ClmEditMessage>,
++    /// Why `edits` is empty although `revision` is set.
++    pub note: Option<String>,
++}
++
++#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ClmStatus {
++    pub enabled: bool,
++    pub estimate: u64,
++    pub budget: Option<u64>,
++    pub observed: Option<u64>,
++    pub revision: u64,
++    pub edit_count: usize,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "lowercase")]
++pub enum ClmSettingKind {
++    Bool,
++    Choice,
++    Number,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ClmSetting {
++    pub key: String,
++    pub label: String,
++    pub value: String,
++    pub default: String,
++    pub kind: ClmSettingKind,
++    pub choices: Vec<String>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "lowercase")]
++pub enum ClmSegmentKind {
++    Same,
++    Del,
++    Add,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ClmSegment {
++    pub kind: ClmSegmentKind,
++    pub text: String,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ClmEditMessage {
++    pub role: String,
++    pub changed: bool,
++    pub segments: Vec<ClmSegment>,
++}
++
++impl ClmEditMessage {
++    /// Text before (`Del` and `Same`) or after (`Add` and `Same`) the edit.
++    #[must_use]
++    pub fn side(&self, after: bool) -> String {
++        let skip = if after { ClmSegmentKind::Del } else { ClmSegmentKind::Add };
++        self.segments
++            .iter()
++            .filter(|segment| segment.kind != skip)
++            .map(|segment| segment.text.as_str())
++            .collect()
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn view_round_trips_in_camel_case() {
++        let view = ClmView {
++            status: ClmStatus { enabled: true, edit_count: 1, ..ClmStatus::default() },
++            revision: Some(1),
++            edits: vec![ClmEditMessage {
++                role: "user".into(),
++                changed: true,
++                segments: vec![
++                    ClmSegment { kind: ClmSegmentKind::Same, text: "a ".into() },
++                    ClmSegment { kind: ClmSegmentKind::Del, text: "b".into() },
++                    ClmSegment { kind: ClmSegmentKind::Add, text: "c".into() },
++                ],
++            }],
++            ..ClmView::default()
++        };
++        let value = serde_json::to_value(&view).unwrap();
++        assert_eq!(value["status"]["editCount"], 1);
++        assert_eq!(value["edits"][0]["segments"][1]["kind"], "del");
++        assert_eq!(serde_json::from_value::<ClmView>(value).unwrap(), view);
++        assert_eq!(view.edits[0].side(false), "a b");
++        assert_eq!(view.edits[0].side(true), "a c");
++    }
++}
+Index: prime-agent-src/crates/pa-types/src/daemon/command.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/daemon/command.rs
++++ prime-agent-src/crates/pa-types/src/daemon/command.rs
+@@ -616,6 +616,28 @@ pub enum DaemonCommand {
+         #[serde(flatten)]
+         rest: JsonMap,
+     },
++    GetClmView {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<String>,
++        active_session_id: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        revision: Option<u64>,
++        #[serde(flatten)]
++        rest: JsonMap,
++    },
++    ClmConfigure {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<String>,
++        active_session_id: String,
++        /// `on`, `off`, `reset`, `set` (with `key` and `value`) or `reset_settings`.
++        action: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        key: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        value: Option<String>,
++        #[serde(flatten)]
++        rest: JsonMap,
++    },
+     GetContextTree {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         id: Option<String>,
+@@ -1262,4 +1284,18 @@ mod tests {
+     fn mark_anthropic_warning_shown_roundtrip() {
+         rt::<DaemonCommand>(r#"{"type":"mark_anthropic_warning_shown","activeSessionId":"s1"}"#);
+     }
++
++    #[test]
++    fn clm_commands_use_their_wire_names() {
++        let view: crate::daemon::DaemonCommand = serde_json::from_str(
++            r#"{"type":"get_clm_view","activeSessionId":"s","revision":2}"#,
++        )
++        .unwrap();
++        assert!(matches!(view, crate::daemon::DaemonCommand::GetClmView { revision: Some(2), .. }));
++        let set: crate::daemon::DaemonCommand = serde_json::from_str(
++            r#"{"type":"clm_configure","activeSessionId":"s","action":"set","key":"budget","value":"64000"}"#,
++        )
++        .unwrap();
++        assert!(matches!(set, crate::daemon::DaemonCommand::ClmConfigure { ref action, .. } if action == "set"));
++    }
+ }
+Index: prime-agent-src/crates/pa-types/src/daemon/plane.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/daemon/plane.rs
++++ prime-agent-src/crates/pa-types/src/daemon/plane.rs
+@@ -48,6 +48,8 @@ pub fn command_plane(command_type: &str)
+         | "get_messages"
+         | "get_rlm_children"
+         | "get_session_stats"
++        | "get_clm_view"
++        | "clm_configure"
+         | "get_context_tree"
+         | "get_commands"
+         | "get_resource_snapshot"
+@@ -129,6 +131,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str]
+     "get_messages",
+     "get_rlm_children",
+     "get_session_stats",
++    "get_clm_view",
+     "get_context_tree",
+     "get_commands",
+     "get_resource_snapshot",
+Index: prime-agent-src/crates/pa-types/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/lib.rs
++++ prime-agent-src/crates/pa-types/src/lib.rs
+@@ -7,6 +7,7 @@
+ //! survive a parse/serialize round trip: the re-parsed JSON must equal the original.
+ 
+ pub mod ai;
++pub mod clm_view;
+ pub mod daemon;
+ pub mod goal;
+ pub mod incident;
+Index: prime-agent-src/crates/pa-types/src/slash_commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/slash_commands.rs
++++ prime-agent-src/crates/pa-types/src/slash_commands.rs
+@@ -77,6 +77,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS:
+     BuiltinSlashCommand { name: "heartbeat", description: "Set or view a persistent heartbeat; delivery defaults to steer, use --follow-up to queue; supports pause, resume, stop, and clear", execution: SlashCommandExecution::Client, argument_hint: Some("[status|pause|resume|stop|[every <duration>] [--steer|--follow-up] <instruction>]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "heartbeats", description: "View and manage all user and agent heartbeats", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+     BuiltinSlashCommand { name: "factory", description: "Show or set the agent factory opt-in gate (off by default)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off|status]"), aliases: &[], takes_argument: true },
++    BuiltinSlashCommand { name: "clm", description: "Context Language Models: edits, settings and status for this session", execution: SlashCommandExecution::Client, argument_hint: Some("[edits|settings|status|config <key> <value>|config reset|on|off|reset]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+     BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
+Index: prime-agent-src/crates/pa-core/src/clm/edits.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/edits.rs
+@@ -0,0 +1,195 @@
++//! Word-level diff of an accepted edit, over the jsdiff line port.
++
++use pa_types::clm_view::{ClmEditMessage, ClmSegment, ClmSegmentKind};
++use serde_json::Value;
++
++use super::document::render_message;
++use crate::tools::jsdiff::diff_lines;
++
++// Tokens become diff lines, so newlines inside them are swapped out and back.
++const NEWLINE: char = '\u{1}';
++
++fn tokens(text: &str) -> Vec<String> {
++    let mut out: Vec<String> = Vec::new();
++    for ch in text.chars() {
++        match out.last_mut() {
++            Some(last)
++                if last
++                    .chars()
++                    .last()
++                    .is_some_and(|prev| prev.is_whitespace() == ch.is_whitespace()) =>
++            {
++                last.push(ch);
++            }
++            _ => out.push(ch.to_string()),
++        }
++    }
++    out
++}
++
++fn as_lines(tokens: &[String]) -> String {
++    let mut out = String::new();
++    for token in tokens {
++        out.push_str(&token.replace('\n', &NEWLINE.to_string()));
++        out.push('\n');
++    }
++    out
++}
++
++fn push(out: &mut Vec<ClmSegment>, kind: ClmSegmentKind, text: String) {
++    if text.is_empty() {
++        return;
++    }
++    match out.last_mut() {
++        Some(last) if last.kind == kind => last.text.push_str(&text),
++        _ => out.push(ClmSegment { kind, text }),
++    }
++}
++
++#[must_use]
++pub fn word_segments(old: &str, new: &str) -> Vec<ClmSegment> {
++    let mut out = Vec::new();
++    for part in diff_lines(&as_lines(&tokens(old)), &as_lines(&tokens(new))) {
++        let kind = if part.added {
++            ClmSegmentKind::Add
++        } else if part.removed {
++            ClmSegmentKind::Del
++        } else {
++            ClmSegmentKind::Same
++        };
++        let text: String = part
++            .value
++            .split_terminator('\n')
++            .map(|token| token.replace(NEWLINE, "\n"))
++            .collect();
++        push(&mut out, kind, text);
++    }
++    out
++}
++
++fn label(message: &Value) -> String {
++    message["details"]["contextRole"]
++        .as_str()
++        .or_else(|| message["role"].as_str())
++        .unwrap_or("")
++        .to_string()
++}
++
++fn key(message: &Value) -> String {
++    format!(
++        "{}{NEWLINE}{}\n",
++        label(message),
++        render_message(message).replace('\n', &NEWLINE.to_string())
++    )
++}
++
++fn whole(message: &Value, kind: ClmSegmentKind) -> ClmEditMessage {
++    ClmEditMessage {
++        role: label(message),
++        changed: kind != ClmSegmentKind::Same,
++        segments: vec![ClmSegment {
++            kind,
++            text: render_message(message),
++        }],
++    }
++}
++
++/// One row per message: unchanged, rewritten (paired in order inside a changed
++/// run), deleted or added.
++#[must_use]
++pub fn message_edits(before: &[Value], after: &[Value]) -> Vec<ClmEditMessage> {
++    let old: String = before.iter().map(key).collect();
++    let new: String = after.iter().map(key).collect();
++    let parts = diff_lines(&old, &new);
++    let (mut out, mut i, mut j, mut k) = (Vec::new(), 0, 0, 0);
++    while k < parts.len() {
++        if !parts[k].added && !parts[k].removed {
++            for _ in 0..parts[k].count {
++                out.push(whole(&after[j], ClmSegmentKind::Same));
++                i += 1;
++                j += 1;
++            }
++            k += 1;
++            continue;
++        }
++        let (mut removed, mut added) = (0, 0);
++        while k < parts.len() && (parts[k].added || parts[k].removed) {
++            if parts[k].added {
++                added += parts[k].count;
++            } else {
++                removed += parts[k].count;
++            }
++            k += 1;
++        }
++        for n in 0..removed.max(added) {
++            out.push(match (n < removed, n < added) {
++                (true, true) => ClmEditMessage {
++                    role: label(&after[j + n]),
++                    changed: true,
++                    segments: word_segments(
++                        &render_message(&before[i + n]),
++                        &render_message(&after[j + n]),
++                    ),
++                },
++                (true, false) => whole(&before[i + n], ClmSegmentKind::Del),
++                _ => whole(&after[j + n], ClmSegmentKind::Add),
++            });
++        }
++        i += removed;
++        j += added;
++    }
++    out
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn seg(kind: ClmSegmentKind, text: &str) -> ClmSegment {
++        ClmSegment {
++            kind,
++            text: text.into(),
++        }
++    }
++
++    #[test]
++    fn words_diff_keeps_spacing_and_newlines() {
++        assert_eq!(
++            word_segments("fix the old bug\nnow", "fix the new bug\nnow"),
++            vec![
++                seg(ClmSegmentKind::Same, "fix the "),
++                seg(ClmSegmentKind::Del, "old"),
++                seg(ClmSegmentKind::Add, "new"),
++                seg(ClmSegmentKind::Same, " bug\nnow"),
++            ]
++        );
++        assert_eq!(
++            word_segments("", "added"),
++            vec![seg(ClmSegmentKind::Add, "added")]
++        );
++    }
++
++    #[test]
++    fn messages_pair_rewrites_and_mark_deletes_and_adds() {
++        let user = json!({ "role": "user", "content": "task: fix a.py", "timestamp": 1 });
++        let long = json!({ "role": "assistant", "content": [{ "type": "text", "text": "a very long read" }], "timestamp": 2 });
++        let short = json!({ "role": "assistant", "content": [{ "type": "text", "text": "a short read" }], "timestamp": 2 });
++        let gone = json!({ "role": "user", "content": "noise", "timestamp": 3 });
++        let note = json!({
++            "role": "custom",
++            "customType": "live-context-projection",
++            "content": "[context role=notes]\nplan",
++            "details": { "contextRole": "notes" },
++            "timestamp": 4
++        });
++        let rows = message_edits(&[user.clone(), long, gone], &[user, short, note]);
++        assert_eq!(rows.len(), 3);
++        assert!(!rows[0].changed);
++        assert_eq!(rows[1].side(false), "a very long read");
++        assert_eq!(rows[1].side(true), "a short read");
++        assert_eq!(rows[2].role, "notes");
++        assert_eq!(rows[2].side(true), "plan");
++        assert_eq!(rows[2].side(false), "noise");
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/clm/mod.rs
++++ prime-agent-src/crates/pa-core/src/clm/mod.rs
+@@ -5,7 +5,9 @@
+ 
+ pub mod annotations;
+ pub mod budget;
++pub mod control;
+ pub mod document;
++pub mod edits;
+ pub mod guard;
+ pub mod host;
+ pub mod projection;
+@@ -250,6 +252,12 @@ pub struct ClmRuntime {
+     pending_checkpoint: Option<Checkpoint>,
+     annotations: Vec<annotations::ActiveAnnotation>,
+     continuity_warned: bool,
++    seed: ContextLanguageModelsSettings,
++    overrides: control::Overrides,
++    paused: bool,
++    last_raw: Vec<Value>,
++    last_context_window: u64,
++    last_observed: Option<u64>,
+ }
+ 
+ impl ClmRuntime {
+@@ -275,6 +283,12 @@ impl ClmRuntime {
+             pending_checkpoint: None,
+             annotations: Vec::new(),
+             continuity_warned: false,
++            seed: ContextLanguageModelsSettings::default(),
++            overrides: control::Overrides::default(),
++            paused: false,
++            last_raw: Vec::new(),
++            last_context_window: 0,
++            last_observed: None,
+         })
+     }
+ 
+@@ -321,6 +335,37 @@ impl ClmRuntime {
+         self.recovery_tried = false;
+     }
+ 
++    pub fn set_seed(&mut self, seed: ContextLanguageModelsSettings) {
++        self.seed = seed;
++    }
++
++    /// Re-validate the seed with `overrides` on top; on error nothing changes.
++    ///
++    /// # Errors
++    /// Returns an error if the combined settings fail validation.
++    pub fn apply_overrides(&mut self, overrides: control::Overrides) -> Result<(), String> {
++        let config = ClmConfig::from_settings(&control::merged(&self.seed, &overrides)?)?;
++        if config.estimate_factor != self.config.estimate_factor {
++            self.calibrator = EstimateCalibrator::new(config.estimate_factor);
++        }
++        self.config = config;
++        self.paused = overrides.enabled == Some(false);
++        self.overrides = overrides;
++        Ok(())
++    }
++
++    /// `/clm reset`: back to the raw context; older checkpoints stop matching.
++    pub fn reset_projection(&mut self) {
++        self.checkpoint = None;
++        self.history.clear();
++        self.baseline = None;
++        self.edit_raw_len = None;
++        self.pending_checkpoint = None;
++        self.tracker.reset();
++        self.pending_notices
++            .push("Projection reset by the user; the context is the raw session again.".into());
++    }
++
+     /// Newest checkpoint that matches once retry error rows are skipped, rebased
+     /// onto the raw context as it is now.
+     fn recover_after_retry_errors(&mut self, raw: &[Value]) -> Option<Checkpoint> {
+@@ -386,6 +431,9 @@ impl ClmRuntime {
+         system_prompt_tokens: u64,
+         context_window: u64,
+     ) -> Vec<Value> {
++        if self.paused {
++            return raw.to_vec();
++        }
+         let mut projection = apply_projection(raw, self.checkpoint.as_ref());
+         if let Projection::Invalid(reason) = &projection {
+             self.pending_notices
+@@ -420,6 +468,9 @@ impl ClmRuntime {
+         }
+         let conv = conversation_rows(raw);
+         let observed = last_provider_reported(&conv);
++        self.last_observed = observed.map(|(tokens, _)| tokens);
++        self.last_context_window = context_window;
++        self.last_raw = raw.to_vec();
+         self.calibrator.observe(observed);
+         let resolved = self.config.budget.resolve(context_window);
+ 
+@@ -523,6 +574,10 @@ impl ClmRuntime {
+     /// The turn-end commit. Returns a new checkpoint for the caller to persist as
+     /// a `clm-state` custom entry.
+     pub fn commit_turn(&mut self) -> Option<Checkpoint> {
++        if self.paused {
++            self.baseline = None;
++            return None;
++        }
+         let baseline = self.baseline.take()?;
+         let edited = match std::fs::read_to_string(self.mirror_path()) {
+             Ok(text) => text,
+@@ -919,4 +974,34 @@ mod tests {
+         let again = runtime.transform(&raw, 0, 100_000);
+         assert_eq!(again.len(), raw.len() + 1, "the size warning is shown once");
+     }
++
++    #[test]
++    fn overrides_pause_and_reset_change_the_live_runtime() {
++        let seed: ContextLanguageModelsSettings = settings(json!({ "enabled": true }));
++        let mut runtime = ClmRuntime::new(ClmConfig::from_settings(&seed).unwrap(), "s").unwrap();
++        runtime.set_seed(seed);
++        let mut overrides = control::Overrides::default();
++        overrides.values.insert("sizeTrailer".into(), json!(true));
++        overrides.values.insert("budget".into(), json!(50_000));
++        runtime.apply_overrides(overrides.clone()).unwrap();
++        assert!(runtime.size_trailer("x", 100_000).unwrap().contains("of 50000 tokens"));
++
++        overrides.values.insert("reserve".into(), json!(60_000));
++        assert!(runtime.apply_overrides(overrides).is_err());
++        assert!(runtime.size_trailer("x", 100_000).is_some(), "a rejected override changes nothing");
++
++        let raw = conversation(10);
++        runtime.transform(&raw, 0, 100_000);
++        std::fs::write(runtime.mirror_path(), "short").unwrap();
++        assert!(runtime.commit_turn().is_some());
++        runtime.reset_projection();
++        let output = runtime.transform(&raw, 0, 100_000);
++        assert_eq!(output[0]["content"], "fix the bug", "reset drops the projection");
++
++        runtime.apply_overrides(control::Overrides { enabled: Some(false), ..Default::default() }).unwrap();
++        assert_eq!(runtime.transform(&raw, 0, 100_000), raw, "paused passes raw through");
++        std::fs::write(runtime.mirror_path(), "ignored while paused").unwrap();
++        assert!(runtime.commit_turn().is_none());
++    }
+ }
++
+Index: prime-agent-src/crates/pa-core/src/clm/control.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/control.rs
+@@ -0,0 +1,335 @@
++//! `/clm` control: per-session setting overrides, pause, reset and the panel view.
++
++use pa_types::clm_view::ClmSettingKind;
++use serde::{Deserialize, Serialize};
++use serde_json::{json, Map, Value};
++
++use crate::settings::ContextLanguageModelsSettings;
++
++pub const SETTINGS_CUSTOM_TYPE: &str = "clm-settings";
++pub const RESET_CUSTOM_TYPE: &str = "clm-reset";
++pub const CLM_NOT_ENABLED: &str = "Context Language Models are not enabled for this session. Set contextLanguageModels.enabled and start a new session.";
++
++pub struct SettingSpec {
++    pub key: &'static str,
++    pub label: &'static str,
++    pub kind: ClmSettingKind,
++    pub choices: &'static [&'static str],
++    /// Shown when neither Nix nor an override sets the key.
++    pub unset: &'static str,
++}
++
++const fn spec(key: &'static str, label: &'static str, kind: ClmSettingKind, choices: &'static [&'static str], unset: &'static str) -> SettingSpec {
++    SettingSpec { key, label, kind, choices, unset }
++}
++
++pub const SETTINGS: [SettingSpec; 9] = [
++    spec("budget", "Token budget", ClmSettingKind::Number, &[], "model window"),
++    spec("reserve", "Generation reserve", ClmSettingKind::Number, &[], "2048"),
++    spec("observationCap", "Tool result cap (chars)", ClmSettingKind::Number, &[], "off"),
++    spec("observationCapHead", "Cap head fraction", ClmSettingKind::Number, &[], "0.8"),
++    spec("estimateFactor", "Estimate factor", ClmSettingKind::Number, &[], "1"),
++    spec("overflow", "Overflow guard", ClmSettingKind::Choice, &["withhold", "off"], "withhold"),
++    spec("nativeCompaction", "Native compaction", ClmSettingKind::Choice, &["auto", "off", "on"], "auto"),
++    spec("oneToolPerTurn", "One tool per turn", ClmSettingKind::Bool, &["false", "true"], "false"),
++    spec("sizeTrailer", "Size trailer", ClmSettingKind::Bool, &["false", "true"], "false"),
++];
++
++#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Overrides {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub enabled: Option<bool>,
++    #[serde(default)]
++    pub values: Map<String, Value>,
++}
++
++fn keys() -> String {
++    SETTINGS.iter().map(|spec| spec.key).collect::<Vec<_>>().join(", ")
++}
++
++fn integer(key: &str, raw: &str, min: u64) -> Result<Value, String> {
++    match raw.parse::<u64>() {
++        Ok(value) if value >= min => Ok(json!(value)),
++        _ => Err(format!("{key} must be an integer of at least {min}")),
++    }
++}
++
++fn fraction(key: &str, raw: &str, min: f64, max: f64) -> Result<Value, String> {
++    match raw.parse::<f64>() {
++        Ok(value) if (min..=max).contains(&value) => Ok(json!(value)),
++        _ => Err(format!("{key} must be a number from {min} to {max}")),
++    }
++}
++
++/// One `/clm config <key> <value>` value, checked against the table above.
++///
++/// # Errors
++/// Returns an error if the key is unknown or the value fails validation.
++pub fn parse_value(key: &str, raw: &str) -> Result<Value, String> {
++    let spec = SETTINGS
++        .iter()
++        .find(|spec| spec.key == key)
++        .ok_or_else(|| format!("Unknown setting {key}. Settable: {}", keys()))?;
++    match (spec.kind, key, raw) {
++        (ClmSettingKind::Bool, _, "true" | "on") => Ok(json!(true)),
++        (ClmSettingKind::Bool, _, "false" | "off") => Ok(json!(false)),
++        (ClmSettingKind::Bool, _, _) => Err(format!("{key} must be true or false")),
++        (ClmSettingKind::Choice, _, _) if spec.choices.contains(&raw) => Ok(json!(raw)),
++        (ClmSettingKind::Choice, _, _) => Err(format!("{key} must be one of {}", spec.choices.join(", "))),
++        (_, "budget" | "observationCap", "unset") | (_, "observationCap", "0") => Ok(Value::Null),
++        (_, "budget", _) => integer(key, raw, 1024),
++        (_, "reserve", _) => integer(key, raw, 0),
++        (_, "observationCap", _) => integer(key, raw, 200),
++        (_, "observationCapHead", _) => fraction(key, raw, 0.1, 0.9),
++        _ => fraction(key, raw, 1.0, 4.0),
++    }
++}
++
++/// Nix-seeded settings with the session overrides on top.
++///
++/// # Errors
++/// Returns an error if merged values are invalid or reserve exceeds budget.
++pub fn merged(seed: &ContextLanguageModelsSettings, overrides: &Overrides) -> Result<ContextLanguageModelsSettings, String> {
++    let mut value = serde_json::to_value(seed).map_err(|error| error.to_string())?;
++    if let Some(map) = value.as_object_mut() {
++        for (key, override_value) in &overrides.values {
++            map.insert(key.clone(), override_value.clone());
++        }
++    }
++    let settings: ContextLanguageModelsSettings = serde_json::from_value(value).map_err(|error| error.to_string())?;
++    if let (Some(reserve), Some(budget)) = (settings.reserve, settings.budget) {
++        if reserve > budget {
++            return Err(format!("reserve ({reserve}) must not exceed budget ({budget})"));
++        }
++    }
++    Ok(settings)
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum ClmAction {
++    On,
++    Off,
++    Reset,
++    Set { key: String, value: String },
++    ResetSettings,
++}
++
++impl ClmAction {
++    /// # Errors
++    /// Returns an error if the action or arguments are invalid.
++    pub fn parse(action: &str, key: Option<&str>, value: Option<&str>) -> Result<Self, String> {
++        match (action, key, value) {
++            ("on", ..) => Ok(Self::On),
++            ("off", ..) => Ok(Self::Off),
++            ("reset", ..) => Ok(Self::Reset),
++            ("reset_settings", ..) => Ok(Self::ResetSettings),
++            ("set", Some(key), Some(value)) => Ok(Self::Set { key: key.to_string(), value: value.to_string() }),
++            _ => Err(format!("unknown clm_configure action \"{action}\"")),
++        }
++    }
++}
++
++use pa_types::clm_view::{ClmEditMessage, ClmSetting, ClmStatus, ClmView};
++
++use super::document::digest_messages;
++use super::{edits, ClmRuntime};
++
++fn shown(value: &Value, unset: &str) -> String {
++    match value {
++        Value::Null => unset.to_string(),
++        Value::String(text) => text.clone(),
++        other => other.to_string(),
++    }
++}
++
++fn settings_rows(runtime: &ClmRuntime) -> Vec<ClmSetting> {
++    let seed = serde_json::to_value(&runtime.seed).unwrap_or_default();
++    SETTINGS
++        .iter()
++        .map(|spec| {
++            let default = seed.get(spec.key).cloned().unwrap_or(Value::Null);
++            let value = runtime.overrides.values.get(spec.key).cloned().unwrap_or_else(|| default.clone());
++            ClmSetting {
++                key: spec.key.to_string(),
++                label: spec.label.to_string(),
++                value: shown(&value, spec.unset),
++                default: shown(&default, spec.unset),
++                kind: spec.kind,
++                choices: spec.choices.iter().map(ToString::to_string).collect(),
++            }
++        })
++        .collect()
++}
++
++/// Edits of one revision against the context it was made from: the previous
++/// revision's projection plus the raw rows it did not cover.
++fn revision_edits(runtime: &ClmRuntime, index: usize) -> Result<Vec<ClmEditMessage>, String> {
++    let target = &runtime.history[index];
++    // Checkpoint counts and digests cover conversation rows only (harness digests excluded).
++    let raw = &super::projection::conversation_rows(&runtime.last_raw);
++    let matches = |count: usize, digest: &str| raw.len() >= count && digest_messages(&raw[..count]) == digest;
++    if !matches(target.source_message_count, &target.source_digest) {
++        return Err(format!("The source of revision {} is no longer in the live context.", target.revision));
++    }
++    let before: Vec<Value> = match index.checked_sub(1).map(|previous| &runtime.history[previous]) {
++        Some(previous)
++            if previous.source_message_count <= target.source_message_count
++                && matches(previous.source_message_count, &previous.source_digest) =>
++        {
++            previous
++                .projected_messages
++                .iter()
++                .chain(&raw[previous.source_message_count..target.source_message_count])
++                .cloned()
++                .collect()
++        }
++        _ => raw[..target.source_message_count].to_vec(),
++    };
++    Ok(edits::message_edits(&before, &target.projected_messages))
++}
++
++#[must_use]
++pub fn view(runtime: &ClmRuntime, revision: Option<u64>) -> ClmView {
++    let index = match revision {
++        Some(wanted) => runtime.history.iter().position(|checkpoint| checkpoint.revision == wanted),
++        None => runtime.history.len().checked_sub(1),
++    };
++    let (edits, note) = match index.map(|index| revision_edits(runtime, index)) {
++        Some(Ok(edits)) => (edits, None),
++        Some(Err(note)) => (Vec::new(), Some(note)),
++        None => (Vec::new(), None),
++    };
++    ClmView {
++        status: ClmStatus {
++            enabled: !runtime.paused,
++            estimate: runtime.last_estimate,
++            budget: runtime
++                .config
++                .budget
++                .resolve(runtime.last_context_window)
++                .map(|resolved| resolved.budget),
++            observed: runtime.last_observed,
++            revision: runtime.revision,
++            edit_count: runtime.history.len(),
++        },
++        settings: settings_rows(runtime),
++        revisions: runtime.history.iter().map(|checkpoint| checkpoint.revision).collect(),
++        revision: index.map(|index| runtime.history[index].revision),
++        edits,
++        note,
++    }
++}
++
++/// Apply `action`; returns the custom entry (type, data) the caller persists.
++///
++/// # Errors
++/// Returns an error if the setting value or merged configuration is invalid.
++pub fn configure(runtime: &mut ClmRuntime, action: &ClmAction) -> Result<(&'static str, Value), String> {
++    if *action == ClmAction::Reset {
++        runtime.reset_projection();
++        return Ok((RESET_CUSTOM_TYPE, json!({ "revision": runtime.revision })));
++    }
++    let mut next = runtime.overrides.clone();
++    match action {
++        ClmAction::On => next.enabled = Some(true),
++        ClmAction::Off => next.enabled = Some(false),
++        ClmAction::ResetSettings => next.values.clear(),
++        ClmAction::Set { key, value } => {
++            next.values.insert(key.clone(), parse_value(key, value)?);
++        }
++        ClmAction::Reset => unreachable!("handled above"),
++    }
++    runtime.apply_overrides(next.clone())?;
++    Ok((SETTINGS_CUSTOM_TYPE, serde_json::to_value(&next).map_err(|error| error.to_string())?))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn values_are_checked_against_the_table() {
++        assert_eq!(parse_value("budget", "64000"), Ok(json!(64000)));
++        assert_eq!(parse_value("budget", "unset"), Ok(Value::Null));
++        assert!(parse_value("budget", "100").is_err());
++        assert_eq!(parse_value("observationCap", "0"), Ok(Value::Null));
++        assert!(parse_value("observationCap", "50").is_err());
++        assert_eq!(parse_value("observationCapHead", "0.5"), Ok(json!(0.5)));
++        assert!(parse_value("observationCapHead", "0.95").is_err());
++        assert!(parse_value("estimateFactor", "5").is_err());
++        assert_eq!(parse_value("overflow", "off"), Ok(json!("off")));
++        assert!(parse_value("nativeCompaction", "maybe").is_err());
++        assert_eq!(parse_value("sizeTrailer", "on"), Ok(json!(true)));
++        assert!(parse_value("remindAt", "0.5").unwrap_err().starts_with("Unknown setting remindAt"));
++    }
++
++    #[test]
++    fn overrides_merge_over_the_seed_and_reserve_stays_under_budget() {
++        let seed: ContextLanguageModelsSettings =
++            serde_json::from_value(json!({ "enabled": true, "budget": 64000, "steering": "/x.md" })).unwrap();
++        let mut overrides = Overrides::default();
++        overrides.values.insert("budget".into(), json!(32000));
++        overrides.values.insert("sizeTrailer".into(), json!(true));
++        let settings = merged(&seed, &overrides).unwrap();
++        assert_eq!((settings.budget, settings.size_trailer), (Some(32000), Some(true)));
++        assert_eq!(settings.steering.as_deref(), Some("/x.md"));
++        overrides.values.insert("reserve".into(), json!(40000));
++        assert!(merged(&seed, &overrides).unwrap_err().contains("must not exceed budget"));
++        let stored = serde_json::to_value(&overrides).unwrap();
++        assert_eq!(serde_json::from_value::<Overrides>(stored).unwrap(), overrides);
++    }
++
++    #[test]
++    fn actions_parse() {
++        assert_eq!(ClmAction::parse("set", Some("budget"), Some("9000")), Ok(ClmAction::Set { key: "budget".into(), value: "9000".into() }));
++        assert!(ClmAction::parse("set", Some("budget"), None).is_err());
++        assert_eq!(ClmAction::parse("reset_settings", None, None), Ok(ClmAction::ResetSettings));
++    }
++
++    #[test]
++    fn view_lists_settings_and_diffs_the_chosen_revision() {
++        use crate::clm::{ClmConfig, ClmRuntime};
++        let seed: ContextLanguageModelsSettings = serde_json::from_value(json!({ "enabled": true, "budget": 64000 })).unwrap();
++        let mut runtime = ClmRuntime::new(ClmConfig::from_settings(&seed).unwrap(), "s").unwrap();
++        runtime.set_seed(seed);
++        let raw = vec![
++            json!({ "role": "user", "content": "fix the old bug", "timestamp": 1 }),
++            json!({ "role": "user", "content": "noise", "timestamp": 2 }),
++        ];
++        let empty = view(&runtime, None);
++        assert_eq!((empty.revision, empty.edits.len()), (None, 0));
++        assert_eq!(empty.settings.len(), 9);
++        assert_eq!(empty.settings[0].value, "64000");
++        assert_eq!(empty.settings[2].value, "off");
++
++        runtime.transform(&raw, 0, 100_000);
++        // Plain text is a valid edit: it becomes one notes message (see the mod.rs tests).
++        std::fs::write(runtime.mirror_path(), "task: fix the new bug").unwrap();
++        runtime.commit_turn().expect("accepted");
++        runtime.transform(&raw, 0, 100_000);
++
++        let one = view(&runtime, None);
++        assert_eq!((one.revision, one.revisions.clone()), (Some(1), vec![1]));
++        assert_eq!(one.status.edit_count, 1);
++        assert!(one.edits.iter().any(|row| row.changed && row.side(true).contains("fix the new bug")), "{one:?}");
++        assert!(one.edits.iter().any(|row| row.changed && row.side(false).contains("noise")), "{one:?}");
++        assert_eq!(view(&runtime, Some(9)).revision, None, "unknown revision");
++
++        let (kind, data) = configure(&mut runtime, &ClmAction::Set { key: "budget".into(), value: "32000".into() }).unwrap();
++        assert_eq!((kind, data["values"]["budget"].clone()), (SETTINGS_CUSTOM_TYPE, json!(32000)));
++        assert_eq!(view(&runtime, None).settings[0].value, "32000");
++        assert_eq!(view(&runtime, None).settings[0].default, "64000");
++        assert!(configure(&mut runtime, &ClmAction::Set { key: "budget".into(), value: "5".into() }).is_err());
++        let (kind, _) = configure(&mut runtime, &ClmAction::Off).unwrap();
++        assert_eq!(kind, SETTINGS_CUSTOM_TYPE);
++        assert!(!view(&runtime, None).status.enabled);
++        let (kind, data) = configure(&mut runtime, &ClmAction::ResetSettings).unwrap();
++        assert_eq!(data["enabled"], json!(false), "reset_settings keeps the on/off state");
++        assert_eq!(kind, SETTINGS_CUSTOM_TYPE);
++        let (kind, _) = configure(&mut runtime, &ClmAction::Reset).unwrap();
++        assert_eq!(kind, RESET_CUSTOM_TYPE);
++        assert!(view(&runtime, None).revisions.is_empty());
++    }
++}
++
+Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+@@ -233,9 +233,8 @@ pub async fn create_session(mut config:
+     let lifecycle_hooks = settings
+         .get_lifecycle_hooks()
+         .map(|hooks| super::lifecycle_hooks::LifecycleHooks::from_settings(&hooks));
+-    let clm_config = settings
+-        .get_context_language_models()
+-        .map(|s| crate::clm::ClmConfig::from_settings(&s));
++    let clm_seed = settings.get_context_language_models();
++    let clm_config = clm_seed.as_ref().map(crate::clm::ClmConfig::from_settings);
+     let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
+         mcp_gating(&settings, config.agent_dir.clone()).await?;
+     let mcp_manager = config
+@@ -305,22 +304,33 @@ pub async fn create_session(mut config:
+         _ => None,
+     };
+     if let Some(clm) = &clm {
+-        let history: Vec<crate::clm::projection::Checkpoint> = wiring
+-            .session
+-            .lock()
+-            .await
+-            .get_entries()
+-            .into_iter()
+-            .filter_map(|entry| match entry {
+-                pa_types::session::FileEntry::Custom { payload, .. }
+-                    if payload.custom_type == crate::clm::projection::CHECKPOINT_CUSTOM_TYPE =>
+-                {
+-                    payload.data.and_then(|v| serde_json::from_value(v).ok())
++        let entries = wiring.session.lock().await.get_entries();
++        let mut history: Vec<crate::clm::projection::Checkpoint> = Vec::new();
++        let mut overrides = None;
++        for entry in entries {
++            let pa_types::session::FileEntry::Custom { payload, .. } = entry else { continue };
++            match payload.custom_type.as_str() {
++                crate::clm::projection::CHECKPOINT_CUSTOM_TYPE => {
++                    history.extend(payload.data.and_then(|v| serde_json::from_value(v).ok()));
+                 }
+-                _ => None,
+-            })
+-            .collect();
+-        clm.lock().unwrap().restore(history);
++                crate::clm::control::RESET_CUSTOM_TYPE => history.clear(),
++                crate::clm::control::SETTINGS_CUSTOM_TYPE => {
++                    overrides = payload.data.and_then(|v| serde_json::from_value(v).ok());
++                }
++                _ => {}
++            }
++        }
++        {
++            let mut runtime = clm.lock().unwrap();
++            runtime.set_seed(clm_seed.clone().unwrap_or_default());
++            if let Some(overrides) = overrides {
++                if let Err(error) = runtime.apply_overrides(overrides) {
++                    tracing::warn!("clm settings overrides ignored: {error}");
++                }
++            }
++            runtime.restore(history);
++        }
++        // The std guard above must be gone before this await.
+         crate::clm::host::refresh(clm, &*wiring.session.lock().await);
+     }
+     let mut handlers = wiring.handlers.clone();
+Index: prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/engine/tests.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
+@@ -735,4 +735,101 @@ async fn clm_projection_survives_repeate
+     assert!(!req2.contains("dropme"), "projection lost on resume 2: {req2}");
+ }
+ 
++#[tokio::test]
++async fn clm_restore_handles_settings_and_reset_entries() {
++    let model = pa_agent::types::Model {
++        id: "m".into(),
++        name: "m".into(),
++        api: "test".into(),
++        provider: "test".into(),
++        base_url: "http://localhost".into(),
++        reasoning: false,
++        cost: pa_agent::types::UsageCost::default(),
++        context_window: 100_000,
++        max_tokens: 1_000,
++        max_tokens_explicit: false,
++    };
++    let tmp = tempfile::tempdir().unwrap();
++    let cwd = tmp.path().join("project");
++    let agent_dir = tmp.path().join("agent");
++    let sessions_dir = tmp.path().join("sessions");
++    for dir in [&cwd, &agent_dir, &sessions_dir] {
++        std::fs::create_dir_all(dir).unwrap();
++    }
++    std::fs::write(
++        agent_dir.join("settings.json"),
++        r#"{ "contextLanguageModels": { "enabled": true } }"#,
++    )
++    .unwrap();
++
++    let mut manager = SessionManager::persisted(&cwd, &sessions_dir);
++    let session_file = manager
++        .get_session_file()
++        .expect("persisted session file")
++        .to_path_buf();
++    manager
++        .append_message(pa_types::session::AgentMessage::User(pa_types::ai::UserMessage {
++            content: pa_types::ai::UserContent::Text("initial task".to_string()),
++            timestamp: 1,
++            rest: serde_json::Map::default(),
++        }))
++        .unwrap();
++
++    let source = vec![serde_json::json!({ "role": "user", "content": "initial task", "timestamp": 1 })];
++    let checkpoint = crate::clm::projection::Checkpoint::new(
++        1,
++        &source,
++        vec![serde_json::json!({
++            "role": "custom",
++            "content": "[context role=notes]\nold checkpoint notes",
++            "details": { "contextRole": "notes" },
++            "timestamp": 2,
++        })],
++        100,
++        50,
++    );
++    manager
++        .append_custom_entry(
++            crate::clm::projection::CHECKPOINT_CUSTOM_TYPE,
++            Some(serde_json::to_value(&checkpoint).unwrap()),
++        )
++        .unwrap();
++    manager
++        .append_custom_entry(crate::clm::control::RESET_CUSTOM_TYPE, None)
++        .unwrap();
++    manager
++        .append_custom_entry(
++            crate::clm::control::SETTINGS_CUSTOM_TYPE,
++            Some(serde_json::json!({ "values": { "sizeTrailer": true } })),
++        )
++        .unwrap();
++    manager.flush_now().unwrap();
++    drop(manager);
++
++    let provider = Arc::new(ScriptedProvider::new(model.clone()));
++    provider.push_text_turn("answer");
++    let engine = create_session(SessionEngineConfig {
++        cwd: cwd.clone(),
++        agent_dir: agent_dir.clone(),
++        model: Some(model),
++        stream_fn: Some(provider.stream_fn()),
++        session_manager: Some(SessionManager::open(&cwd, &sessions_dir, &session_file)),
++        ..Default::default()
++    })
++    .await
++    .unwrap();
++    engine
++        .prompt("prompt after resume", PromptOptions::default())
++        .await
++        .unwrap();
++    engine.session.agent().wait_for_idle().await;
++
++    let request = format!("{:?}", provider.calls()[0].messages);
++    assert!(!request.contains("old checkpoint notes"), "notes from old checkpoint present: {request}");
++
++    let clm = engine.session.clm.as_ref().unwrap();
++    assert!(clm.lock().unwrap().size_trailer("x", 100_000).is_some());
++}
++
++
+ 
+Index: prime-agent-src/crates/pa-daemon/src/agent_engine/lifecycle.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/agent_engine/lifecycle.rs
++++ prime-agent-src/crates/pa-daemon/src/agent_engine/lifecycle.rs
+@@ -715,6 +715,53 @@ impl AgentSessionEngine {
+             .await
+     }
+ 
++    pub(crate) async fn clm_view(&self, revision: Option<u64>) -> anyhow::Result<serde_json::Value> {
++        let clm = self.clm_runtime().await?;
++        let view = pa_core::clm::control::view(&clm.lock().unwrap(), revision);
++        Ok(serde_json::to_value(view)?)
++    }
++
++    pub(crate) async fn clm_configure(
++        &self,
++        action: pa_core::clm::control::ClmAction,
++    ) -> anyhow::Result<serde_json::Value> {
++        let engine = self
++            .session
++            .lock()
++            .await
++            .clone()
++            .ok_or_else(|| anyhow::anyhow!(pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE))?;
++        let clm = engine
++            .session
++            .clm
++            .clone()
++            .ok_or_else(|| anyhow::anyhow!(pa_core::clm::control::CLM_NOT_ENABLED))?;
++        let (custom_type, data) = pa_core::clm::control::configure(&mut clm.lock().unwrap(), &action)
++            .map_err(|error| anyhow::anyhow!(error))?;
++        engine
++            .session
++            .shared_persistence()
++            .lock()
++            .await
++            .append_custom_entry(custom_type, Some(data))?;
++        let view = pa_core::clm::control::view(&clm.lock().unwrap(), None);
++        Ok(serde_json::to_value(view)?)
++    }
++
++    async fn clm_runtime(&self) -> anyhow::Result<pa_core::clm::SharedClm> {
++        let engine = self
++            .session
++            .lock()
++            .await
++            .clone()
++            .ok_or_else(|| anyhow::anyhow!(pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE))?;
++        engine
++            .session
++            .clm
++            .clone()
++            .ok_or_else(|| anyhow::anyhow!(pa_core::clm::control::CLM_NOT_ENABLED))
++    }
++
+     /// Build the core session once (same once-only rule as `session_agent`),
+     /// through the same guarded funnel.
+     pub(crate) fn ensure_core_session(&self, model: &Model) -> anyhow::Result<()> {
+Index: prime-agent-src/crates/pa-daemon/src/clm_commands.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-daemon/src/clm_commands.rs
+@@ -0,0 +1,124 @@
++//! `get_clm_view` and `clm_configure`: the `/clm` panel's daemon side.
++
++use serde_json::Value;
++
++use crate::protocol::{response_failure, response_success, DaemonResponse};
++use crate::worker::Worker;
++
++impl Worker {
++    pub(crate) async fn handle_get_clm_view(&self, payload: &Value) -> DaemonResponse {
++        if let Err(response) = self.require_created("get_clm_view") {
++            return response;
++        }
++        let Some(engine) = &self.agent_engine else {
++            return response_failure(
++                None,
++                "get_clm_view",
++                pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE,
++                None,
++            );
++        };
++        let revision = payload.get("revision").and_then(Value::as_u64);
++        match engine.clm_view(revision).await {
++            Ok(view) => response_success(None, "get_clm_view", Some(view)),
++            Err(error) => response_failure(None, "get_clm_view", &format!("{error:#}"), None),
++        }
++    }
++
++    pub(crate) async fn handle_clm_configure(&self, payload: &Value) -> DaemonResponse {
++        if let Err(response) = self.require_created("clm_configure") {
++            return response;
++        }
++        let Some(engine) = &self.agent_engine else {
++            return response_failure(
++                None,
++                "clm_configure",
++                pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE,
++                None,
++            );
++        };
++        let field = |name: &str| payload.get(name).and_then(Value::as_str);
++        let action = match pa_core::clm::control::ClmAction::parse(
++            field("action").unwrap_or(""),
++            field("key"),
++            field("value"),
++        ) {
++            Ok(action) => action,
++            Err(error) => return response_failure(None, "clm_configure", &error, None),
++        };
++        match engine.clm_configure(action).await {
++            Ok(view) => response_success(None, "clm_configure", Some(view)),
++            Err(error) => response_failure(None, "clm_configure", &format!("{error:#}"), None),
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::path::PathBuf;
++
++    use serde_json::json;
++
++    use super::*;
++    use crate::worker::WorkerConfig;
++
++    #[tokio::test]
++    async fn clm_commands_refuse_when_disabled_and_reject_bogus_action() {
++        let _faux = crate::agent_engine::FAUX_TEST_LOCK
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        let dir = tempfile::tempdir().unwrap();
++        let config = WorkerConfig {
++            socket_path: dir.path().join("worker.sock"),
++            supervisor_socket_path: PathBuf::new(),
++            token: "test-token".into(),
++            worker_instance_id: String::new(),
++            active_session_id: "clm-test-session".into(),
++            agent_dir: dir.path().join("agent"),
++            recovery_journal_path: dir.path().join("recovery.jsonl"),
++            telemetry_disabled: Some(true),
++            script: Some(json!({
++                "engine": "faux",
++                "responses": [],
++            })),
++        };
++        let worker = Worker::new(config, None);
++        let created = worker
++            .dispatch(
++                "create",
++                &json!({ "noSession": true, "cwd": "/tmp", "name": "clm-test" }),
++            )
++            .await;
++        assert!(created.success, "create failed: {created:?}");
++
++        let model = worker
++            .agent_engine
++            .as_ref()
++            .expect("agent engine")
++            .resolve_model()
++            .expect("model");
++        worker
++            .agent_engine
++            .as_ref()
++            .unwrap()
++            .ensure_core_session_async(&model)
++            .await
++            .expect("session built");
++
++        let view = worker.dispatch("get_clm_view", &json!({})).await;
++        assert!(!view.success);
++        assert_eq!(
++            view.error.as_deref(),
++            Some(pa_core::clm::control::CLM_NOT_ENABLED)
++        );
++
++        let bad = worker
++            .dispatch("clm_configure", &json!({ "action": "bogus" }))
++            .await;
++        assert!(!bad.success);
++        assert_eq!(
++            bad.error.as_deref(),
++            Some("unknown clm_configure action \"bogus\"")
++        );
++    }
++}
+Index: prime-agent-src/crates/pa-daemon/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/lib.rs
++++ prime-agent-src/crates/pa-daemon/src/lib.rs
+@@ -45,6 +45,7 @@ pub(crate) mod context_tree_children;
+ pub(crate) mod create_reuse;
+ pub mod descriptor;
+ pub mod engine;
++pub(crate) mod clm_commands;
+ pub(crate) mod factory_activity;
+ pub mod framing;
+ mod goal_continuation;
+Index: prime-agent-src/crates/pa-daemon/src/protocol.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/protocol.rs
++++ prime-agent-src/crates/pa-daemon/src/protocol.rs
+@@ -165,6 +165,8 @@ pub const KNOWN_COMMAND_TYPES: &[&str] =
+     "set_mcp_static_token",
+     "remove_mcp_connection",
+     "mark_anthropic_warning_shown",
++    "get_clm_view",
++    "clm_configure",
+ ];
+ 
+ /// Parsed client command envelope.
+@@ -707,6 +709,12 @@ pub fn command_active_session_id(command
+         | DaemonCommand::GetSessionStats {
+             active_session_id, ..
+         }
++        | DaemonCommand::GetClmView {
++            active_session_id, ..
++        }
++        | DaemonCommand::ClmConfigure {
++            active_session_id, ..
++        }
+         | DaemonCommand::GetContextTree {
+             active_session_id, ..
+         }
+@@ -984,6 +992,8 @@ pub fn command_type_name(command: &Daemo
+         DaemonCommand::GetMessages { .. } => "get_messages",
+         DaemonCommand::GetRlmChildren { .. } => "get_rlm_children",
+         DaemonCommand::GetSessionStats { .. } => "get_session_stats",
++        DaemonCommand::GetClmView { .. } => "get_clm_view",
++        DaemonCommand::ClmConfigure { .. } => "clm_configure",
+         DaemonCommand::GetContextTree { .. } => "get_context_tree",
+         DaemonCommand::GetCommands { .. } => "get_commands",
+         DaemonCommand::GetResourceSnapshot { .. } => "get_resource_snapshot",
+Index: prime-agent-src/crates/pa-daemon/src/worker/commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/commands.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/commands.rs
+@@ -150,6 +150,8 @@ impl Worker {
+             "mutate_queued_message" => self.handle_mutate_queued_message(payload),
+             "resume_queue" => self.handle_resume_queue(),
+             "factory_activity" => self.handle_factory_activity(payload).await,
++            "get_clm_view" => self.handle_get_clm_view(payload).await,
++            "clm_configure" => self.handle_clm_configure(payload).await,
+             "execute_bash" => self.handle_execute_bash(payload),
+             "execute_bash_and_wait" => self.handle_execute_bash_and_wait(payload).await,
+             "abort_bash" => self.handle_abort_bash().await,
+Index: prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/tests/command_breadth.rs
++++ prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
+@@ -520,6 +520,8 @@ const WIRE_FIXTURES: &[(&str, &str)] = &
+         "mark_anthropic_warning_shown",
+         r#"{"type": "mark_anthropic_warning_shown", "activeSessionId": "sess"}"#,
+     ),
++    ("get_clm_view", r#"{"type": "get_clm_view", "activeSessionId": "sess"}"#),
++    ("clm_configure", r#"{"type": "clm_configure", "activeSessionId": "sess", "action": "on"}"#),
+ ];
+ 
+ /// The accept list is the TS list, in TS order, then the Rust-native supervisor/worker frames.
+@@ -548,6 +550,8 @@ fn known_command_types_match_the_ts_list
+                     | "tail_kernel_bash"
+                     | "kill_kernel_bash"
+                     | "mark_anthropic_warning_shown"
++                    | "get_clm_view"
++                    | "clm_configure"
+             ),
+             "unexpected non-TS command type: {extra}"
+         );
+Index: prime-agent-src/crates/pa-tui/src/clm_view.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-tui/src/clm_view.rs
+@@ -0,0 +1,313 @@
++//! The `/clm` panel: accepted edits as word diffs, and the session's CLM settings.
++
++use std::collections::BTreeSet;
++
++use pa_types::clm_view::{ClmEditMessage, ClmSegmentKind, ClmSettingKind, ClmView};
++use unicode_width::UnicodeWidthChar;
++
++use crate::keybindings::KeybindingsManager;
++use crate::theme::{Theme, ThemeColor};
++use crate::width::truncate_line;
++use crate::{Line, Span};
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum ClmTab {
++    Edits,
++    Settings,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum ClmPanelAction {
++    None,
++    Close,
++    LoadRevision(u64),
++    Set { key: String, value: String },
++}
++
++#[derive(Debug)]
++pub struct ClmPanel {
++    view: ClmView,
++    tab: ClmTab,
++    selected: usize,
++    expanded: BTreeSet<usize>,
++    expand_all: bool,
++    error: Option<String>,
++}
++
++const SIDE_BY_SIDE_MIN: usize = 60;
++
++/// Wrap `text` into rows of at most `width` columns, breaking on characters.
++fn wrap(text: &str, width: usize) -> Vec<String> {
++    let mut rows = Vec::new();
++    for source in text.split('\n') {
++        let (mut row, mut used) = (String::new(), 0);
++        for ch in source.chars() {
++            let w = ch.width().unwrap_or(0);
++            if used + w > width.max(1) {
++                rows.push(std::mem::take(&mut row));
++                used = 0;
++            }
++            row.push(ch);
++            used += w;
++        }
++        rows.push(row);
++    }
++    rows
++}
++
++fn pad(text: &str, width: usize) -> String {
++    let used: usize = text.chars().map(|ch| ch.width().unwrap_or(0)).sum();
++    format!("{text}{}", " ".repeat(width.saturating_sub(used)))
++}
++
++impl ClmPanel {
++    #[must_use]
++    pub fn new(view: ClmView, tab: ClmTab) -> Self {
++        Self { view, tab, selected: 0, expanded: BTreeSet::new(), expand_all: false, error: None }
++    }
++
++    /// New data for the same panel (a revision switch or a settings change).
++    pub fn replace(&mut self, view: ClmView) {
++        if view.revision != self.view.revision {
++            self.expanded.clear();
++            if self.tab == ClmTab::Edits {
++                self.selected = 0;
++            }
++        }
++        self.view = view;
++        self.error = None;
++        self.selected = self.selected.min(self.rows().saturating_sub(1));
++    }
++
++    pub fn set_error(&mut self, text: String) {
++        self.error = Some(text);
++    }
++
++    fn rows(&self) -> usize {
++        match self.tab {
++            ClmTab::Edits => self.view.edits.len(),
++            ClmTab::Settings => self.view.settings.len(),
++        }
++    }
++
++    fn switch(&mut self, tab: ClmTab) {
++        if self.tab != tab {
++            self.tab = tab;
++            self.selected = 0;
++        }
++    }
++
++    fn step_revision(&self, newer: bool) -> ClmPanelAction {
++        let Some(current) = self.view.revision else { return ClmPanelAction::None };
++        let Some(index) = self.view.revisions.iter().position(|rev| *rev == current) else {
++            return ClmPanelAction::None;
++        };
++        let next = if newer { index.checked_add(1) } else { index.checked_sub(1) };
++        next.and_then(|index| self.view.revisions.get(index))
++            .map_or(ClmPanelAction::None, |rev| ClmPanelAction::LoadRevision(*rev))
++    }
++
++    pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> ClmPanelAction {
++        if key == "q" || key == "ctrl+c" || key == "escape" || kb.matches(key, "tui.select.cancel") {
++            return ClmPanelAction::Close;
++        }
++        match key {
++            "tab" => {
++                self.switch(if self.tab == ClmTab::Edits { ClmTab::Settings } else { ClmTab::Edits });
++                return ClmPanelAction::None;
++            }
++            "1" => {
++                self.switch(ClmTab::Edits);
++                return ClmPanelAction::None;
++            }
++            "2" => {
++                self.switch(ClmTab::Settings);
++                return ClmPanelAction::None;
++            }
++            _ => {}
++        }
++        if kb.matches(key, "tui.select.up") {
++            self.selected = self.selected.saturating_sub(1);
++            return ClmPanelAction::None;
++        }
++        if kb.matches(key, "tui.select.down") {
++            self.selected = (self.selected + 1).min(self.rows().saturating_sub(1));
++            return ClmPanelAction::None;
++        }
++        match self.tab {
++            ClmTab::Edits => match key {
++                "left" => self.step_revision(false),
++                "right" => self.step_revision(true),
++                "a" => {
++                    self.expand_all = !self.expand_all;
++                    ClmPanelAction::None
++                }
++                _ if kb.matches(key, "tui.select.confirm") => {
++                    if !self.expanded.remove(&self.selected) {
++                        self.expanded.insert(self.selected);
++                    }
++                    ClmPanelAction::None
++                }
++                _ => ClmPanelAction::None,
++            },
++            ClmTab::Settings if kb.matches(key, "tui.select.confirm") => {
++                let Some(setting) = self.view.settings.get(self.selected) else {
++                    return ClmPanelAction::None;
++                };
++                if setting.kind == ClmSettingKind::Number || setting.choices.is_empty() {
++                    return ClmPanelAction::None;
++                }
++                let at = setting.choices.iter().position(|choice| *choice == setting.value).unwrap_or(0);
++                ClmPanelAction::Set {
++                    key: setting.key.clone(),
++                    value: setting.choices[(at + 1) % setting.choices.len()].clone(),
++                }
++            }
++            ClmTab::Settings => ClmPanelAction::None,
++        }
++    }
++
++    fn header(&self, theme: &Theme) -> Vec<Line> {
++        let status = &self.view.status;
++        let tab = |label: &str, active: bool| {
++            theme.fg_span(if active { ThemeColor::Accent } else { ThemeColor::Muted }, label.to_string())
++        };
++        let budget = status.budget.map_or_else(|| "no budget".to_string(), |budget| format!("{budget}"));
++        let observed = status.observed.map_or_else(String::new, |tokens| format!(", provider saw {tokens}"));
++        vec![
++            vec![
++                Span::raw("  "),
++                tab("1 Edits", self.tab == ClmTab::Edits),
++                Span::raw("   "),
++                tab("2 Settings", self.tab == ClmTab::Settings),
++                Span::raw("   "),
++                theme.fg_span(
++                    ThemeColor::Dim,
++                    format!(
++                        "{} ~{} of {budget} tokens{observed}",
++                        if status.enabled { "on" } else { "paused" },
++                        status.estimate
++                    ),
++                ),
++            ],
++            Vec::new(),
++        ]
++    }
++
++fn diff_rows(theme: &Theme, message: &ClmEditMessage, width: usize) -> Vec<Line> {
++    let inner = width.saturating_sub(4);
++    let colored = |text: String, kind: ClmSegmentKind| {
++        let color = match kind {
++            ClmSegmentKind::Del => ThemeColor::ToolDiffRemoved,
++            ClmSegmentKind::Add => ThemeColor::ToolDiffAdded,
++            ClmSegmentKind::Same => ThemeColor::Text,
++        };
++        theme.fg_span(color, text)
++    };
++    let (before, after) = (message.side(false), message.side(true));
++    if width >= SIDE_BY_SIDE_MIN {
++        let column = inner.saturating_sub(3) / 2;
++        let (left, right) = (wrap(&before, column), wrap(&after, column));
++        (0..left.len().max(right.len()))
++            .map(|row| {
++                vec![
++                    Span::raw("    "),
++                    colored(pad(left.get(row).map_or("", String::as_str), column), ClmSegmentKind::Del),
++                    theme.fg_span(ThemeColor::Dim, " | "),
++                    colored(right.get(row).cloned().unwrap_or_default(), ClmSegmentKind::Add),
++                ]
++            })
++            .collect()
++    } else {
++        let mut rows: Vec<Line> = wrap(&before, inner.saturating_sub(2))
++            .into_iter()
++            .map(|row| vec![Span::raw("    "), colored(format!("- {row}"), ClmSegmentKind::Del)])
++            .collect();
++        rows.extend(
++            wrap(&after, inner.saturating_sub(2))
++                .into_iter()
++                .map(|row| vec![Span::raw("    "), colored(format!("+ {row}"), ClmSegmentKind::Add)]),
++        );
++        rows
++    }
++}
++
++    fn edits(&self, theme: &Theme, width: usize) -> Vec<Line> {
++        let line = |color: ThemeColor, text: String| vec![Span::raw("  "), theme.fg_span(color, text)];
++        let Some(revision) = self.view.revision else {
++            return vec![line(ThemeColor::Muted, "No accepted edits in this session".into())];
++        };
++        let position = self.view.revisions.iter().position(|rev| *rev == revision).map_or(0, |index| index + 1);
++        let mut rows = vec![line(
++            ThemeColor::Text,
++            format!("Revision {revision} of {}  (left/right: revision, enter: diff, a: all)", self.view.revisions.len().max(position)),
++        )];
++        if let Some(note) = &self.view.note {
++            rows.push(line(ThemeColor::Warning, note.clone()));
++            return rows;
++        }
++        for (index, message) in self.view.edits.iter().enumerate() {
++            let marker = if index == self.selected { "> " } else { "  " };
++            let state = match (message.changed, message.segments.first().map(|segment| segment.kind)) {
++                (false, _) => "same",
++                (true, Some(ClmSegmentKind::Del)) if message.segments.len() == 1 => "deleted",
++                (true, Some(ClmSegmentKind::Add)) if message.segments.len() == 1 => "added",
++                _ => "changed",
++            };
++            let preview: String = message.side(true).split_whitespace().collect::<Vec<_>>().join(" ");
++            let room = width.saturating_sub(30);
++            let preview: String = preview.chars().take(room).collect();
++            rows.push(vec![
++                Span::raw("  "),
++                theme.fg_span(ThemeColor::Accent, marker.to_string()),
++                theme.fg_span(ThemeColor::Text, pad(&message.role, 10)),
++                theme.fg_span(if message.changed { ThemeColor::Warning } else { ThemeColor::Dim }, pad(state, 9)),
++                theme.fg_span(ThemeColor::Muted, preview),
++            ]);
++            if message.changed && (self.expand_all || self.expanded.contains(&index)) {
++                rows.extend(Self::diff_rows(theme, message, width));
++            }
++        }
++        rows
++    }
++
++    fn settings(&self, theme: &Theme) -> Vec<Line> {
++        self.view
++            .settings
++            .iter()
++            .enumerate()
++            .map(|(index, setting)| {
++                let marker = if index == self.selected { "> " } else { "  " };
++                let hint = match setting.kind {
++                    ClmSettingKind::Number => format!("set with /clm config {} <value>", setting.key),
++                    _ => "enter: change".to_string(),
++                };
++                let changed = setting.value != setting.default;
++                vec![
++                    Span::raw("  "),
++                    theme.fg_span(ThemeColor::Accent, marker.to_string()),
++                    theme.fg_span(ThemeColor::Text, pad(&setting.label, 26)),
++                    theme.fg_span(if changed { ThemeColor::Warning } else { ThemeColor::Text }, pad(&setting.value, 14)),
++                    theme.fg_span(ThemeColor::Dim, hint),
++                ]
++            })
++            .collect()
++    }
++
++    #[must_use]
++    pub fn render(&self, theme: &Theme, width: usize, _kb: &KeybindingsManager) -> Vec<Line> {
++        let mut rows = self.header(theme);
++        rows.extend(match self.tab {
++            ClmTab::Edits => self.edits(theme, width),
++            ClmTab::Settings => self.settings(theme),
++        });
++        if let Some(error) = &self.error {
++            rows.push(vec![Span::raw("  "), theme.fg_span(ThemeColor::Error, error.clone())]);
++        }
++        rows.push(vec![Span::raw("  "), theme.fg_span(ThemeColor::Dim, "tab or 1/2: page   q or esc: close".to_string())]);
++        rows.iter().map(|row| truncate_line(row, width, "")).collect()
++    }
++}
++
++#[cfg(test)]
++mod tests;
+Index: prime-agent-src/crates/pa-tui/src/clm_view/tests.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-tui/src/clm_view/tests.rs
+@@ -0,0 +1,102 @@
++use super::*;
++use crate::keybindings::KeybindingsManager;
++use crate::theme::{ColorMode, Theme};
++use pa_types::clm_view::{ClmEditMessage, ClmSegment, ClmSegmentKind, ClmSetting, ClmSettingKind, ClmStatus, ClmView};
++
++fn theme() -> Theme {
++    Theme::builtin("prime", ColorMode::TrueColor)
++}
++
++fn kb() -> KeybindingsManager {
++    KeybindingsManager::new()
++}
++
++fn text(panel: &ClmPanel, width: usize) -> String {
++    panel
++        .render(&theme(), width, &kb())
++        .iter()
++        .map(|line| line.iter().map(|span| span.content.as_str()).collect::<String>().trim_end().to_string())
++        .collect::<Vec<_>>()
++        .join("\n")
++}
++
++fn seg(kind: ClmSegmentKind, text: &str) -> ClmSegment {
++    ClmSegment { kind, text: text.into() }
++}
++
++fn sample() -> ClmView {
++    ClmView {
++        status: ClmStatus { enabled: true, estimate: 12_000, budget: Some(64_000), observed: Some(11_500), revision: 2, edit_count: 2 },
++        settings: vec![
++            ClmSetting { key: "budget".into(), label: "Token budget".into(), value: "64000".into(), default: "64000".into(), kind: ClmSettingKind::Number, choices: vec![] },
++            ClmSetting { key: "overflow".into(), label: "Overflow guard".into(), value: "withhold".into(), default: "withhold".into(), kind: ClmSettingKind::Choice, choices: vec!["withhold".into(), "off".into()] },
++            ClmSetting { key: "sizeTrailer".into(), label: "Size trailer".into(), value: "false".into(), default: "false".into(), kind: ClmSettingKind::Bool, choices: vec!["false".into(), "true".into()] },
++        ],
++        revisions: vec![1, 2],
++        revision: Some(2),
++        edits: vec![
++            ClmEditMessage { role: "user".into(), changed: false, segments: vec![seg(ClmSegmentKind::Same, "fix the bug")] },
++            ClmEditMessage { role: "assistant".into(), changed: true, segments: vec![seg(ClmSegmentKind::Same, "read "), seg(ClmSegmentKind::Del, "all of a.py"), seg(ClmSegmentKind::Add, "a.py summary")] },
++        ],
++        note: None,
++    }
++}
++
++#[test]
++fn edits_tab_lists_messages_and_expands_a_side_by_side_diff() {
++    let mut panel = ClmPanel::new(sample(), ClmTab::Edits);
++    let rows = text(&panel, 120);
++    assert!(rows.contains("Revision 2 of 2"), "{rows}");
++    assert!(rows.contains("assistant") && rows.contains("changed"), "{rows}");
++    assert_eq!(panel.handle_key("down", &kb()), ClmPanelAction::None);
++    assert_eq!(panel.handle_key("enter", &kb()), ClmPanelAction::None);
++    let rows = text(&panel, 120);
++    let diff_row = rows.lines().find(|row| row.contains("all of a.py")).expect(&rows);
++    assert!(diff_row.contains("a.py summary"), "side by side at 120 columns: {rows}");
++    let narrow = text(&panel, 50);
++    let lines: Vec<_> = narrow.lines().collect();
++    let before = lines.iter().position(|row| row.contains("all of a.py")).expect(&narrow);
++    let after = lines.iter().rposition(|row| row.contains("a.py summary")).expect(&narrow);
++    assert!(after > before, "one column under 60: {narrow}");
++    assert!(narrow.lines().all(|row| unicode_width::UnicodeWidthStr::width(row) <= 50), "{narrow}");
++}
++
++#[test]
++fn arrows_switch_revisions_and_tabs_switch_pages() {
++    let mut panel = ClmPanel::new(sample(), ClmTab::Edits);
++    assert_eq!(panel.handle_key("left", &kb()), ClmPanelAction::LoadRevision(1));
++    assert_eq!(panel.handle_key("right", &kb()), ClmPanelAction::None, "already the newest");
++    assert_eq!(panel.handle_key("a", &kb()), ClmPanelAction::None);
++    assert!(text(&panel, 120).contains("a.py summary"));
++    assert_eq!(panel.handle_key("tab", &kb()), ClmPanelAction::None);
++    assert!(text(&panel, 120).contains("Overflow guard"));
++    assert_eq!(panel.handle_key("1", &kb()), ClmPanelAction::None);
++    assert!(text(&panel, 120).contains("Revision 2 of 2"));
++    assert_eq!(panel.handle_key("q", &kb()), ClmPanelAction::Close);
++    assert_eq!(panel.handle_key("escape", &kb()), ClmPanelAction::Close);
++}
++
++#[test]
++fn settings_enter_cycles_choices_and_bools_and_points_numbers_at_the_command() {
++    let mut panel = ClmPanel::new(sample(), ClmTab::Settings);
++    let rows = text(&panel, 120);
++    assert!(rows.contains("set with /clm config budget <value>"), "{rows}");
++    assert_eq!(panel.handle_key("enter", &kb()), ClmPanelAction::None, "number rows do not cycle");
++    panel.handle_key("down", &kb());
++    assert_eq!(panel.handle_key("enter", &kb()), ClmPanelAction::Set { key: "overflow".into(), value: "off".into() });
++    panel.handle_key("down", &kb());
++    assert_eq!(panel.handle_key("enter", &kb()), ClmPanelAction::Set { key: "sizeTrailer".into(), value: "true".into() });
++}
++
++#[test]
++fn empty_and_unavailable_states_say_so() {
++    let mut view = sample();
++    view.revisions.clear();
++    view.revision = None;
++    view.edits.clear();
++    assert!(text(&ClmPanel::new(view.clone(), ClmTab::Edits), 120).contains("No accepted edits in this session"));
++    view.revisions = vec![1];
++    view.revision = Some(1);
++    view.note = Some("The source of revision 1 is no longer in the live context.".into());
++    assert!(text(&ClmPanel::new(view, ClmTab::Edits), 120).contains("no longer in the live context"));
++}
+Index: prime-agent-src/crates/pa-tui/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/lib.rs
++++ prime-agent-src/crates/pa-tui/src/lib.rs
+@@ -61,6 +61,7 @@ pub mod exit_guard;
+ pub(crate) mod exit_restore;
+ pub mod export_share;
+ mod external_editor;
++pub mod clm_view;
+ pub mod factory_view;
+ pub mod fuzzy;
+ pub mod goal_surface;
+Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui.rs
+@@ -6,6 +6,7 @@
+ mod apply;
+ mod auth;
+ mod bash;
++mod clm;
+ mod commands;
+ mod factory;
+ mod heartbeats;
+Index: prime-agent-src/crates/pa-tui/src/session_ui/clm.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-tui/src/session_ui/clm.rs
+@@ -0,0 +1,179 @@
++//! `/clm`: CLM status, settings and the edits panel for the active session.
++
++use std::time::Duration;
++
++use anyhow::Result;
++use serde_json::{Map, Value};
++
++use pa_types::clm_view::ClmView;
++use pa_types::daemon::DaemonCommand;
++
++use super::AgentView;
++use crate::clm_view::{ClmPanel, ClmPanelAction, ClmTab};
++use crate::session_ui::UI_REQUEST_TIMEOUT_MS;
++
++const USAGE: &str = "Usage: /clm [edits|settings|status|config <key> <value>|config reset|on|off|reset]";
++
++pub(crate) fn status_lines(view: &ClmView) -> [String; 3] {
++    let status = &view.status;
++    let budget = status.budget.map_or_else(|| "no budget".to_string(), |budget| budget.to_string());
++    let observed = status
++        .observed
++        .map_or_else(String::new, |tokens| format!(" (provider last saw {tokens})"));
++    let changed: Vec<String> = view
++        .settings
++        .iter()
++        .filter(|setting| setting.value != setting.default)
++        .map(|setting| format!("{}={}", setting.key, setting.value))
++        .collect();
++    [
++        format!(
++            "CLM {}: ~{} of {budget} tokens{observed}",
++            if status.enabled { "on" } else { "paused" },
++            status.estimate
++        ),
++        format!("Projection revision {}, {} accepted edit(s)", status.revision, status.edit_count),
++        format!(
++            "Session settings: {}",
++            if changed.is_empty() { "defaults".to_string() } else { changed.join(", ") }
++        ),
++    ]
++}
++
++fn parse_view(data: Value) -> Result<ClmView> {
++    Ok(serde_json::from_value(data)?)
++}
++
++impl super::SessionUi {
++    async fn clm_request(&self, command: DaemonCommand) -> Result<ClmView> {
++        parse_view(self.bounded_request(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), command).await?)
++    }
++
++    async fn clm_get(&self, revision: Option<u64>) -> Result<ClmView> {
++        self.clm_request(DaemonCommand::GetClmView {
++            id: None,
++            active_session_id: self.active_session_id.clone(),
++            revision,
++            rest: Map::default(),
++        })
++        .await
++    }
++
++    async fn clm_set(&self, action: &str, key: Option<&str>, value: Option<&str>) -> Result<ClmView> {
++        self.clm_request(DaemonCommand::ClmConfigure {
++            id: None,
++            active_session_id: self.active_session_id.clone(),
++            action: action.to_string(),
++            key: key.map(str::to_string),
++            value: value.map(str::to_string),
++            rest: Map::default(),
++        })
++        .await
++    }
++
++    pub(crate) async fn handle_clm_command(&mut self, args: &str, view: &mut AgentView) -> Result<()> {
++        let words: Vec<&str> = args.split_whitespace().collect();
++        let result = match words.as_slice() {
++            [] | ["edits"] => self.clm_get(None).await.map(|data| {
++                view.clm_view = Some(ClmPanel::new(data, ClmTab::Edits));
++                None
++            }),
++            ["settings"] => self.clm_get(None).await.map(|data| {
++                view.clm_view = Some(ClmPanel::new(data, ClmTab::Settings));
++                None
++            }),
++            ["status"] => self.clm_get(None).await.map(|data| Some(status_lines(&data).to_vec())),
++            ["config", "reset"] => self
++                .clm_set("reset_settings", None, None)
++                .await
++                .map(|_| Some(vec!["CLM settings back to the Nix defaults for this session".to_string()])),
++            ["config", key, value] => self
++                .clm_set("set", Some(key), Some(value))
++                .await
++                .map(|_| Some(vec![format!("CLM {key} set to {value} for this session")])),
++            ["on"] => self.clm_set("on", None, None).await.map(|_| Some(vec!["CLM is on for this session".to_string()])),
++            ["off"] => self
++                .clm_set("off", None, None)
++                .await
++                .map(|_| Some(vec!["CLM is paused for this session; requests use the raw context".to_string()])),
++            ["reset"] => self
++                .clm_set("reset", None, None)
++                .await
++                .map(|_| Some(vec!["CLM projection reset; the next request uses the raw context".to_string()])),
++            _ => {
++                self.error_row(USAGE, view);
++                return Ok(());
++            }
++        };
++        match result {
++            Ok(Some(lines)) => {
++                for line in lines {
++                    self.plain_row(&line, view);
++                }
++            }
++            Ok(None) => {}
++            Err(error) => self.error_row(&format!("{error:#}"), view),
++        }
++        self.dirty = true;
++        Ok(())
++    }
++
++    pub(crate) async fn handle_clm_view_key(
++        &mut self,
++        key: crossterm::event::KeyEvent,
++        view: &mut AgentView,
++    ) -> Result<()> {
++        let Some(id) = super::key_event_to_id(&key) else { return Ok(()) };
++        let action = view
++            .clm_view
++            .as_mut()
++            .map(|panel| panel.handle_key(&id, view.editor.keybindings()));
++        let Some(action) = action else { return Ok(()) };
++        let reply = match action {
++            ClmPanelAction::None => None,
++            ClmPanelAction::Close => {
++                view.clm_view = None;
++                None
++            }
++            ClmPanelAction::LoadRevision(revision) => Some(self.clm_get(Some(revision)).await),
++            ClmPanelAction::Set { key, value } => Some(self.clm_set("set", Some(&key), Some(&value)).await),
++        };
++        if let (Some(reply), Some(panel)) = (reply, view.clm_view.as_mut()) {
++            match reply {
++                Ok(data) => panel.replace(data),
++                Err(error) => panel.set_error(format!("{error:#}")),
++            }
++        }
++        self.dirty = true;
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::status_lines;
++    use pa_types::clm_view::{ClmSetting, ClmSettingKind, ClmStatus, ClmView};
++
++    #[test]
++    fn status_prints_three_lines() {
++        let mut view = ClmView {
++            status: ClmStatus { enabled: true, estimate: 12_000, budget: Some(64_000), observed: Some(11_500), revision: 2, edit_count: 1 },
++            settings: vec![ClmSetting { key: "budget".into(), label: "Token budget".into(), value: "32000".into(), default: "64000".into(), kind: ClmSettingKind::Number, choices: vec![] }],
++            ..ClmView::default()
++        };
++        assert_eq!(
++            status_lines(&view),
++            [
++                "CLM on: ~12000 of 64000 tokens (provider last saw 11500)".to_string(),
++                "Projection revision 2, 1 accepted edit(s)".to_string(),
++                "Session settings: budget=32000".to_string(),
++            ]
++        );
++        view.settings[0].value = "64000".into();
++        view.status.enabled = false;
++        view.status.observed = None;
++        let lines = status_lines(&view);
++        assert!(lines[0].starts_with("CLM paused: ~12000 of 64000 tokens"));
++        assert_eq!(lines[2], "Session settings: defaults");
++    }
++}
+Index: prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/commands.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
+@@ -456,6 +456,7 @@ impl SessionUi {
+                     _ => self.error_row("Usage: /factory [on|off|status]", view),
+                 }
+             }
++            "clm" => self.handle_clm_command(resolved.args.trim(), view).await?,
+             // `/telemetry [status|on|off]`: the report (on/off and why, the
+             // endpoint, the installation id), or the persisted switch the
+             // running telemetry clients re-read at their next send.
+Index: prime-agent-src/crates/pa-tui/src/session_ui/keys.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/keys.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/keys.rs
+@@ -95,6 +95,7 @@ impl SessionUi {
+             || view.share_loader.is_some()
+             || view.mcp_view.is_some()
+             || view.factory_view.is_some()
++            || view.clm_view.is_some()
+             || view.onboarding.is_some();
+         let left = event.button == crate::mouse::BUTTON_LEFT;
+         let release_was_drag = left && !event.press && self.left_mouse_dragged;
+@@ -351,6 +352,9 @@ impl SessionUi {
+         if view.factory_view.is_some() {
+             return self.handle_factory_view_key(key, view).await;
+         }
++        if view.clm_view.is_some() {
++            return self.handle_clm_view_key(key, view).await;
++        }
+         // The `/heartbeats` view owns the frame the same way.
+         if view.heartbeats_picker.is_some() {
+             return self.handle_heartbeats_picker_key(key, view).await;
+Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/lifecycle.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
+@@ -787,6 +787,7 @@ impl SessionUi {
+             // owning the frame over the rebind with stale content.
+             view.goal_panel = None;
+             view.info_panel = None;
++            view.clm_view = None;
+             self.speed_stats = None;
+             view.chrome.speed_text = None;
+         }
+Index: prime-agent-src/crates/pa-tui/src/view.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/view.rs
++++ prime-agent-src/crates/pa-tui/src/view.rs
+@@ -93,6 +93,7 @@ pub struct AgentView {
+     /// inline pickers (one panel per live factory run) — the activity
+     /// dock's factory group's destination.
+     pub factory_view: Option<crate::factory_view::FactoryView>,
++    pub clm_view: Option<crate::clm_view::ClmPanel>,
+     /// The `/heartbeats` inline management view (TS
+     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
+     /// owns the editor dock like the `/model` and `/effort` pickers.
+@@ -306,6 +307,7 @@ impl AgentView {
+             effort_picker: None,
+             mcp_view: None,
+             factory_view: None,
++            clm_view: None,
+             heartbeats_picker: None,
+             goal_panel: None,
+             bash_view: None,
+Index: prime-agent-src/crates/pa-tui/src/view/frame.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/view/frame.rs
++++ prime-agent-src/crates/pa-tui/src/view/frame.rs
+@@ -77,6 +77,10 @@ impl AgentView {
+             let mut dock = prompt_context;
+             dock.extend(factory_view.render(&self.theme, width, self.editor.keybindings()));
+             Some(dock)
++        } else if let Some(clm_view) = self.clm_view.as_ref() {
++            let mut dock = prompt_context;
++            dock.extend(clm_view.render(&self.theme, width, self.editor.keybindings()));
++            Some(dock)
+         } else if let Some(picker) = &self.heartbeats_picker {
+             let mut dock = prompt_context;
+             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
+@@ -297,6 +301,7 @@ impl AgentView {
+             || self.reload_box.is_some()
+             || self.settings_menu.is_some()
+             || self.factory_view.is_some()
++            || self.clm_view.is_some()
+         {
+             return None;
+         }
+Index: prime-agent-src/crates/pa-tui/src/view/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/view/tests.rs
++++ prime-agent-src/crates/pa-tui/src/view/tests.rs
+@@ -35,6 +35,22 @@ fn the_factory_page_suppresses_the_stale
+     assert_eq!(v.frame_cursor(), Some((11, 3)));
+ }
+ 
++#[test]
++fn the_clm_panel_suppresses_the_stale_editor_cursor() {
++    let mut v = view();
++    v.dock_cursor = Some((10, 3));
++    v.clm_view = Some(crate::clm_view::ClmPanel::new(
++        pa_types::clm_view::ClmView::default(),
++        crate::clm_view::ClmTab::Edits,
++    ));
++    assert!(
++        v.frame_cursor().is_none(),
++        "the open clm panel is an input-less overlay"
++    );
++    v.clm_view = None;
++    assert_eq!(v.frame_cursor(), Some((11, 3)));
++}
++
+ /// A paste never reaches the editor behind an overlay (the key
+ /// dispatch's frame owners): the input-bearing pickers take it, the
+ /// input-less overlays consume it, and only the bare dock's editor

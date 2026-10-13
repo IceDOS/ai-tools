@@ -1,0 +1,477 @@
+Index: prime-agent-src/crates/pa-daemon/src/rlm_children.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/rlm_children.rs
++++ prime-agent-src/crates/pa-daemon/src/rlm_children.rs
+@@ -156,6 +156,8 @@ struct ChildRecord {
+     /// Terminal error text: the cancel reason for a cancelled run, the
+     /// failure text for a failed one.
+     error: Option<String>,
++    /// The newest progress note reported by the child worker.
++    progress_note: Option<String>,
+     /// The parent session closed while this child ran: the settle watcher
+     /// exits without a notice — none is owed to a session being torn down.
+     closed_by_parent: bool,
+@@ -656,6 +658,7 @@ impl SupervisorChildSessions {
+                 notice_delivered: false,
+                 prompt_admitted: true,
+                 error: None,
++                progress_note: None,
+                 closed_by_parent: false,
+                 session_file: None,
+                 attributed_rows: Some(0),
+@@ -726,7 +729,7 @@ impl SupervisorChildSessions {
+             duration_ms: Some(now_ms().saturating_sub(record.started_at_ms)),
+             answer_preview: record.answer_preview.clone(),
+             replied_since_task: None,
+-            progress_note: None,
++            progress_note: record.progress_note.clone(),
+             label: (!record.label.is_empty()).then(|| record.label.clone()),
+             last_activity_at: Some(record.started_at_ms),
+             activity_stale_ms: None,
+Index: prime-agent-src/crates/pa-daemon/src/rlm_children/host.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/rlm_children/host.rs
++++ prime-agent-src/crates/pa-daemon/src/rlm_children/host.rs
+@@ -136,6 +136,7 @@ impl RlmSubagentHost for SupervisorChild
+                     notice_delivered: false,
+                     prompt_admitted: false,
+                     error: None,
++                    progress_note: None,
+                     closed_by_parent: false,
+                     session_file: created.session_file.clone(),
+                     attributed_rows: Some(0),
+Index: prime-agent-src/crates/pa-daemon/src/rlm_children/lifecycle.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/rlm_children/lifecycle.rs
++++ prime-agent-src/crates/pa-daemon/src/rlm_children/lifecycle.rs
+@@ -338,7 +338,8 @@ impl SupervisorChildSessionsInner {
+     /// queued, or its own children still running - so a child stays
+     /// running while any descendant does). `Err` means the child cannot be
+     /// reached right now.
+-    pub(super) async fn child_busy(&self, active_session_id: &str) -> Result<bool> {
++    /// Query the child worker's state: returns busy status and progress note.
++    pub(super) async fn child_state(&self, active_session_id: &str) -> Result<(bool, Option<String>)> {
+         let command = DaemonCommand::GetState {
+             id: None,
+             active_session_id: active_session_id.to_string(),
+@@ -346,14 +347,25 @@ impl SupervisorChildSessionsInner {
+         };
+         let state = self.command(&command, STATE_TIMEOUT_MS).await?;
+         let flag = |name: &str| state.get(name).and_then(Value::as_bool).unwrap_or(false);
+-        Ok(flag("isStreaming")
++        let busy = flag("isStreaming")
+             || flag("hasRunningSubagents")
+             || state
+                 .get("sessionActions")
+                 .and_then(|actions| actions.get("queuedCount"))
+                 .and_then(Value::as_u64)
+                 .unwrap_or(0)
+-                > 0)
++                > 0;
++        let progress_note = state
++            .get("progressNote")
++            .and_then(Value::as_str)
++            .filter(|s| !s.is_empty())
++            .map(str::to_string);
++        Ok((busy, progress_note))
++    }
++
++    /// Whether the child worker still has work in flight.
++    pub(super) async fn child_busy(&self, active_session_id: &str) -> Result<bool> {
++        self.child_state(active_session_id).await.map(|(busy, _)| busy)
+     }
+ 
+     /// The child's final answer text, compacted for the roster preview.
+@@ -371,6 +383,24 @@ impl SupervisorChildSessionsInner {
+             .map(compact_rlm_text))
+     }
+ 
++    /// The provider error that ended the child's last turn, if it ended on one.
++    async fn child_provider_error(&self, active_session_id: &str) -> Option<String> {
++        let command = DaemonCommand::GetLastAssistantText {
++            id: None,
++            active_session_id: active_session_id.to_string(),
++            rest: Map::default(),
++        };
++        let reply = self.command(&command, STATE_TIMEOUT_MS).await.ok()?;
++        (reply.get("stopReason").and_then(Value::as_str) == Some("error")).then(|| {
++            reply
++                .get("errorMessage")
++                .and_then(Value::as_str)
++                .filter(|message| !message.is_empty())
++                .unwrap_or("child turn ended with a provider error")
++                .to_string()
++        })
++    }
++
+     /// Best-effort bounded wait for one child and its descendants to go
+     /// idle. The wait is a
+     /// snapshot helper, not a gate: its timeout is not an error, and the
+@@ -403,8 +433,13 @@ impl SupervisorChildSessionsInner {
+             }
+         }
+         let active_session_id = record.lock().await.active_session_id.clone();
+-        let busy = self.child_busy(&active_session_id).await;
+-        if !matches!(busy, Ok(false)) {
++        let state = self.child_state(&active_session_id).await;
++        if let Ok((_, ref progress_note)) = state {
++            if progress_note.is_some() {
++                record.lock().await.progress_note = progress_note.clone();
++            }
++        }
++        if !matches!(state, Ok((false, _))) {
+             return;
+         }
+         // Capture the answer before taking the record lock (the capture is
+@@ -461,6 +496,16 @@ impl SupervisorChildSessionsInner {
+                     continue;
+                 }
+                 self.refresh_record(record).await;
++                // A provider error ends the turn without failing it; a child that never
++                // replied reports it as a failure instead of the no-reply notice.
++                if !record.lock().await.replied_since_task {
++                    if let Some(error) = self.child_provider_error(&active_session_id).await {
++                        self.emit_child_usage(record).await;
++                        self.settle_failed(record, error, FailedArm::ProviderError)
++                            .await;
++                        return;
++                    }
++                }
+                 // The run's final rows are attributed before the terminal
+                 // notice rides the parent's follow-up route.
+                 self.emit_child_usage(record).await;
+@@ -632,7 +677,7 @@ impl SupervisorChildSessionsInner {
+             let mut record = record.lock().await;
+             let keep_verdict = match arm {
+                 FailedArm::Unreachable => !should_mark_unreachable_error(&record),
+-                FailedArm::Prompt => {
++                FailedArm::Prompt | FailedArm::ProviderError => {
+                     record.closed_by_parent
+                         || record.notice_delivered
+                         || matches!(record.settled_status, Some("error" | "cancelled"))
+@@ -713,6 +758,8 @@ impl SupervisorChildSessionsInner {
+ pub(super) enum FailedArm {
+     /// The task-prompt admission failed and its retry failed.
+     Prompt,
++    /// The settled run's last turn ended on a provider error and the child never replied.
++    ProviderError,
+     /// The unreachable-poller's give-up (`WATCH_MAX_UNREACHABLE_POLLS`
+     /// consecutive dead polls).
+     Unreachable,
+Index: prime-agent-src/crates/pa-daemon/src/rlm_children/registry.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/rlm_children/registry.rs
++++ prime-agent-src/crates/pa-daemon/src/rlm_children/registry.rs
+@@ -381,6 +381,7 @@ fn ledger_child_records(
+             notice_delivered: true,
+             prompt_admitted: true,
+             error: None,
++            progress_note: None,
+             closed_by_parent: false,
+             session_file: Some(edge.child),
+             attributed_rows: None,
+Index: prime-agent-src/crates/pa-daemon/src/rlm_children/usage_emit_tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/rlm_children/usage_emit_tests.rs
++++ prime-agent-src/crates/pa-daemon/src/rlm_children/usage_emit_tests.rs
+@@ -44,6 +44,7 @@ fn record_with_file(child_id: &str, sess
+         notice_delivered: false,
+         prompt_admitted: true,
+         error: None,
++        progress_note: None,
+         closed_by_parent: false,
+         session_file: Some(session_file.display().to_string()),
+         attributed_rows: Some(0),
+Index: prime-agent-src/crates/pa-daemon/src/rlm_children/watch_tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/rlm_children/watch_tests.rs
++++ prime-agent-src/crates/pa-daemon/src/rlm_children/watch_tests.rs
+@@ -30,6 +30,10 @@ enum FakeChild {
+     /// Unreachable; the watcher's give-up poll parks until the test
+     /// lands a reader's verdict.
+     UnreachableUntilVerdict,
++    /// The run settles on a provider error without a reply.
++    ProviderError,
++    /// The child reports a progress note in its `get_state` reply.
++    RetryProgressNote,
+ }
+ 
+ /// A scripted JSONL supervisor for the watcher tests: creates one child
+@@ -161,26 +165,33 @@ async fn spawn_fake_supervisor(
+                             }
+                             response_success(Some(&id), command_type, None)
+                         }
+-                        "get_state" => response_success(
+-                            Some(&id),
+-                            command_type,
+-                            Some(json!({
++                        "get_state" => {
++                            let mut state = json!({
+                                 "isStreaming": false,
+                                 "hasRunningSubagents": child_subagents.running.load(Ordering::SeqCst),
+                                 "sessionActions": { "queuedCount": 0 },
+-                            })),
+-                        ),
++                            });
++                            if matches!(child, FakeChild::RetryProgressNote) {
++                                state["progressNote"] = json!("provider retry 2/5 in 30s: overloaded");
++                            }
++                            response_success(Some(&id), command_type, Some(state))
++                        }
+                         "get_last_assistant_text" => {
+                             // The settle capture: with the knob set, the
+                             // worker leaves right after its final answer.
+                             if matches!(child, FakeChild::LeavesAfterSettle) {
+                                 gone.store(true, Ordering::SeqCst);
+                             }
+-                            response_success(
+-                                Some(&id),
+-                                command_type,
+-                                Some(json!({ "text": "the child final answer" })),
+-                            )
++                            let reply = if matches!(child, FakeChild::ProviderError) {
++                                json!({
++                                    "text": "",
++                                    "stopReason": "error",
++                                    "errorMessage": "429 quota exhausted",
++                                })
++                            } else {
++                                json!({ "text": "the child final answer" })
++                            };
++                            response_success(Some(&id), command_type, Some(reply))
+                         }
+                         "kill" => {
+                             let _ = kill_tx.send(command.clone());
+@@ -1038,6 +1049,7 @@ fn an_already_settled_child_never_re_sco
+         notice_delivered: false,
+         prompt_admitted: true,
+         error: None,
++        progress_note: None,
+         closed_by_parent: false,
+         session_file: None,
+         attributed_rows: Some(0),
+@@ -1064,3 +1076,53 @@ fn an_already_settled_child_never_re_sco
+     noticed.notice_delivered = true;
+     assert!(!super::lifecycle::should_mark_unreachable_error(&noticed));
+ }
++
++/// A run that settles on a provider error delivers the failure row, not the no-reply notice.
++#[tokio::test]
++async fn a_child_ending_on_a_provider_error_delivers_the_failure_notice() {
++    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
++    let (sessions, _kill_rx) =
++        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::ProviderError)
++            .await;
++    let handle = spawn_child(&sessions).await;
++    sessions.notify_turn_done();
++
++    let follow_up = tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
++        .await
++        .expect("the errored child must deliver its failure notice")
++        .expect("the follow_up channel stays open");
++    assert_failure_row(&follow_up, &handle.rlm_child_id, "429 quota exhausted");
++    let entries = sessions.list_subagents().await.expect("child roster");
++    assert_eq!(entries[0].status, "error");
++    let extra = tokio::time::timeout(Duration::from_millis(300), follow_up_rx.recv()).await;
++    assert!(extra.is_err(), "no second notice may arrive");
++}
++
++/// A child reporting a progress note in its `get_state` reply surfaces it on the parent roster.
++#[tokio::test]
++async fn a_child_reporting_progress_note_surfaces_it_on_the_roster() {
++    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
++    let (sessions, _kill_rx) = sessions_with_fake_supervisor(
++        follow_up_tx,
++        0,
++        FakeKill::Success,
++        FakeChild::RetryProgressNote,
++    )
++    .await;
++    let _handle = spawn_child(&sessions).await;
++    sessions.notify_turn_done();
++    let record = Arc::clone(&sessions.inner.children.lock().await[0]);
++    // Wait until prompt is admitted
++    for _ in 0..50 {
++        if record.lock().await.prompt_admitted {
++            break;
++        }
++        tokio::time::sleep(Duration::from_millis(10)).await;
++    }
++    sessions.inner.refresh_record(&record).await;
++    let entries = sessions.list_subagents().await.expect("child roster");
++    assert_eq!(
++        entries[0].progress_note.as_deref(),
++        Some("provider retry 2/5 in 30s: overloaded")
++    );
++}
+Index: prime-agent-src/crates/pa-daemon/src/rpc/session_commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/rpc/session_commands.rs
++++ prime-agent-src/crates/pa-daemon/src/rpc/session_commands.rs
+@@ -333,7 +333,18 @@ async fn get_last_assistant_text(state:
+     let handle = state.session.handle().await;
+     let message = handle.engine.session.last_assistant_message().await;
+     let text = message.as_ref().and_then(assistant_text);
+-    Ok(ResponseData::Present(json!({ "text": text })))
++    let assistant = match &message {
++        Some(pa_types::session::AgentMessage::Assistant(assistant)) => Some(assistant),
++        _ => None,
++    };
++    let stop_reason =
++        assistant.and_then(|assistant| serde_json::to_value(assistant.stop_reason).ok());
++    let error_message = assistant.and_then(|assistant| assistant.error_message.clone());
++    Ok(ResponseData::Present(json!({
++        "text": text,
++        "stopReason": stop_reason,
++        "errorMessage": error_message,
++    })))
+ }
+ 
+ /// `set_session_name`: the durable session-info row plus the `session_info_changed` event.
+Index: prime-agent-src/crates/pa-daemon/src/worker.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker.rs
++++ prime-agent-src/crates/pa-daemon/src/worker.rs
+@@ -312,6 +312,8 @@ impl Worker {
+             forced_all_steering: false,
+             scoped_models: Vec::new(),
+             retry_abort_requested: false,
++            retry_note: None,
++            retry_attempt: 0,
+             queued_input_suspended: false,
+             pending_next_turn: Vec::new(),
+             active_action: None,
+Index: prime-agent-src/crates/pa-daemon/src/worker/commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/commands.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/commands.rs
+@@ -405,12 +405,13 @@ impl Worker {
+             return response;
+         }
+         let (core, inputs) = self.summary_inputs();
++        let retry_note = core.retry_note.clone();
+         let summary = self.summary_locked(&core, inputs);
+-        response_success(
+-            None,
+-            "get_state",
+-            Some(serde_json::to_value(&summary).unwrap_or(Value::Null)),
+-        )
++        let mut state_json = serde_json::to_value(&summary).unwrap_or(Value::Null);
++        if let Some(state_map) = state_json.as_object_mut() {
++            state_map.insert("progressNote".to_string(), json!(retry_note));
++        }
++        response_success(None, "get_state", Some(state_json))
+     }
+ 
+     /// `get_session_header`: the persisted session header line (TS wraps it
+@@ -536,18 +537,23 @@ impl Worker {
+             return response;
+         }
+         let core = self.core.lock().unwrap();
+-        let text = core.store.as_ref().and_then(|store| {
++        let last = core.store.as_ref().and_then(|store| {
+             store
+                 .messages()
+                 .into_iter()
+                 .rev()
+                 .find(|message| crate::types::message_role(message) == Some("assistant"))
+-                .map(|message| crate::types::message_text(&message))
+         });
++        let text = last.as_ref().map(crate::types::message_text);
++        let field = |key: &str| last.as_ref().and_then(|message| message.get(key)).cloned();
+         response_success(
+             None,
+             "get_last_assistant_text",
+-            Some(json!({ "text": text })),
++            Some(json!({
++                "text": text,
++                "stopReason": field("stopReason"),
++                "errorMessage": field("errorMessage"),
++            })),
+         )
+     }
+ 
+Index: prime-agent-src/crates/pa-daemon/src/worker/session_core.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/session_core.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/session_core.rs
+@@ -78,6 +78,10 @@ pub(crate) struct SessionCore {
+     /// A retry in flight was aborted (`abort_retry`); the turn's abort
+     /// probe reads it and the next turn start clears it.
+     pub(crate) retry_abort_requested: bool,
++    /// Live retry note for `get_state` / parent roster display.
++    pub(crate) retry_note: Option<String>,
++    /// Live retry attempt number for connection state.
++    pub(crate) retry_attempt: u32,
+     /// Queued-input admission is suspended (`requestAbort` and manual `compact()`
+     /// set it): the runner drains nothing and a plain prompt is rejected. Cleared
+     /// by the resume sites: `steer`/`follow_up`, `streamingBehavior`, `resume_queue`,
+@@ -139,6 +143,8 @@ impl SessionCore {
+             forced_all_steering: false,
+             scoped_models: Vec::new(),
+             retry_abort_requested: false,
++            retry_note: None,
++            retry_attempt: 0,
+             queued_input_suspended: false,
+             pending_next_turn: Vec::new(),
+             active_action: None,
+Index: prime-agent-src/crates/pa-daemon/src/worker/summary.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/summary.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/summary.rs
+@@ -105,7 +105,7 @@ impl Worker {
+             // thinking surface.
+             available_thinking_levels: inputs.available_thinking_levels,
+             is_bash_running: inputs.is_bash_running,
+-            retry_attempt: 0,
++            retry_attempt: core.retry_attempt,
+             steering_mode: core.steering_mode.clone(),
+             follow_up_mode: core.follow_up_mode.clone(),
+             session_file: store.map(|s| s.path.to_string_lossy().to_string()),
+Index: prime-agent-src/crates/pa-daemon/src/worker/turn.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/turn.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/turn.rs
+@@ -849,6 +849,12 @@ impl TurnRunner {
+                         error_message,
+                         reason,
+                     } => {
++                        let note = format!(
++                            "provider retry {attempt}/{max_attempts} in {}s: {error_message}",
++                            delay_ms.div_ceil(1000)
++                        );
++                        core.retry_note = Some(note.chars().take(512).collect());
++                        core.retry_attempt = attempt;
+                         last_retry_error = Some(error_message.clone());
+                         let mut event = json!({
+                             "type": "auto_retry_start",
+@@ -874,6 +880,7 @@ impl TurnRunner {
+                         final_error,
+                         restored_model,
+                     } => {
++                        core.retry_note = None;
+                         let mut event = json!({
+                             "type": "auto_retry_end",
+                             "success": success,
+@@ -1006,6 +1013,8 @@ impl TurnRunner {
+             core.busy = false;
+             core.active_action = None;
+             core.running_admission_ids.clear();
++            core.retry_note = None;
++            core.retry_attempt = 0;
+         }
+         self.push_roster_delta();
+         // The fallback `agent_end` for runs that ended without a model
+Index: prime-agent-src/crates/pa-daemon/src/worker/turn_stream_tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/turn_stream_tests.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/turn_stream_tests.rs
+@@ -48,6 +48,8 @@ fn burst_runner(engine: Arc<dyn SessionE
+         forced_all_steering: false,
+         scoped_models: Vec::new(),
+         retry_abort_requested: false,
++        retry_note: None,
++        retry_attempt: 0,
+         queued_input_suspended: false,
+         pending_next_turn: Vec::new(),
+         active_action: None,

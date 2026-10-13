@@ -1,0 +1,2894 @@
+Index: prime-agent-src/crates/pa-core/src/clm/budget.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/budget.rs
+@@ -0,0 +1,368 @@
++//! Budget reminders and estimate calibration (pi-clm `budget.ts`).
++
++use std::collections::HashSet;
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct BudgetPolicy {
++    /// Tokens; `None` falls back to the model window.
++    pub context_budget: Option<u64>,
++    pub reserve: u64,
++    /// Ascending fractions in (0, 1).
++    pub remind_at: Vec<f64>,
++    pub remind_at_reserve: bool,
++}
++
++impl Default for BudgetPolicy {
++    fn default() -> Self {
++        Self {
++            context_budget: None,
++            reserve: 2048,
++            remind_at: vec![0.5, 0.75, 0.9],
++            remind_at_reserve: true,
++        }
++    }
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ResolvedBudget {
++    pub budget: u64,
++    pub reserve: u64,
++    pub from_config: bool,
++}
++
++impl BudgetPolicy {
++    #[must_use]
++    pub fn resolve(&self, context_window: u64) -> Option<ResolvedBudget> {
++        match self.context_budget {
++            Some(budget) if budget > 0 => Some(ResolvedBudget {
++                budget,
++                reserve: self.reserve.min(budget),
++                from_config: true,
++            }),
++            _ if context_window > 0 => Some(ResolvedBudget {
++                budget: context_window,
++                reserve: self.reserve.min(context_window),
++                from_config: false,
++            }),
++            _ => None,
++        }
++    }
++
++    /// Ascending tiers; tiers at the same token count keep the more urgent label.
++    #[must_use]
++    pub fn tiers(&self, resolved: ResolvedBudget) -> Vec<BudgetTier> {
++        let mut tiers: Vec<BudgetTier> = self
++            .remind_at
++            .iter()
++            .map(|fraction| BudgetTier {
++                label: format!("{}%", (fraction * 100.0).round() as u64),
++                tokens: (resolved.budget as f64 * fraction).floor() as u64,
++            })
++            .collect();
++        if self.remind_at_reserve && resolved.reserve > 0 && resolved.budget > resolved.reserve {
++            tiers.push(BudgetTier {
++                label: RESERVE_TIER.into(),
++                tokens: resolved.budget - resolved.reserve,
++            });
++        }
++        tiers.sort_by_key(|tier| tier.tokens);
++        let mut kept: Vec<BudgetTier> = Vec::new();
++        for tier in tiers {
++            match kept.last_mut() {
++                Some(last) if last.tokens == tier.tokens => *last = tier,
++                _ => kept.push(tier),
++            }
++        }
++        kept
++    }
++}
++
++pub const RESERVE_TIER: &str = "budget-reserve";
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct BudgetTier {
++    pub label: String,
++    pub tokens: u64,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub struct BudgetReading {
++    pub budget: ResolvedBudget,
++    /// Calibrated estimate of the next request.
++    pub estimated: u64,
++    /// Provider-reported size of the previous request.
++    pub observed: Option<u64>,
++    /// An accepted edit landed after `observed` was measured.
++    pub observed_stale: bool,
++    pub calibration: f64,
++}
++
++impl BudgetReading {
++    /// The larger measurement governs, unless the observation predates an edit.
++    #[must_use]
++    pub fn governing(&self) -> u64 {
++        if self.observed_stale {
++            self.estimated
++        } else {
++            self.estimated.max(self.observed.unwrap_or(0))
++        }
++    }
++}
++
++/// Fires each tier once; a tier re-arms when usage drops back below it.
++#[derive(Debug, Default)]
++pub struct BudgetTracker {
++    fired: HashSet<String>,
++    tier_key: String,
++}
++
++impl BudgetTracker {
++    pub fn reset(&mut self) {
++        self.fired.clear();
++    }
++
++    pub fn observe(&mut self, governing: u64, tiers: &[BudgetTier]) -> Option<BudgetTier> {
++        let key: Vec<String> = tiers
++            .iter()
++            .map(|tier| format!("{}:{}", tier.label, tier.tokens))
++            .collect();
++        let key = key.join("|");
++        if key != self.tier_key {
++            self.tier_key = key;
++            self.fired.clear();
++        }
++        self.fired.retain(|label| {
++            tiers
++                .iter()
++                .any(|tier| &tier.label == label && governing >= tier.tokens)
++        });
++        let top = tiers
++            .iter()
++            .rfind(|tier| governing >= tier.tokens && !self.fired.contains(&tier.label))?
++            .clone();
++        for tier in tiers.iter().filter(|tier| tier.tokens <= top.tokens) {
++            self.fired.insert(tier.label.clone());
++        }
++        Some(top)
++    }
++}
++
++fn thousands(value: u64) -> String {
++    let digits = value.to_string();
++    let mut out = String::new();
++    for (index, digit) in digits.chars().enumerate() {
++        if index > 0 && (digits.len() - index).is_multiple_of(3) {
++            out.push(',');
++        }
++        out.push(digit);
++    }
++    out
++}
++
++/// The model-facing reminder. States both measurements and the budget.
++#[must_use]
++pub fn budget_notice_text(reading: &BudgetReading, tier: &BudgetTier, mirror_path: &str) -> String {
++    let governing = reading.governing();
++    let budget = reading.budget.budget;
++    let remaining = budget.saturating_sub(governing);
++    let calibrated = if reading.calibration > 1.005 {
++        format!(
++            " (calibrated x{:.2} from provider counts)",
++            reading.calibration
++        )
++    } else {
++        String::new()
++    };
++    let measurement = match reading.observed {
++        None => format!(
++            "estimated {} tokens for the next request{calibrated}, excluding tool schemas and provider framing; provider-reported size of the previous request unknown",
++            thousands(reading.estimated)
++        ),
++        Some(observed) => format!(
++            "estimated {} tokens for the next request{calibrated}, excluding tool schemas and provider framing; the provider reported {} for the previous one{}",
++            thousands(reading.estimated),
++            thousands(observed),
++            if reading.observed_stale { ", before your last accepted edit" } else { "" }
++        ),
++    };
++    if tier.label == RESERVE_TIER {
++        return format!(
++            "[CLM BUDGET] Context is at {} of a {}-token budget ({measurement}). Only {} tokens remain, which is inside the {}-token generation reserve. Edit {mirror_path} now to free space. The budget is a target, not enforced: the request will still be sent and may overflow the provider's actual window.",
++            thousands(governing),
++            thousands(budget),
++            thousands(remaining),
++            thousands(reading.budget.reserve)
++        );
++    }
++    format!(
++        "[CLM BUDGET] Context crossed {} of a {}-token budget: {measurement}. {} tokens remain. You may reorganize {mirror_path} at any time; the final reminder comes at {} tokens.",
++        tier.label,
++        thousands(budget),
++        thousands(remaining),
++        thousands(budget - reading.budget.reserve)
++    )
++}
++
++/// Scales the chars/4 estimate by the provider's own counts. EMA, clamped to [1, 4].
++#[derive(Debug, Clone)]
++pub struct EstimateCalibrator {
++    initial: f64,
++    current: f64,
++    samples: u32,
++    pending: Option<(u64, usize)>,
++}
++
++const CALIBRATION_MIN: f64 = 1.0;
++const CALIBRATION_MAX: f64 = 4.0;
++const CALIBRATION_SMOOTHING: f64 = 0.5;
++
++impl EstimateCalibrator {
++    #[must_use]
++    pub fn new(initial: Option<f64>) -> Self {
++        let initial = initial
++            .unwrap_or(1.0)
++            .clamp(CALIBRATION_MIN, CALIBRATION_MAX);
++        Self {
++            initial,
++            current: initial,
++            samples: 0,
++            pending: None,
++        }
++    }
++
++    #[must_use]
++    pub fn factor(&self) -> f64 {
++        self.current
++    }
++
++    pub fn reset(&mut self) {
++        *self = Self::new(Some(self.initial));
++    }
++
++    /// The raw estimate of the request about to go out, and the raw transcript length.
++    pub fn record(&mut self, estimate: u64, raw_count: usize) {
++        if estimate > 0 {
++            self.pending = Some((estimate, raw_count));
++        }
++    }
++
++    /// Only an assistant row appended after the recorded request measures it.
++    pub fn observe(&mut self, observed: Option<(u64, usize)>) -> f64 {
++        let (Some((tokens, index)), Some((estimate, raw_count))) = (observed, self.pending) else {
++            return self.current;
++        };
++        if index < raw_count {
++            return self.current;
++        }
++        self.pending = None;
++        let sample = tokens as f64 / estimate as f64;
++        if !sample.is_finite() || sample <= 0.0 {
++            return self.current;
++        }
++        let next = if self.samples == 0 {
++            sample
++        } else {
++            self.current * (1.0 - CALIBRATION_SMOOTHING) + sample * CALIBRATION_SMOOTHING
++        };
++        self.current = next.clamp(CALIBRATION_MIN, CALIBRATION_MAX);
++        self.samples += 1;
++        self.current
++    }
++
++    #[must_use]
++    pub fn apply(&self, estimate: u64) -> u64 {
++        (estimate as f64 * self.current).ceil() as u64
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn resolved(budget: u64, reserve: u64) -> ResolvedBudget {
++        ResolvedBudget {
++            budget,
++            reserve,
++            from_config: true,
++        }
++    }
++
++    #[test]
++    fn tiers_cover_fractions_and_the_reserve() {
++        let tiers = BudgetPolicy::default().tiers(resolved(100_000, 2048));
++        let tokens: Vec<u64> = tiers.iter().map(|tier| tier.tokens).collect();
++        assert_eq!(tokens, vec![50_000, 75_000, 90_000, 97_952]);
++        assert_eq!(tiers.last().unwrap().label, RESERVE_TIER);
++    }
++
++    #[test]
++    fn resolve_prefers_config_and_caps_the_reserve() {
++        let policy = BudgetPolicy {
++            context_budget: Some(1000),
++            ..BudgetPolicy::default()
++        };
++        assert_eq!(policy.resolve(200_000), Some(resolved(1000, 1000)));
++        assert_eq!(BudgetPolicy::default().resolve(0), None);
++        assert!(!BudgetPolicy::default().resolve(8000).unwrap().from_config);
++    }
++
++    #[test]
++    fn tracker_fires_the_top_tier_once_and_rearms_after_a_drop() {
++        let tiers = BudgetPolicy::default().tiers(resolved(100_000, 2048));
++        let mut tracker = BudgetTracker::default();
++        assert_eq!(tracker.observe(80_000, &tiers).unwrap().label, "75%");
++        assert!(tracker.observe(80_000, &tiers).is_none());
++        assert!(tracker.observe(40_000, &tiers).is_none());
++        assert_eq!(tracker.observe(55_000, &tiers).unwrap().label, "50%");
++    }
++
++    #[test]
++    fn stale_observation_never_governs() {
++        let mut reading = BudgetReading {
++            budget: resolved(100, 0),
++            estimated: 10,
++            observed: Some(90),
++            observed_stale: false,
++            calibration: 1.0,
++        };
++        assert_eq!(reading.governing(), 90);
++        reading.observed_stale = true;
++        assert_eq!(reading.governing(), 10);
++    }
++
++    #[test]
++    fn calibrator_learns_from_later_rows_only_and_clamps() {
++        let mut calibrator = EstimateCalibrator::new(None);
++        calibrator.record(1000, 5);
++        assert_eq!(
++            calibrator.observe(Some((2000, 4))),
++            1.0,
++            "an older row measures nothing"
++        );
++        assert_eq!(calibrator.observe(Some((2000, 5))), 2.0);
++        calibrator.record(1000, 7);
++        assert_eq!(calibrator.observe(Some((9000, 8))), 4.0, "clamped at 4");
++        assert_eq!(calibrator.apply(10), 40);
++        calibrator.reset();
++        assert_eq!(calibrator.factor(), 1.0);
++    }
++
++    #[test]
++    fn notice_names_both_measurements() {
++        let reading = BudgetReading {
++            budget: resolved(32_000, 2048),
++            estimated: 30_500,
++            observed: Some(29_000),
++            observed_stale: false,
++            calibration: 1.0,
++        };
++        let tier = BudgetTier {
++            label: RESERVE_TIER.into(),
++            tokens: 29_952,
++        };
++        let text = budget_notice_text(&reading, &tier, "/tmp/m/LIVE_CONTEXT.md");
++        assert!(text.contains("30,500 of a 32,000-token budget"));
++        assert!(text.contains("reported 29,000"));
++        assert!(text.contains("Only 1,500 tokens remain"));
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/clm/document.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/document.rs
+@@ -0,0 +1,705 @@
++//! The `LIVE_CONTEXT.md` mirror: render the effective context as editable blocks,
++//! parse the model's edit and turn it back into messages (pi-clm
++//! `context-document.ts`, CLM editing mode only).
++
++use std::collections::{HashMap, HashSet};
++
++use serde_json::{json, Map, Value};
++use sha2::{Digest, Sha256};
++
++pub const DOCUMENT_VERSION: u64 = 1;
++pub const NOTE_CUSTOM_TYPE: &str = "live-context-projection";
++const EDIT_HINT: &str = "# Edit bodies or delete editable CTX_TURN blocks.";
++
++/// Keys sorted at every level, so the digest ignores map insertion order.
++fn normalize(value: &Value) -> Value {
++    match value {
++        Value::Array(items) => Value::Array(items.iter().map(normalize).collect()),
++        Value::Object(map) => {
++            let mut keys: Vec<&String> = map.keys().collect();
++            keys.sort();
++            let mut out = Map::new();
++            for key in keys {
++                out.insert(key.clone(), normalize(&map[key]));
++            }
++            Value::Object(out)
++        }
++        other => other.clone(),
++    }
++}
++
++#[must_use]
++pub fn canonical_message(message: &Value) -> String {
++    normalize(message).to_string()
++}
++
++#[must_use]
++pub fn digest_messages(messages: &[Value]) -> String {
++    let mut hash = Sha256::new();
++    for message in messages {
++        hash.update(canonical_message(message).as_bytes());
++        hash.update(b"\n");
++    }
++    to_hex(&hash.finalize())
++}
++
++fn to_hex(bytes: &[u8]) -> String {
++    use std::fmt::Write as _;
++    bytes
++        .iter()
++        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
++            let _ = write!(out, "{byte:02x}");
++            out
++        })
++}
++
++fn role(message: &Value) -> &str {
++    message.get("role").and_then(Value::as_str).unwrap_or("")
++}
++
++fn text_from_content(content: Option<&Value>) -> String {
++    match content {
++        Some(Value::String(text)) => text.clone(),
++        Some(Value::Array(parts)) => parts
++            .iter()
++            .map(|part| match part.get("type").and_then(Value::as_str) {
++                Some("text") => part["text"].as_str().unwrap_or("").to_string(),
++                Some("thinking") => {
++                    format!("[thinking]\n{}", part["thinking"].as_str().unwrap_or(""))
++                }
++                Some("toolCall") => format!(
++                    "[tool call: {}]\n{}",
++                    part["name"].as_str().unwrap_or("tool"),
++                    normalize(part.get("arguments").unwrap_or(&json!({})))
++                ),
++                Some("image") => format!(
++                    "[image: {}; data omitted]",
++                    part["mimeType"].as_str().unwrap_or("unknown")
++                ),
++                _ => normalize(part).to_string(),
++            })
++            .filter(|text| !text.is_empty())
++            .collect::<Vec<_>>()
++            .join("\n"),
++        _ => String::new(),
++    }
++}
++
++fn authored_role(message: &Value) -> Option<&str> {
++    (role(message) == "custom" && message["customType"] == NOTE_CUSTOM_TYPE)
++        .then(|| message["details"]["contextRole"].as_str())
++        .flatten()
++}
++
++#[must_use]
++pub fn render_message(message: &Value) -> String {
++    let mut content = text_from_content(message.get("content"));
++    if let Some(label) = authored_role(message) {
++        let prefix = format!("[context role={label}]\n");
++        if let Some(rest) = content.strip_prefix(&prefix) {
++            content = rest.to_string();
++        }
++    }
++    let mut parts = Vec::new();
++    if !content.is_empty() {
++        parts.push(content);
++    }
++    if matches!(role(message), "compactionSummary" | "branchSummary") {
++        if let Some(summary) = message["summary"].as_str() {
++            parts.push(summary.to_string());
++        }
++    }
++    parts.join("\n\n").trim().to_string()
++}
++
++/// Characters / 4, rounded up; the same base unit as `compaction::estimate_tokens`.
++#[must_use]
++pub fn estimate_tokens(messages: &[Value]) -> u64 {
++    messages
++        .iter()
++        .map(|message| (render_message(message).chars().count() as u64).div_ceil(4))
++        .sum()
++}
++
++#[must_use]
++pub fn estimate_text_tokens(text: &str) -> u64 {
++    (text.chars().count() as u64).div_ceil(4)
++}
++
++fn block_id(message: &Value, index: usize) -> String {
++    let digest = to_hex(&Sha256::digest(canonical_message(message).as_bytes()));
++    format!("{}-{}", index + 1, &digest[..12])
++}
++
++fn document_id(seed: &str, revision: u64) -> String {
++    to_hex(&Sha256::digest(
++        format!("pi-live-context:{DOCUMENT_VERSION}:{revision}:{seed}").as_bytes(),
++    ))
++}
++
++fn is_structural(rest: &str) -> bool {
++    rest.starts_with("[[CTX_TURN ") || rest.starts_with("[[LIVE_CONTEXT ")
++}
++
++/// A header quoted inside a body (say a `head` of the mirror) gains one leading backslash.
++#[must_use]
++pub fn escape_structural_lines(body: &str) -> String {
++    body.split('\n')
++        .map(|line| {
++            let rest = line.trim_start_matches('\\');
++            if is_structural(rest) {
++                format!("\\{line}")
++            } else {
++                line.to_string()
++            }
++        })
++        .collect::<Vec<_>>()
++        .join("\n")
++}
++
++#[must_use]
++pub fn unescape_structural_lines(body: &str) -> String {
++    body.split('\n')
++        .map(|line| {
++            let rest = line.trim_start_matches('\\');
++            if is_structural(rest) && line.len() > rest.len() {
++                line[1..].to_string()
++            } else {
++                line.to_string()
++            }
++        })
++        .collect::<Vec<_>>()
++        .join("\n")
++}
++
++#[derive(Debug, Clone)]
++pub struct DocumentBlock {
++    pub index: usize,
++    pub id: String,
++    pub role: String,
++    pub body: String,
++    pub source: Value,
++}
++
++#[derive(Debug, Clone)]
++pub struct Snapshot {
++    pub revision: u64,
++    pub baseline_digest: String,
++    pub document_id: String,
++    pub text: String,
++    pub messages: Vec<Value>,
++    pub blocks: Vec<DocumentBlock>,
++}
++
++/// CLM rendering: no protected blocks, nonce derived from `seed` and the revision
++/// so block ids read on one call stay valid until the next accepted edit.
++#[must_use]
++pub fn render_document(messages: &[Value], revision: u64, seed: &str) -> Snapshot {
++    let baseline_digest = digest_messages(messages);
++    let document_id = document_id(&format!("seed:{seed}"), revision);
++    let blocks: Vec<DocumentBlock> = messages
++        .iter()
++        .enumerate()
++        .map(|(index, source)| {
++            let role = match authored_role(source) {
++                Some(label) if is_role_label(label) => label.to_string(),
++                _ => role(source).to_string(),
++            };
++            DocumentBlock {
++                index,
++                id: block_id(source, index),
++                role,
++                body: escape_structural_lines(&render_message(source)),
++                source: source.clone(),
++            }
++        })
++        .collect();
++    let mut sections = vec![
++        format!(
++            "[[LIVE_CONTEXT version={DOCUMENT_VERSION} revision={revision} document={document_id} baseline={baseline_digest}]]"
++        ),
++        format!("{EDIT_HINT} Keep metadata/header lines intact."),
++    ];
++    for block in &blocks {
++        sections.push(format!(
++            "[[CTX_TURN document={document_id} index={} role={} id={} protected=false]]\n{}",
++            block.index + 1,
++            block.role,
++            block.id,
++            block.body
++        ));
++    }
++    Snapshot {
++        revision,
++        baseline_digest,
++        document_id,
++        text: sections.join("\n\n"),
++        messages: messages.to_vec(),
++        blocks,
++    }
++}
++
++fn is_role_label(label: &str) -> bool {
++    let mut chars = label.chars();
++    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
++        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
++}
++
++#[derive(Debug)]
++struct ParsedBlock {
++    id: String,
++    role: String,
++    body: String,
++}
++
++#[derive(Debug, Default)]
++struct ParsedDocument {
++    revision: Option<u64>,
++    document_id: Option<String>,
++    blocks: Vec<ParsedBlock>,
++    preamble: String,
++    duplicate_ids: Vec<String>,
++    malformed_headers: usize,
++}
++
++fn parse_meta(line: &str) -> Option<(u64, u64, String)> {
++    let inner = line.strip_prefix("[[LIVE_CONTEXT ")?.strip_suffix("]]")?;
++    let mut fields = HashMap::new();
++    for pair in inner.split(' ') {
++        let (key, value) = pair.split_once('=')?;
++        fields.insert(key, value);
++    }
++    Some((
++        fields.get("version")?.parse().ok()?,
++        fields.get("revision")?.parse().ok()?,
++        (*fields.get("document")?).to_string(),
++    ))
++}
++
++/// `(role, id)` for a well-formed header of the current document.
++fn parse_header(line: &str, document_id: &str) -> Option<(String, String)> {
++    let inner = line
++        .strip_prefix(&format!("[[CTX_TURN document={document_id} "))?
++        .strip_suffix("]]")?;
++    let fields: Vec<(&str, &str)> = inner
++        .split(' ')
++        .filter_map(|pair| pair.split_once('='))
++        .collect();
++    let get = |key: &str| {
++        fields
++            .iter()
++            .find(|(name, _)| *name == key)
++            .map(|(_, value)| *value)
++    };
++    let index_ok = get("index")?.parse::<usize>().is_ok();
++    let protected_ok = matches!(get("protected")?, "true" | "false");
++    let role = get("role").filter(|role| is_role_label(role))?;
++    let id = get("id")
++        .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))?;
++    (fields.len() == 4 && index_ok && protected_ok).then(|| (role.to_string(), id.to_string()))
++}
++
++fn parse_document(text: &str, document_id: &str) -> ParsedDocument {
++    let mut parsed = ParsedDocument::default();
++    let mut lines = text.lines().peekable();
++    if let Some((_, revision, id)) = lines.peek().and_then(|line| parse_meta(line.trim_end())) {
++        parsed.revision = Some(revision);
++        parsed.document_id = Some(id);
++        lines.next();
++    }
++    let header_prefix = format!("[[CTX_TURN document={document_id} ");
++    let mut seen = HashSet::new();
++    let mut current: Option<(String, String, Vec<&str>)> = None;
++    let mut preamble = Vec::new();
++    for line in lines {
++        let trimmed = line.trim();
++        if let Some((role, id)) = parse_header(trimmed, document_id) {
++            if let Some((role, id, body)) = current.take() {
++                parsed.blocks.push(ParsedBlock {
++                    id,
++                    role,
++                    body: body.join("\n").trim().to_string(),
++                });
++            }
++            if !seen.insert(id.clone()) {
++                parsed.duplicate_ids.push(id.clone());
++            }
++            current = Some((role, id, Vec::new()));
++            continue;
++        }
++        if trimmed.starts_with(&header_prefix) {
++            parsed.malformed_headers += 1;
++        }
++        match current.as_mut() {
++            Some((_, _, body)) => body.push(line),
++            None if !trimmed.starts_with(EDIT_HINT) => preamble.push(line),
++            None => {}
++        }
++    }
++    if let Some((role, id, body)) = current {
++        parsed.blocks.push(ParsedBlock {
++            id,
++            role,
++            body: body.join("\n").trim().to_string(),
++        });
++    }
++    parsed.preamble = preamble.join("\n").trim().to_string();
++    parsed
++}
++
++fn now_millis() -> u64 {
++    std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map_or(0, |elapsed| elapsed.as_millis() as u64)
++}
++
++/// A model-authored block: a custom row the loop converts to user-role text.
++#[must_use]
++pub fn context_note(body: &str, source: Option<&Value>, label: Option<&str>) -> Value {
++    let timestamp = source
++        .and_then(|source| source["timestamp"].as_u64())
++        .unwrap_or_else(now_millis);
++    let mut note = json!({
++        "role": "custom",
++        "customType": NOTE_CUSTOM_TYPE,
++        "content": match label {
++            Some(label) => format!("[context role={label}]\n{body}"),
++            None => body.to_string(),
++        },
++        "display": false,
++        "timestamp": timestamp,
++    });
++    if let Some(label) = label {
++        note["details"] = json!({ "contextRole": label });
++    }
++    note
++}
++
++fn changed_message(source: &Value, body: &str, requested_role: &str) -> Value {
++    match (role(source), requested_role) {
++        ("assistant", "assistant") => {
++            let mut changed = source.clone();
++            changed["content"] = json!([{ "type": "text", "text": body }]);
++            changed["stopReason"] = json!("stop");
++            if let Some(map) = changed.as_object_mut() {
++                map.remove("errorMessage");
++            }
++            changed
++        }
++        ("user", "user") => {
++            let mut changed = source.clone();
++            changed["content"] = if source["content"].is_array() {
++                json!([{ "type": "text", "text": body }])
++            } else {
++                json!(body)
++            };
++            changed
++        }
++        _ => context_note(body, Some(source), Some(requested_role)),
++    }
++}
++
++fn tool_call_ids(message: &Value) -> HashSet<String> {
++    message["content"]
++        .as_array()
++        .into_iter()
++        .flatten()
++        .filter(|part| part["type"] == "toolCall")
++        .filter_map(|part| part["id"].as_str().map(str::to_string))
++        .collect()
++}
++
++/// Turn any assistant call without all its results, and any result without its
++/// call, into a note: providers reject orphaned tool rows.
++#[must_use]
++pub fn repair_tool_groups(messages: Vec<Value>) -> Vec<Value> {
++    let mut repaired = messages;
++    for index in 0..repaired.len() {
++        if role(&repaired[index]) != "assistant" {
++            continue;
++        }
++        let ids = tool_call_ids(&repaired[index]);
++        if ids.is_empty() {
++            continue;
++        }
++        let mut found = HashSet::new();
++        for next in &repaired[index + 1..] {
++            if role(next) != "toolResult" {
++                break;
++            }
++            if let Some(id) = next["toolCallId"].as_str().filter(|id| ids.contains(*id)) {
++                found.insert(id.to_string());
++            }
++        }
++        if found.len() < ids.len() {
++            let source = repaired[index].clone();
++            repaired[index] = context_note(&render_message(&source), Some(&source), None);
++        }
++    }
++    for index in 0..repaired.len() {
++        if role(&repaired[index]) != "toolResult" {
++            continue;
++        }
++        let owner = repaired[..index]
++            .iter()
++            .rev()
++            .find(|message| role(message) != "toolResult");
++        let ids = owner
++            .filter(|owner| role(owner) == "assistant")
++            .map(tool_call_ids)
++            .unwrap_or_default();
++        let matched = repaired[index]["toolCallId"]
++            .as_str()
++            .is_some_and(|id| ids.contains(id));
++        if !matched {
++            let source = repaired[index].clone();
++            repaired[index] = context_note(&render_message(&source), Some(&source), None);
++        }
++    }
++    repaired
++}
++
++#[derive(Debug, Clone, PartialEq)]
++pub enum ApplyOutcome {
++    Unchanged,
++    Accepted {
++        messages: Vec<Value>,
++        before_tokens: u64,
++        after_tokens: u64,
++        diagnostics: Vec<String>,
++    },
++    Rejected(String),
++}
++
++/// Apply the model's edited mirror against the snapshot it was rendered from.
++#[must_use]
++pub fn apply_document(edited: &str, snapshot: &Snapshot) -> ApplyOutcome {
++    if edited.trim() == snapshot.text.trim() {
++        return ApplyOutcome::Unchanged;
++    }
++    let before_tokens = estimate_tokens(&snapshot.messages);
++    let finalize = |candidate: Vec<Value>, diagnostics: Vec<String>| {
++        let messages = repair_tool_groups(candidate);
++        ApplyOutcome::Accepted {
++            after_tokens: estimate_tokens(&messages),
++            messages,
++            before_tokens,
++            diagnostics,
++        }
++    };
++    let parsed = parse_document(edited, &snapshot.document_id);
++    // No current headers at all: the model collapsed its context to free text.
++    if parsed.blocks.is_empty() {
++        let body: Vec<&str> = edited
++            .lines()
++            .filter(|line| {
++                parse_meta(line.trim_end()).is_none() && !line.trim().starts_with(EDIT_HINT)
++            })
++            .collect();
++        let body = unescape_structural_lines(body.join("\n").trim());
++        if body.is_empty() {
++            return ApplyOutcome::Rejected(
++                "Mirror is empty after removing metadata; nothing to apply.".into(),
++            );
++        }
++        let mut candidate: Vec<Value> = snapshot
++            .messages
++            .iter()
++            .find(|message| role(message) == "user")
++            .cloned()
++            .into_iter()
++            .collect();
++        candidate.push(context_note(&body, None, Some("notes")));
++        return finalize(
++            candidate,
++            vec!["Accepted a headerless rewrite: every block was replaced by one notes block after the first user turn.".into()],
++        );
++    }
++    if parsed.revision != Some(snapshot.revision)
++        || parsed.document_id.as_deref() != Some(&snapshot.document_id)
++    {
++        let first = snapshot.text.lines().next().unwrap_or_default();
++        return ApplyOutcome::Rejected(format!(
++            "Mirror metadata does not match the current context revision (expected revision {}). The first line must be exactly: {first}",
++            snapshot.revision
++        ));
++    }
++    if !parsed.duplicate_ids.is_empty() {
++        return ApplyOutcome::Rejected(format!(
++            "Mirror contains duplicate block IDs: {}.",
++            parsed.duplicate_ids.join(", ")
++        ));
++    }
++    if parsed.malformed_headers > 0 {
++        return ApplyOutcome::Rejected(
++            "Mirror contains malformed headers for the current document.".into(),
++        );
++    }
++    let source_by_id: HashMap<&str, &DocumentBlock> = snapshot
++        .blocks
++        .iter()
++        .map(|block| (block.id.as_str(), block))
++        .collect();
++    let unknown: Vec<&str> = parsed
++        .blocks
++        .iter()
++        .map(|block| block.id.as_str())
++        .filter(|id| !source_by_id.contains_key(id) && !id.starts_with("new-"))
++        .collect();
++    if !unknown.is_empty() {
++        return ApplyOutcome::Rejected(format!(
++            "Mirror contains unknown block IDs: {}. Use ids from the current mirror headers, or prefix a new block's id with new-.",
++            unknown.join(", ")
++        ));
++    }
++    let mut candidate = Vec::new();
++    if !parsed.preamble.is_empty() {
++        candidate.push(context_note(
++            &unescape_structural_lines(&parsed.preamble),
++            None,
++            None,
++        ));
++    }
++    // CLM follows the edited order; blocks missing from the edit are removed.
++    for block in &parsed.blocks {
++        let body = unescape_structural_lines(&block.body);
++        match source_by_id.get(block.id.as_str()) {
++            None if !block.body.is_empty() => {
++                candidate.push(context_note(&body, None, Some(&block.role)));
++            }
++            None => {}
++            Some(_) if block.body.is_empty() => {}
++            Some(source) if block.body == source.body && block.role == source.role => {
++                candidate.push(source.source.clone());
++            }
++            Some(source) => candidate.push(changed_message(&source.source, &body, &block.role)),
++        }
++    }
++    finalize(candidate, Vec::new())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn conversation() -> Vec<Value> {
++        vec![
++            json!({ "role": "user", "content": "fix the bug", "timestamp": 1 }),
++            json!({ "role": "assistant", "content": [
++                { "type": "text", "text": "reading" },
++                { "type": "toolCall", "id": "c1", "name": "ipython", "arguments": { "code": "open('a').read()" } }
++            ], "stopReason": "toolUse", "timestamp": 2 }),
++            json!({ "role": "toolResult", "toolCallId": "c1", "toolName": "ipython",
++                "content": [{ "type": "text", "text": "x".repeat(400) }], "isError": false, "timestamp": 3 }),
++            json!({ "role": "assistant", "content": [{ "type": "text", "text": "found it" }], "stopReason": "stop", "timestamp": 4 }),
++        ]
++    }
++
++    #[test]
++    fn digest_ignores_key_order() {
++        let a = json!({ "role": "user", "content": "x", "timestamp": 1 });
++        let b = json!({ "timestamp": 1, "content": "x", "role": "user" });
++        assert_eq!(digest_messages(&[a]), digest_messages(&[b]));
++    }
++
++    #[test]
++    fn untouched_mirror_is_unchanged() {
++        let snapshot = render_document(&conversation(), 0, "s");
++        assert_eq!(
++            apply_document(&snapshot.text, &snapshot),
++            ApplyOutcome::Unchanged
++        );
++        assert!(snapshot
++            .text
++            .starts_with("[[LIVE_CONTEXT version=1 revision=0 document="));
++        assert_eq!(snapshot.blocks.len(), 4);
++    }
++
++    #[test]
++    fn deleting_a_tool_result_turns_its_call_into_a_note() {
++        let snapshot = render_document(&conversation(), 0, "s");
++        let result_block = &snapshot.blocks[2];
++        let header = format!(
++            "[[CTX_TURN document={} index=3 role=toolResult id={} protected=false]]\n{}",
++            snapshot.document_id, result_block.id, result_block.body
++        );
++        let edited = snapshot.text.replace(&header, "");
++        let ApplyOutcome::Accepted {
++            messages,
++            before_tokens,
++            after_tokens,
++            ..
++        } = apply_document(&edited, &snapshot)
++        else {
++            panic!("edit rejected");
++        };
++        assert_eq!(messages.len(), 3);
++        assert_eq!(
++            messages[1]["customType"], NOTE_CUSTOM_TYPE,
++            "orphaned call became a note"
++        );
++        assert!(after_tokens < before_tokens);
++    }
++
++    #[test]
++    fn new_blocks_and_body_edits_apply() {
++        let snapshot = render_document(&conversation(), 0, "s");
++        let last = &snapshot.blocks[3];
++        let edited = snapshot.text.replace(
++            &format!("id={} protected=false]]\n{}", last.id, last.body),
++            &format!(
++                "id={} protected=false]]\nbug is in a.py line 3\n\n[[CTX_TURN document={} index=9 role=notes id=new-1 protected=false]]\nplan: patch a.py",
++                last.id, snapshot.document_id
++            ),
++        );
++        let ApplyOutcome::Accepted { messages, .. } = apply_document(&edited, &snapshot) else {
++            panic!("edit rejected");
++        };
++        assert_eq!(messages[3]["content"][0]["text"], "bug is in a.py line 3");
++        assert_eq!(messages[4]["details"]["contextRole"], "notes");
++    }
++
++    #[test]
++    fn stale_revision_and_unknown_ids_are_rejected() {
++        let snapshot = render_document(&conversation(), 0, "s");
++        let stale = snapshot
++            .text
++            .replacen("revision=0", "revision=5", 1)
++            .replace("found it", "x");
++        assert!(
++            matches!(apply_document(&stale, &snapshot), ApplyOutcome::Rejected(reason) if reason.contains("expected revision 0"))
++        );
++        let bad = snapshot
++            .text
++            .replace(&snapshot.blocks[0].id, "99-deadbeef0000");
++        assert!(
++            matches!(apply_document(&bad, &snapshot), ApplyOutcome::Rejected(reason) if reason.contains("unknown block IDs"))
++        );
++    }
++
++    #[test]
++    fn headerless_rewrite_keeps_the_first_user_turn() {
++        let snapshot = render_document(&conversation(), 0, "s");
++        let ApplyOutcome::Accepted { messages, .. } =
++            apply_document("summary: bug in a.py", &snapshot)
++        else {
++            panic!("rewrite rejected");
++        };
++        assert_eq!(messages.len(), 2);
++        assert_eq!(messages[0]["role"], "user");
++        assert_eq!(
++            messages[1]["content"],
++            "[context role=notes]\nsummary: bug in a.py"
++        );
++    }
++
++    #[test]
++    fn quoted_headers_stay_inert() {
++        let quoted = "[[CTX_TURN document=abc index=1 role=user id=1-x protected=false]]";
++        assert_eq!(
++            unescape_structural_lines(&escape_structural_lines(quoted)),
++            quoted
++        );
++        assert!(escape_structural_lines(quoted).starts_with('\\'));
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/clm/guard.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/guard.rs
+@@ -0,0 +1,301 @@
++//! Observation cap and overflow guard (pi-clm `observation.ts`, `overflow.ts`).
++//! Both act on the effective context only; raw history is never touched.
++
++use std::path::{Path, PathBuf};
++
++use serde_json::{json, Value};
++
++pub const MIN_OBSERVATION_CAP: usize = 200;
++/// Keeps the request inside the window the output clamp leaves room for.
++pub const WINDOW_SAFETY_MARGIN: u64 = 4096;
++const WITHHELD_PREFIX: &str = "[pi-clm overflow guard]";
++
++fn text_parts(message: &Value) -> (String, Vec<Value>) {
++    match &message["content"] {
++        Value::String(text) => (text.clone(), Vec::new()),
++        Value::Array(parts) => {
++            let text = parts
++                .iter()
++                .filter(|part| part["type"] == "text")
++                .filter_map(|part| part["text"].as_str())
++                .collect::<String>();
++            let other = parts
++                .iter()
++                .filter(|part| part["type"] != "text")
++                .cloned()
++                .collect();
++            (text, other)
++        }
++        _ => (String::new(), Vec::new()),
++    }
++}
++
++fn thousands(value: usize) -> String {
++    let digits = value.to_string();
++    let mut out = String::new();
++    for (index, digit) in digits.chars().enumerate() {
++        if index > 0 && (digits.len() - index).is_multiple_of(3) {
++            out.push(',');
++        }
++        out.push(digit);
++    }
++    out
++}
++
++/// Keep `max_chars` of a tool result: `head_fraction` from the start, the rest from the end.
++#[must_use]
++pub fn cap_tool_result(message: &Value, max_chars: usize, head_fraction: f64) -> Option<Value> {
++    if message["role"] != "toolResult" {
++        return None;
++    }
++    let (text, other) = text_parts(message);
++    let chars: Vec<char> = text.chars().collect();
++    let total = chars.len();
++    if total <= max_chars {
++        return None;
++    }
++    let head_budget = (max_chars as f64 * head_fraction).floor() as usize;
++    let tail_budget = max_chars - head_budget;
++    let head: String = chars[..head_budget].iter().collect();
++    let cut = if tail_budget > 0 {
++        let tail: String = chars[total - tail_budget..].iter().collect();
++        format!(
++            "{head}\n…[{} characters omitted]…\n{tail}",
++            thousands(total - head_budget - tail_budget)
++        )
++    } else {
++        head
++    };
++    let capped = format!(
++        "{cut}\n\n[pi-clm observation cap: {} of {} characters shown. The complete output remains in the session history; re-read the source with offset/limit if you need the rest.]",
++        thousands(head_budget + tail_budget),
++        thousands(total)
++    );
++    let mut content = vec![json!({ "type": "text", "text": capped })];
++    content.extend(other);
++    let mut out = message.clone();
++    out["content"] = Value::Array(content);
++    Some(out)
++}
++
++pub fn cap_observations(messages: &mut [Value], max_chars: usize, head_fraction: f64) {
++    for message in messages.iter_mut() {
++        if let Some(capped) = cap_tool_result(message, max_chars, head_fraction) {
++            *message = capped;
++        }
++    }
++}
++
++#[must_use]
++pub fn overflow_guard_limit(budget: u64, reserve: u64, context_window: u64) -> u64 {
++    let from_budget = budget.saturating_sub(reserve);
++    if context_window == 0 {
++        return from_budget;
++    }
++    from_budget.min(context_window.saturating_sub(WINDOW_SAFETY_MARGIN + reserve))
++}
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct Withheld {
++    pub tool_call_id: String,
++    pub tool_name: String,
++    pub tokens: u64,
++    pub file: Option<PathBuf>,
++}
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct GuardResult {
++    pub withheld: Vec<Withheld>,
++    pub estimated: u64,
++}
++
++fn safe_id(id: &str) -> String {
++    id.chars()
++        .map(|c| {
++            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
++                c
++            } else {
++                '_'
++            }
++        })
++        .collect()
++}
++
++fn save_withheld(directory: &Path, id: &str, text: &str) -> Option<PathBuf> {
++    let file = directory.join(format!("{}.txt", safe_id(id)));
++    if file.exists() {
++        return Some(file);
++    }
++    std::fs::create_dir_all(directory).ok()?;
++    std::fs::write(&file, text).ok()?;
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
++    }
++    Some(file)
++}
++
++/// Withhold tool results at or after `protect_before`, oldest first, until
++/// `fixed_tokens + estimate(messages) <= limit` or nothing is left to withhold.
++pub fn apply_overflow_guard(
++    messages: &mut [Value],
++    limit: u64,
++    fixed_tokens: u64,
++    estimate: &dyn Fn(&[Value]) -> u64,
++    save_directory: Option<&Path>,
++    protect_before: usize,
++) -> GuardResult {
++    let mut estimated = fixed_tokens + estimate(messages);
++    let mut withheld = Vec::new();
++    if estimated <= limit {
++        return GuardResult {
++            withheld,
++            estimated,
++        };
++    }
++    for index in protect_before..messages.len() {
++        if messages[index]["role"] != "toolResult" {
++            continue;
++        }
++        let (text, _) = text_parts(&messages[index]);
++        if text.starts_with(WITHHELD_PREFIX) {
++            continue;
++        }
++        let tokens = estimate(std::slice::from_ref(&messages[index]));
++        let tool_call_id = messages[index]["toolCallId"]
++            .as_str()
++            .unwrap_or("unknown")
++            .to_string();
++        let tool_name = messages[index]["toolName"]
++            .as_str()
++            .unwrap_or("tool")
++            .to_string();
++        let file =
++            save_directory.and_then(|directory| save_withheld(directory, &tool_call_id, &text));
++        let location = match &file {
++            Some(path) => format!(" Full text: {}", path.display()),
++            None => " Full text remains in the session history.".to_string(),
++        };
++        messages[index]["content"] = json!([{
++            "type": "text",
++            "text": format!("{WITHHELD_PREFIX} {tool_name}#{tool_call_id} (~{} tok) withheld over budget.{location}", thousands(tokens as usize)),
++        }]);
++        withheld.push(Withheld {
++            tool_call_id,
++            tool_name,
++            tokens,
++            file,
++        });
++        estimated = fixed_tokens + estimate(messages);
++        if estimated <= limit {
++            break;
++        }
++    }
++    GuardResult {
++        withheld,
++        estimated,
++    }
++}
++
++#[must_use]
++pub fn overflow_notice_text(result: &GuardResult, limit: u64) -> String {
++    let count = result.withheld.len();
++    let list: Vec<String> = result
++        .withheld
++        .iter()
++        .map(|record| {
++            format!(
++                "{}#{} (~{} tok)",
++                record.tool_name,
++                record.tool_call_id,
++                thousands(record.tokens as usize)
++            )
++        })
++        .collect();
++    let with_files = if result.withheld.iter().any(|record| record.file.is_some()) {
++        " with file paths"
++    } else {
++        ""
++    };
++    let still_over = if result.estimated <= limit {
++        ""
++    } else {
++        " and still over the limit; edit your context now"
++    };
++    format!(
++        "[CLM BUDGET] Overflow guard: the request would have exceeded the limit of {} tokens, so {count} tool result{} {} withheld from your context and replaced by notes{with_files}: {}. Estimated request is now {} tokens{still_over}. Nothing was re-run; the full outputs are in the files named in the notes and in the session history. Free space in your context and re-read only what you need.",
++        thousands(limit as usize),
++        if count == 1 { "" } else { "s" },
++        if count == 1 { "was" } else { "were" },
++        list.join(", "),
++        thousands(result.estimated as usize),
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::clm::document::estimate_tokens;
++
++    fn tool_result(id: &str, chars: usize) -> Value {
++        json!({ "role": "toolResult", "toolCallId": id, "toolName": "ipython",
++            "content": [{ "type": "text", "text": "y".repeat(chars) }], "isError": false, "timestamp": 1 })
++    }
++
++    #[test]
++    fn cap_keeps_head_and_tail_with_a_marker() {
++        let mut message = tool_result("c1", 1000);
++        message["content"][0]["text"] = json!(format!("{}{}", "h".repeat(500), "t".repeat(500)));
++        let capped = cap_tool_result(&message, 200, 0.8).unwrap();
++        let text = capped["content"][0]["text"].as_str().unwrap();
++        assert!(text.starts_with(&"h".repeat(160)));
++        assert!(text.contains(&format!(
++            "{}\n\n[pi-clm observation cap: 200 of 1,000",
++            "t".repeat(40)
++        )));
++        assert!(cap_tool_result(&tool_result("c2", 100), 200, 0.8).is_none());
++    }
++
++    #[test]
++    fn guard_limit_takes_the_tighter_ceiling() {
++        assert_eq!(overflow_guard_limit(100_000, 2048, 0), 97_952);
++        assert_eq!(
++            overflow_guard_limit(100_000, 2048, 50_000),
++            50_000 - 4096 - 2048
++        );
++    }
++
++    #[test]
++    fn guard_withholds_oldest_unprotected_results_and_saves_them() {
++        let dir = tempfile::tempdir().unwrap();
++        let mut messages = vec![
++            tool_result("old", 4000),
++            tool_result("a/b", 4000),
++            tool_result("new", 4000),
++        ];
++        let result = apply_overflow_guard(
++            &mut messages,
++            2200,
++            0,
++            &|m| estimate_tokens(m),
++            Some(dir.path()),
++            1,
++        );
++        assert_eq!(
++            result.withheld.len(),
++            1,
++            "one withheld result brings it under"
++        );
++        assert_eq!(result.withheld[0].tool_call_id, "a/b");
++        assert_eq!(
++            messages[0]["content"][0]["text"].as_str().unwrap().len(),
++            4000,
++            "protected prefix kept"
++        );
++        let saved = result.withheld[0].file.clone().unwrap();
++        assert!(saved.ends_with("a_b.txt"));
++        assert_eq!(std::fs::read_to_string(saved).unwrap().len(), 4000);
++        assert!(overflow_notice_text(&result, 2200).contains("1 tool result was withheld"));
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/mod.rs
+@@ -0,0 +1,728 @@
++//! Context language models (settings `contextLanguageModels`): a port of the
++//! pi-clm extension. The model edits a mirror of its own effective context; an
++//! accepted edit becomes a projection checkpoint that replaces the raw prefix on
++//! later requests. Raw session history is never rewritten.
++
++pub mod budget;
++pub mod document;
++pub mod guard;
++pub mod projection;
++
++use std::path::{Path, PathBuf};
++use std::sync::{Arc, Mutex};
++
++use serde_json::{json, Value};
++
++use crate::settings::ContextLanguageModelsSettings;
++use budget::{BudgetPolicy, BudgetReading, BudgetTracker, EstimateCalibrator};
++use document::{
++    apply_document, estimate_text_tokens, estimate_tokens, render_document, ApplyOutcome, Snapshot,
++};
++use projection::{apply_projection, latest_matching, Checkpoint, Projection};
++
++pub const NOTICE_CUSTOM_TYPE: &str = "clm-notice";
++pub const MIRROR_FILE: &str = "LIVE_CONTEXT.md";
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum NativeCompaction {
++    /// Cancel threshold compaction while the overflow guard enforces a budget.
++    Auto,
++    /// Cancel every automatic compaction.
++    Off,
++    /// Leave compaction alone.
++    On,
++}
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct ClmConfig {
++    pub budget: BudgetPolicy,
++    pub observation_cap: Option<(usize, f64)>,
++    pub overflow_withhold: bool,
++    pub estimate_factor: Option<f64>,
++    pub one_tool_per_turn: bool,
++    pub size_trailer: bool,
++    pub native_compaction: NativeCompaction,
++    pub steering: Option<PathBuf>,
++}
++
++impl ClmConfig {
++    /// Same validation as the pi-clm env parsers.
++    ///
++    /// # Errors
++    /// An out-of-range value is an error, never a silent default.
++    pub fn from_settings(settings: &ContextLanguageModelsSettings) -> Result<Self, String> {
++        let mut budget = BudgetPolicy {
++            context_budget: settings.budget,
++            ..BudgetPolicy::default()
++        };
++        if let Some(reserve) = settings.reserve {
++            budget.reserve = reserve;
++        }
++        if let Some(remind_at) = &settings.remind_at {
++            if let Some(bad) = remind_at.iter().find(|f| !(**f > 0.0 && **f < 1.0)) {
++                return Err(format!("remindAt entries must be in (0, 1), got {bad}"));
++            }
++            budget.remind_at.clone_from(remind_at);
++            budget.remind_at.sort_by(f64::total_cmp);
++            budget.remind_at_reserve = !remind_at.is_empty();
++        }
++        let head = settings.observation_cap_head.unwrap_or(0.8);
++        if !(head > 0.0 && head <= 1.0) {
++            return Err(format!("observationCapHead must be in (0, 1], got {head}"));
++        }
++        let observation_cap = match settings.observation_cap {
++            None | Some(0) => None,
++            Some(chars) if (chars as usize) < guard::MIN_OBSERVATION_CAP => {
++                return Err(format!(
++                    "observationCap must be at least 200 characters, got {chars}"
++                ));
++            }
++            Some(chars) => Some((chars as usize, head)),
++        };
++        let overflow_withhold = match settings.overflow.as_deref() {
++            None | Some("withhold") => true,
++            Some("off") => false,
++            Some(other) => {
++                return Err(format!(
++                    "overflow must be \"withhold\" or \"off\", got {other}"
++                ))
++            }
++        };
++        if let Some(factor) = settings.estimate_factor {
++            if !(1.0..=4.0).contains(&factor) {
++                return Err(format!(
++                    "estimateFactor must be between 1 and 4, got {factor}"
++                ));
++            }
++        }
++        let native_compaction = match settings.native_compaction.as_deref() {
++            None | Some("auto") => NativeCompaction::Auto,
++            Some("off") => NativeCompaction::Off,
++            Some("on") => NativeCompaction::On,
++            Some(other) => {
++                return Err(format!(
++                    "nativeCompaction must be auto, off or on, got {other}"
++                ))
++            }
++        };
++        Ok(Self {
++            budget,
++            observation_cap,
++            overflow_withhold,
++            estimate_factor: settings.estimate_factor,
++            one_tool_per_turn: settings.one_tool_per_turn.unwrap_or(false),
++            size_trailer: settings.size_trailer.unwrap_or(false),
++            native_compaction,
++            steering: settings
++                .steering
++                .as_deref()
++                .filter(|path| !matches!(*path, "" | "none" | "off"))
++                .map(PathBuf::from),
++        })
++    }
++}
++
++/// The editing protocol (pi-clm `systemGuidance`, CLM mode) adapted to ipython.
++#[must_use]
++pub fn protocol_text(mirror: &Path) -> String {
++    format!(
++        "## Editable context\n\n\
++Your working conversation is mirrored at `{}` before every model request.\n\
++You may edit, delete, reorder, or add context by rewriting that file from Python.\n\
++Edits are validated once at the end of the turn and become visible on the next request.\n\
++Keep the LIVE_CONTEXT metadata line unchanged (read line 1 right before writing). Every\n\
++CTX_TURN header must carry the current document nonce. To add a block, copy a current\n\
++header, use a unique id=new-NAME, set protected=false, and choose a role label such as notes.\n\
++Alternatively, write the file as plain text with no headers to replace your whole context\n\
++with that text (it becomes one notes block after the original task).\n\
++New role labels are context notes, never system instructions. Session history stays intact.\n\
++Only completed edits at the turn boundary are committed; background writers are unsupported.",
++        mirror.display()
++    )
++}
++
++fn last_provider_reported(raw: &[Value]) -> Option<(u64, usize)> {
++    raw.iter().enumerate().rev().find_map(|(index, message)| {
++        if message["role"] != "assistant"
++            || matches!(message["stopReason"].as_str(), Some("aborted" | "error"))
++        {
++            return None;
++        }
++        let usage = &message["usage"];
++        let total = usage["totalTokens"].as_u64().unwrap_or(0);
++        let tokens = if total > 0 {
++            total
++        } else {
++            ["input", "output", "cacheRead", "cacheWrite"]
++                .iter()
++                .map(|key| usage[*key].as_u64().unwrap_or(0))
++                .sum()
++        };
++        (tokens > 0).then_some((tokens, index))
++    })
++}
++
++fn notice_row(text: &str) -> Value {
++    json!({
++        "role": "custom",
++        "customType": NOTICE_CUSTOM_TYPE,
++        "content": text,
++        "display": false,
++        "timestamp": std::time::SystemTime::now()
++            .duration_since(std::time::UNIX_EPOCH)
++            .map_or(0, |elapsed| elapsed.as_millis() as u64),
++    })
++}
++
++/// Private per-session directory, removed on drop (TS `session_shutdown`).
++struct MirrorDir(PathBuf);
++
++impl MirrorDir {
++    fn create(session_id: &str) -> std::io::Result<Self> {
++        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++        let safe: String = session_id
++            .chars()
++            .filter(char::is_ascii_alphanumeric)
++            .take(32)
++            .collect();
++        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        let path = std::env::temp_dir().join(format!(
++            "pa-live-context-{safe}-{}-{serial}",
++            std::process::id()
++        ));
++        std::fs::create_dir_all(&path)?;
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::PermissionsExt;
++            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
++        }
++        Ok(Self(path))
++    }
++
++    fn path(&self) -> &Path {
++        &self.0
++    }
++}
++
++impl Drop for MirrorDir {
++    fn drop(&mut self) {
++        let _ = std::fs::remove_dir_all(&self.0);
++    }
++}
++
++struct Baseline {
++    raw: Vec<Value>,
++    snapshot: Snapshot,
++}
++
++/// One session's CLM state. The engine holds it behind a mutex shared by the
++/// transform seam, the turn-end listener and the tool hooks.
++pub struct ClmRuntime {
++    config: ClmConfig,
++    session_seed: String,
++    /// Removed with the runtime (TS `session_shutdown`).
++    mirror_dir: MirrorDir,
++    revision: u64,
++    checkpoint: Option<Checkpoint>,
++    history: Vec<Checkpoint>,
++    calibrator: EstimateCalibrator,
++    tracker: BudgetTracker,
++    baseline: Option<Baseline>,
++    pending_notices: Vec<String>,
++    /// Raw length when the last edit landed; older provider counts are stale.
++    edit_raw_len: Option<usize>,
++    last_estimate: u64,
++    tool_calls_this_turn: u32,
++}
++
++impl ClmRuntime {
++    /// # Errors
++    /// The mirror directory cannot be created.
++    pub fn new(config: ClmConfig, session_id: &str) -> std::io::Result<Self> {
++        let mirror_dir = MirrorDir::create(session_id)?;
++        Ok(Self {
++            calibrator: EstimateCalibrator::new(config.estimate_factor),
++            config,
++            session_seed: session_id.to_string(),
++            mirror_dir,
++            revision: 0,
++            checkpoint: None,
++            history: Vec::new(),
++            tracker: BudgetTracker::default(),
++            baseline: None,
++            pending_notices: Vec::new(),
++            edit_raw_len: None,
++            last_estimate: 0,
++            tool_calls_this_turn: 0,
++        })
++    }
++
++    #[must_use]
++    pub fn mirror_path(&self) -> PathBuf {
++        self.mirror_dir.path().join(MIRROR_FILE)
++    }
++
++    #[must_use]
++    pub fn config(&self) -> &ClmConfig {
++        &self.config
++    }
++
++    /// Protocol plus the optional steering document, for the system prompt.
++    #[must_use]
++    pub fn system_prompt_section(&self) -> String {
++        let mut text = protocol_text(&self.mirror_path());
++        if let Some(path) = &self.config.steering {
++            match std::fs::read_to_string(path) {
++                Ok(steering) if !steering.trim().is_empty() => {
++                    let name = path
++                        .file_name()
++                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
++                    text.push_str("\n\n## Context-management guidance (");
++                    text.push_str(&name);
++                    text.push_str(")\n\n");
++                    text.push_str(steering.trim());
++                }
++                _ => tracing::warn!("clm steering document unreadable: {}", path.display()),
++            }
++        }
++        text
++    }
++
++    /// Checkpoints read back from the session's `clm-state` custom entries, oldest first.
++    pub fn restore(&mut self, history: Vec<Checkpoint>) {
++        self.revision = history
++            .iter()
++            .map(|checkpoint| checkpoint.revision)
++            .max()
++            .unwrap_or(0);
++        self.history = history;
++        self.checkpoint = None;
++    }
++
++    /// The `transform_context` body: projection, observation cap, overflow guard,
++    /// mirror refresh and notices, in pi-clm's order.
++    pub fn transform(
++        &mut self,
++        raw: &[Value],
++        system_prompt_tokens: u64,
++        context_window: u64,
++    ) -> Vec<Value> {
++        let mut projection = apply_projection(raw, self.checkpoint.as_ref());
++        if let Projection::Invalid(reason) = &projection {
++            self.pending_notices
++                .push(format!("Discarded a stale projection: {reason}"));
++            self.checkpoint = None;
++        }
++        if self.checkpoint.is_none() {
++            if let Some(found) = latest_matching(raw, &self.history).cloned() {
++                projection = apply_projection(raw, Some(&found));
++                self.checkpoint = Some(found);
++            }
++        }
++        let (mut effective, suffix_start) = match projection {
++            Projection::Valid {
++                messages,
++                suffix_start,
++            } => (messages, suffix_start),
++            Projection::Invalid(_) => (raw.to_vec(), 0),
++        };
++        if let Some((chars, head)) = self.config.observation_cap {
++            guard::cap_observations(&mut effective, chars, head);
++        }
++        let observed = last_provider_reported(raw);
++        self.calibrator.observe(observed);
++        let resolved = self.config.budget.resolve(context_window);
++
++        let mut notices: Vec<String> = std::mem::take(&mut self.pending_notices);
++        if let (true, Some(resolved)) = (self.config.overflow_withhold, resolved) {
++            let limit =
++                guard::overflow_guard_limit(resolved.budget, resolved.reserve, context_window);
++            let calibrator = self.calibrator.clone();
++            let notice_tokens: u64 = notices
++                .iter()
++                .map(|notice| estimate_text_tokens(notice))
++                .sum();
++            let result = guard::apply_overflow_guard(
++                &mut effective,
++                limit,
++                calibrator.apply(system_prompt_tokens + notice_tokens),
++                &|messages| calibrator.apply(estimate_tokens(messages)),
++                Some(&self.mirror_dir.path().join("withheld")),
++                if self.checkpoint.is_some() {
++                    suffix_start
++                } else {
++                    0
++                },
++            );
++            if !result.withheld.is_empty() {
++                notices.push(guard::overflow_notice_text(&result, limit));
++            }
++        }
++
++        let seed_digest = self
++            .checkpoint
++            .as_ref()
++            .map_or("raw", |c| c.source_digest.as_str());
++        let snapshot = render_document(
++            &effective,
++            self.revision,
++            &format!("{}:{seed_digest}", self.session_seed),
++        );
++        match std::fs::write(self.mirror_path(), &snapshot.text) {
++            Ok(()) => {
++                self.baseline = Some(Baseline {
++                    raw: raw.to_vec(),
++                    snapshot,
++                });
++            }
++            Err(error) => {
++                self.baseline = None;
++                notices.push(format!("Mirror refresh failed: {error}"));
++            }
++        }
++
++        if let Some(resolved) = resolved {
++            let notice_tokens: u64 = notices
++                .iter()
++                .map(|notice| estimate_text_tokens(notice))
++                .sum();
++            let reading = BudgetReading {
++                budget: resolved,
++                estimated: self
++                    .calibrator
++                    .apply(system_prompt_tokens + estimate_tokens(&effective) + notice_tokens),
++                observed: observed.map(|(tokens, _)| tokens),
++                observed_stale: matches!((observed, self.edit_raw_len), (Some((_, index)), Some(len)) if index < len),
++                calibration: self.calibrator.factor(),
++            };
++            self.last_estimate = reading.estimated;
++            let tiers = self.config.budget.tiers(resolved);
++            if let Some(tier) = self.tracker.observe(reading.governing(), &tiers) {
++                notices.push(budget::budget_notice_text(
++                    &reading,
++                    &tier,
++                    &self.mirror_path().display().to_string(),
++                ));
++            }
++        }
++
++        let mut output = effective;
++        output.extend(notices.iter().map(|notice| notice_row(notice)));
++        self.calibrator
++            .record(system_prompt_tokens + estimate_tokens(&output), raw.len());
++        output
++    }
++
++    /// The turn-end commit. Returns a new checkpoint for the caller to persist as
++    /// a `clm-state` custom entry.
++    pub fn commit_turn(&mut self) -> Option<Checkpoint> {
++        let baseline = self.baseline.take()?;
++        let edited = match std::fs::read_to_string(self.mirror_path()) {
++            Ok(text) => text,
++            Err(error) => {
++                self.pending_notices
++                    .push(format!("Mirror read failed: {error}"));
++                self.baseline = Some(baseline);
++                return None;
++            }
++        };
++        match apply_document(&edited, &baseline.snapshot) {
++            ApplyOutcome::Unchanged => {
++                self.baseline = Some(baseline);
++                None
++            }
++            ApplyOutcome::Rejected(reason) => {
++                self.pending_notices
++                    .push(format!("Edit rejected: {reason}"));
++                self.baseline = Some(baseline);
++                None
++            }
++            ApplyOutcome::Accepted {
++                messages,
++                before_tokens,
++                after_tokens,
++                diagnostics,
++            } => {
++                self.revision += 1;
++                let checkpoint = Checkpoint::new(
++                    self.revision,
++                    &baseline.raw,
++                    messages,
++                    before_tokens,
++                    after_tokens,
++                );
++                let mut notice = format!(
++                    "Applied revision {}; estimated tokens {before_tokens}->{after_tokens}.",
++                    self.revision
++                );
++                for line in diagnostics {
++                    notice.push(' ');
++                    notice.push_str(&line);
++                }
++                self.pending_notices.push(notice);
++                self.edit_raw_len = Some(baseline.raw.len());
++                self.tracker.reset();
++                self.history.push(checkpoint.clone());
++                self.checkpoint = Some(checkpoint.clone());
++                Some(checkpoint)
++            }
++        }
++    }
++
++    /// Refresh mirror and baseline when a turn settles.
++    pub fn on_turn_end(&mut self, message: Value, tool_results: Vec<Value>) {
++        let mirror_path = self.mirror_path();
++        if let Some(baseline) = &mut self.baseline {
++            baseline.raw.push(message);
++            baseline.raw.extend(tool_results);
++            let projection = apply_projection(&baseline.raw, self.checkpoint.as_ref());
++            let effective = match projection {
++                Projection::Valid { messages, .. } => messages,
++                Projection::Invalid(_) => baseline.raw.clone(),
++            };
++            let seed_digest = self
++                .checkpoint
++                .as_ref()
++                .map_or("raw", |c| c.source_digest.as_str());
++            let snapshot = render_document(
++                &effective,
++                self.revision,
++                &format!("{}:{seed_digest}", self.session_seed),
++            );
++            if std::fs::write(&mirror_path, &snapshot.text).is_ok() {
++                baseline.snapshot = snapshot;
++            }
++        }
++    }
++
++    pub fn on_turn_start(&mut self) {
++        self.tool_calls_this_turn = 0;
++    }
++
++    /// `oneToolPerTurn`: the block reason for every call after the first in a turn.
++    pub fn gate_tool_call(&mut self, tool_name: &str) -> Option<String> {
++        if !self.config.one_tool_per_turn {
++            return None;
++        }
++        self.tool_calls_this_turn += 1;
++        (self.tool_calls_this_turn > 1).then(|| {
++            format!(
++                "pi-clm paper mode allows exactly one tool call per turn; this {tool_name} call (#{} in the turn) was not executed. Issue it again on its own in your next turn.",
++                self.tool_calls_this_turn
++            )
++        })
++    }
++
++    /// `sizeTrailer`: the line appended to a tool result.
++    #[must_use]
++    pub fn size_trailer(&self, result_text: &str, context_window: u64) -> Option<String> {
++        if !self.config.size_trailer {
++            return None;
++        }
++        let resolved = self.config.budget.resolve(context_window)?;
++        let approx = self.last_estimate + self.calibrator.apply(estimate_text_tokens(result_text));
++        Some(format!(
++            "\n\n[context: ~{approx} of {} tokens after this result]",
++            resolved.budget
++        ))
++    }
++
++    /// Gate for `auto_compaction_due` (threshold) and overflow recovery.
++    #[must_use]
++    pub fn cancels_compaction(&self, overflow_recovery: bool) -> bool {
++        match self.config.native_compaction {
++            NativeCompaction::On => false,
++            NativeCompaction::Off => true,
++            NativeCompaction::Auto => !overflow_recovery && self.config.overflow_withhold,
++        }
++    }
++}
++
++pub type SharedClm = Arc<Mutex<ClmRuntime>>;
++
++/// Wrap the engine's transform seam: CLM runs first, then `inner`.
++#[must_use]
++pub fn transform_context_fn(
++    runtime: SharedClm,
++    inner: pa_agent::agent_loop::TransformContextFn,
++    system_prompt_tokens: u64,
++    context_window: u64,
++) -> pa_agent::agent_loop::TransformContextFn {
++    Arc::new(move |messages, signal| {
++        let runtime = Arc::clone(&runtime);
++        let inner = Arc::clone(&inner);
++        Box::pin(async move {
++            let raw: Vec<Value> = messages
++                .iter()
++                .map(serde_json::to_value)
++                .collect::<Result<_, _>>()?;
++            let effective = runtime
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .transform(&raw, system_prompt_tokens, context_window);
++            let messages = effective
++                .into_iter()
++                .map(serde_json::from_value)
++                .collect::<Result<Vec<pa_agent::types::AgentMessage>, _>>()?;
++            inner(messages, signal).await
++        })
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn settings(value: Value) -> ContextLanguageModelsSettings {
++        serde_json::from_value(value).unwrap()
++    }
++
++    fn conversation(result_chars: usize) -> Vec<Value> {
++        vec![
++            json!({ "role": "user", "content": "fix the bug", "timestamp": 1 }),
++            json!({ "role": "assistant", "content": [
++                { "type": "toolCall", "id": "c1", "name": "ipython", "arguments": { "code": "print(open('a').read())" } }
++            ], "stopReason": "toolUse", "usage": { "totalTokens": 50 }, "timestamp": 2 }),
++            json!({ "role": "toolResult", "toolCallId": "c1", "toolName": "ipython",
++                "content": [{ "type": "text", "text": "z".repeat(result_chars) }], "isError": false, "timestamp": 3 }),
++        ]
++    }
++
++    #[test]
++    fn config_validates_like_the_env_parsers() {
++        let config = ClmConfig::from_settings(&settings(json!({ "enabled": true }))).unwrap();
++        assert!(config.overflow_withhold);
++        assert_eq!(config.native_compaction, NativeCompaction::Auto);
++        assert_eq!(config.observation_cap, None);
++        assert!(ClmConfig::from_settings(&settings(json!({ "observationCap": 50 }))).is_err());
++        assert!(ClmConfig::from_settings(&settings(json!({ "remindAt": [1.5] }))).is_err());
++        assert!(ClmConfig::from_settings(&settings(json!({ "estimateFactor": 9 }))).is_err());
++        let quiet = ClmConfig::from_settings(&settings(json!({ "remindAt": [] }))).unwrap();
++        assert!(!quiet.budget.remind_at_reserve);
++    }
++
++    #[test]
++    fn transform_writes_the_mirror_and_an_edit_becomes_the_next_context() {
++        let config = ClmConfig::from_settings(&settings(json!({ "budget": 1_000_000 }))).unwrap();
++        let mut runtime = ClmRuntime::new(config, "0199-session").unwrap();
++        let raw = conversation(400);
++        let output = runtime.transform(&raw, 100, 1_000_000);
++        assert_eq!(output.len(), 3, "no notices under budget");
++        let mirror = std::fs::read_to_string(runtime.mirror_path()).unwrap();
++        assert!(mirror.starts_with("[[LIVE_CONTEXT version=1 revision=0"));
++
++        std::fs::write(
++            runtime.mirror_path(),
++            "task: fix bug in a.py; a.py was read",
++        )
++        .unwrap();
++        let checkpoint = runtime.commit_turn().expect("edit accepted");
++        assert_eq!(checkpoint.revision, 1);
++        assert_eq!(checkpoint.source_message_count, 3);
++
++        let mut next = raw.clone();
++        next.push(json!({ "role": "user", "content": "go on", "timestamp": 9 }));
++        let output = runtime.transform(&next, 100, 1_000_000);
++        assert_eq!(output[1]["details"]["contextRole"], "notes");
++        assert_eq!(output[2]["content"], "go on");
++        assert_eq!(
++            output.last().unwrap()["customType"],
++            NOTICE_CUSTOM_TYPE,
++            "applied notice"
++        );
++    }
++
++    #[test]
++    fn rejected_edit_reports_on_the_next_request() {
++        let config = ClmConfig::from_settings(&settings(json!({}))).unwrap();
++        let mut runtime = ClmRuntime::new(config, "s").unwrap();
++        let raw = conversation(10);
++        runtime.transform(&raw, 0, 100_000);
++        let mirror = std::fs::read_to_string(runtime.mirror_path()).unwrap();
++        std::fs::write(
++            runtime.mirror_path(),
++            mirror.replacen("revision=0", "revision=7", 1),
++        )
++        .unwrap();
++        assert!(runtime.commit_turn().is_none());
++        let output = runtime.transform(&raw, 0, 100_000);
++        let notice = output.last().unwrap()["content"].as_str().unwrap();
++        assert!(notice.starts_with("Edit rejected: Mirror metadata does not match"));
++    }
++
++    #[test]
++    fn overflow_guard_withholds_when_over_the_budget() {
++        let config = ClmConfig::from_settings(&settings(
++            json!({ "budget": 3000, "reserve": 0, "remindAt": [] }),
++        ))
++        .unwrap();
++        let mut runtime = ClmRuntime::new(config, "s").unwrap();
++        let output = runtime.transform(&conversation(40_000), 0, 0);
++        let note = output[2]["content"][0]["text"].as_str().unwrap();
++        assert!(note.starts_with("[pi-clm overflow guard] ipython#c1"));
++        assert!(output.last().unwrap()["content"]
++            .as_str()
++            .unwrap()
++            .contains("Overflow guard"));
++        assert!(runtime
++            .mirror_path()
++            .parent()
++            .unwrap()
++            .join("withheld/c1.txt")
++            .exists());
++    }
++
++    #[test]
++    fn restored_history_reapplies_on_resume() {
++        let config = ClmConfig::from_settings(&settings(json!({}))).unwrap();
++        let raw = conversation(10);
++        let checkpoint = Checkpoint::new(
++            3,
++            &raw,
++            vec![json!({ "role": "user", "content": "short", "timestamp": 1 })],
++            9,
++            2,
++        );
++        let mut runtime = ClmRuntime::new(config, "s").unwrap();
++        runtime.restore(vec![checkpoint]);
++        let output = runtime.transform(&raw, 0, 100_000);
++        assert_eq!(output[0]["content"], "short");
++        assert!(std::fs::read_to_string(runtime.mirror_path())
++            .unwrap()
++            .contains("revision=3"));
++    }
++
++    #[test]
++    fn tool_gate_and_compaction_policy() {
++        let config = ClmConfig::from_settings(&settings(
++            json!({ "oneToolPerTurn": true, "nativeCompaction": "off" }),
++        ))
++        .unwrap();
++        let mut runtime = ClmRuntime::new(config, "s").unwrap();
++        assert!(runtime.gate_tool_call("ipython").is_none());
++        assert!(runtime
++            .gate_tool_call("ipython")
++            .unwrap()
++            .contains("#2 in the turn"));
++        runtime.on_turn_start();
++        assert!(runtime.gate_tool_call("ipython").is_none());
++        assert!(runtime.cancels_compaction(true));
++        let auto =
++            ClmRuntime::new(ClmConfig::from_settings(&settings(json!({}))).unwrap(), "s").unwrap();
++        assert!(auto.cancels_compaction(false));
++        assert!(!auto.cancels_compaction(true));
++    }
++
++    #[test]
++    fn notes_round_trip_through_the_agent_message_type() {
++        let note = document::context_note("plan", None, Some("notes"));
++        let message: pa_agent::types::AgentMessage = serde_json::from_value(note).unwrap();
++        assert_eq!(message.role(), "custom");
++        let converted = crate::session_engine::messages::loop_convert_to_llm(vec![message]);
++        assert_eq!(
++            converted.len(),
++            1,
++            "a note reaches the provider as a user turn"
++        );
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/clm/projection.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/projection.rs
+@@ -0,0 +1,168 @@
++//! Projection checkpoints (pi-clm `projection.ts`): an accepted edit replaces a
++//! digest-checked raw prefix, and raw messages after it pass through.
++
++use serde::{Deserialize, Serialize};
++use serde_json::Value;
++
++use super::document::digest_messages;
++
++pub const CHECKPOINT_CUSTOM_TYPE: &str = "clm-state";
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Checkpoint {
++    pub version: u32,
++    pub revision: u64,
++    pub source_message_count: usize,
++    pub source_digest: String,
++    pub projected_messages: Vec<Value>,
++    pub before_estimate: u64,
++    pub after_estimate: u64,
++}
++
++impl Checkpoint {
++    #[must_use]
++    pub fn new(
++        revision: u64,
++        source: &[Value],
++        projected: Vec<Value>,
++        before: u64,
++        after: u64,
++    ) -> Self {
++        Self {
++            version: 1,
++            revision,
++            source_message_count: source.len(),
++            source_digest: digest_messages(source),
++            projected_messages: projected,
++            before_estimate: before,
++            after_estimate: after,
++        }
++    }
++}
++
++#[derive(Debug, Clone, PartialEq)]
++pub enum Projection {
++    /// Effective messages and the index where the raw suffix starts.
++    Valid {
++        messages: Vec<Value>,
++        suffix_start: usize,
++    },
++    /// Fail closed: the raw context is used and the checkpoint should be dropped.
++    Invalid(String),
++}
++
++pub const PREFIX_MISMATCH: &str = "Raw context prefix no longer matches the projection checkpoint.";
++
++#[must_use]
++pub fn apply_projection(raw: &[Value], checkpoint: Option<&Checkpoint>) -> Projection {
++    let Some(checkpoint) = checkpoint else {
++        return Projection::Valid {
++            messages: raw.to_vec(),
++            suffix_start: 0,
++        };
++    };
++    if checkpoint.version != 1 {
++        return Projection::Invalid(format!(
++            "Unsupported projection version: {}.",
++            checkpoint.version
++        ));
++    }
++    if raw.len() < checkpoint.source_message_count {
++        return Projection::Invalid(
++            "Raw context is shorter than the projection source prefix.".into(),
++        );
++    }
++    if digest_messages(&raw[..checkpoint.source_message_count]) != checkpoint.source_digest {
++        return Projection::Invalid(PREFIX_MISMATCH.into());
++    }
++    let mut messages = checkpoint.projected_messages.clone();
++    let suffix_start = messages.len();
++    messages.extend_from_slice(&raw[checkpoint.source_message_count..]);
++    Projection::Valid {
++        messages,
++        suffix_start,
++    }
++}
++
++/// Newest checkpoint in `history` whose prefix still matches: the branch-switch
++/// and resume path (TS `findHistoricalRecovery`).
++#[must_use]
++pub fn latest_matching<'a>(raw: &[Value], history: &'a [Checkpoint]) -> Option<&'a Checkpoint> {
++    history.iter().rev().find(|checkpoint| {
++        matches!(
++            apply_projection(raw, Some(checkpoint)),
++            Projection::Valid { .. }
++        )
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn raw(count: usize) -> Vec<Value> {
++        (0..count)
++            .map(|index| json!({ "role": "user", "content": format!("m{index}"), "timestamp": index }))
++            .collect()
++    }
++
++    #[test]
++    fn valid_checkpoint_replaces_the_prefix_and_keeps_the_suffix() {
++        let source = raw(3);
++        let checkpoint = Checkpoint::new(
++            1,
++            &source,
++            vec![json!({ "role": "custom", "content": "notes" })],
++            30,
++            5,
++        );
++        let Projection::Valid {
++            messages,
++            suffix_start,
++        } = apply_projection(&raw(5), Some(&checkpoint))
++        else {
++            panic!("projection invalid");
++        };
++        assert_eq!(suffix_start, 1);
++        assert_eq!(messages.len(), 3);
++        assert_eq!(messages[1]["content"], "m3");
++    }
++
++    #[test]
++    fn changed_or_short_prefix_fails_closed() {
++        let checkpoint = Checkpoint::new(1, &raw(3), Vec::new(), 0, 0);
++        let mut edited = raw(4);
++        edited[0]["content"] = json!("rewritten by a compaction");
++        assert_eq!(
++            apply_projection(&edited, Some(&checkpoint)),
++            Projection::Invalid(PREFIX_MISMATCH.into())
++        );
++        assert!(matches!(
++            apply_projection(&raw(2), Some(&checkpoint)),
++            Projection::Invalid(_)
++        ));
++    }
++
++    #[test]
++    fn checkpoint_round_trips_through_a_custom_entry() {
++        let checkpoint = Checkpoint::new(2, &raw(2), raw(1), 10, 4);
++        let value = serde_json::to_value(&checkpoint).unwrap();
++        assert_eq!(value["sourceMessageCount"], 2);
++        assert_eq!(
++            serde_json::from_value::<Checkpoint>(value).unwrap(),
++            checkpoint
++        );
++    }
++
++    #[test]
++    fn history_lookup_finds_the_newest_matching_branch_point() {
++        let older = Checkpoint::new(1, &raw(2), Vec::new(), 0, 0);
++        let mut other_branch = raw(4);
++        other_branch[3]["content"] = json!("other branch");
++        let newer = Checkpoint::new(2, &other_branch, Vec::new(), 0, 0);
++        let history = [older.clone(), newer];
++        assert_eq!(latest_matching(&raw(5), &history), Some(&older));
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/lib.rs
++++ prime-agent-src/crates/pa-core/src/lib.rs
+@@ -58,6 +58,7 @@ pub use tools::rlm_bootstrap::{build_rlm
+ pub mod agent_traces;
+ pub mod auth;
+ pub mod autonomous;
++pub mod clm;
+ pub mod cron;
+ pub mod export_html;
+ pub mod goals;
+Index: prime-agent-src/crates/pa-core/src/settings/load.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/load.rs
++++ prime-agent-src/crates/pa-core/src/settings/load.rs
+@@ -62,6 +62,7 @@ const KNOWN_FIELDS: &[&str] = &[
+     "requestTiming",
+     "hooks",
+     "contextWindowPercent",
++    "contextLanguageModels",
+ ];
+ 
+ /// Extract each known field independently; ignore fields whose JSON type does not match the Rust
+Index: prime-agent-src/crates/pa-core/src/settings/manager.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/manager.rs
++++ prime-agent-src/crates/pa-core/src/settings/manager.rs
+@@ -889,6 +889,17 @@ impl SettingsManager {
+             .filter(|percent| (1..100).contains(percent))
+     }
+ 
++    // contextLanguageModels when enabled is true.
++    #[must_use]
++    pub fn get_context_language_models(
++        &self,
++    ) -> Option<super::types::ContextLanguageModelsSettings> {
++        self.merged
++            .context_language_models
++            .clone()
++            .filter(|clm| clm.enabled == Some(true))
++    }
++
+     #[must_use]
+     pub fn get_session_dir(&self) -> Option<std::path::PathBuf> {
+         let session_dir = self.merged.session_dir.as_ref()?;
+@@ -1043,6 +1054,26 @@ mod tests {
+     }
+ 
+     #[test]
++    fn context_language_models_needs_enabled_true() {
++        let settings: Settings = serde_json::from_value(serde_json::json!({
++            "contextLanguageModels": { "budget": 64000, "oneToolPerTurn": true }
++        }))
++        .unwrap();
++        assert!(SettingsManager::in_memory(&settings)
++            .get_context_language_models()
++            .is_none());
++        let settings: Settings = serde_json::from_value(serde_json::json!({
++            "contextLanguageModels": { "enabled": true, "budget": 64000, "remindAt": [] }
++        }))
++        .unwrap();
++        let clm = SettingsManager::in_memory(&settings)
++            .get_context_language_models()
++            .expect("enabled");
++        assert_eq!(clm.budget, Some(64000));
++        assert_eq!(clm.remind_at, Some(Vec::new()));
++    }
++
++    #[test]
+     fn in_memory_loads_merges_and_saves() {
+         let mut manager = SettingsManager::in_memory(&Settings::default());
+         manager
+Index: prime-agent-src/crates/pa-core/src/settings/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/mod.rs
++++ prime-agent-src/crates/pa-core/src/settings/mod.rs
+@@ -17,7 +17,7 @@ pub use storage::{
+     FileSettingsStorage, InMemorySettingsStorage, SettingsScope, SettingsStorage, CONFIG_DIR_NAME,
+ };
+ pub use types::{
+-    AutoRefineSettings, AutonomousSettings, CompactionSettings, LifecycleHookEntry,
+-    LifecycleHooksSettings, McpServerConfig, QueueModeSetting, Settings, ThinkingLevelSetting,
+-    TransportSetting, UpdateChannel,
++    AutoRefineSettings, AutonomousSettings, CompactionSettings, ContextLanguageModelsSettings,
++    LifecycleHookEntry, LifecycleHooksSettings, McpServerConfig, QueueModeSetting, Settings,
++    ThinkingLevelSetting, TransportSetting, UpdateChannel,
+ };
+Index: prime-agent-src/crates/pa-core/src/settings/types.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/types.rs
++++ prime-agent-src/crates/pa-core/src/settings/types.rs
+@@ -261,6 +261,33 @@ pub struct LifecycleHooksSettings {
+     pub include_subagents: Option<bool>,
+ }
+ 
++// contextLanguageModels: the pi-clm port (model-edited context mirror).
++#[derive(Debug, Clone, Default, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ContextLanguageModelsSettings {
++    pub enabled: Option<bool>,
++    // Token budget; unset means the model's context window.
++    pub budget: Option<u64>,
++    // Generation headroom below the budget (default 2048).
++    pub reserve: Option<u64>,
++    // Reminder fractions in (0, 1); an empty list disables reminders.
++    pub remind_at: Option<Vec<f64>>,
++    // Max characters per tool result in the effective context; unset is off.
++    pub observation_cap: Option<u64>,
++    // Head fraction of the observation cap (default 0.8).
++    pub observation_cap_head: Option<f64>,
++    // Markdown steering document appended to the system prompt.
++    pub steering: Option<String>,
++    // "withhold" (default) or "off".
++    pub overflow: Option<String>,
++    // Initial chars/4 calibration factor, 1 to 4 (default 1).
++    pub estimate_factor: Option<f64>,
++    pub one_tool_per_turn: Option<bool>,
++    pub size_trailer: Option<bool>,
++    // "auto" (default), "off" or "on".
++    pub native_compaction: Option<String>,
++}
++
+ #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct TelemetrySettings {
+@@ -395,6 +422,7 @@ pub struct Settings {
+     pub hooks: Option<LifecycleHooksSettings>,
+     // Cap non-local model context windows at this percent of native (1-99).
+     pub context_window_percent: Option<u64>,
++    pub context_language_models: Option<ContextLanguageModelsSettings>,
+     /// Unknown keys survive load/save round-trips (forward compatibility).
+     #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+     pub extra: serde_json::Map<String, serde_json::Value>,
+Index: prime-agent-src/crates/pa-core/src/session_engine/compaction_arms.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/compaction_arms.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/compaction_arms.rs
+@@ -24,6 +24,14 @@ impl AgentSession {
+     /// the live loop context over the model's context window against the
+     /// effective threshold; usage before the latest compaction never re-triggers.
+     pub async fn auto_compaction_due(&self, model: &pa_types::ai::Model) -> bool {
++        if self
++            .clm
++            .as_ref()
++            .and_then(|c| c.lock().ok())
++            .is_some_and(|c| c.cancels_compaction(false))
++        {
++            return false;
++        }
+         let state = self.agent.state().await;
+         // The live loop context is the agent's message list (the same
+         // JSON round-trip `compact` uses).
+@@ -463,3 +471,66 @@ impl AgentSession {
+         Ok(result)
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn auto_compaction_due_respects_clm_native_compaction_gate() {
++        let tmp = tempfile::tempdir().unwrap();
++        let session_manager =
++            crate::session::manager::SessionManager::in_memory(tmp.path());
++        let agent = std::sync::Arc::new(pa_agent::agent::Agent::new(
++            pa_agent::agent::AgentOptions::default(),
++        ));
++        let mut session = AgentSession::from_session_arc(
++            agent,
++            std::sync::Arc::new(tokio::sync::Mutex::new(session_manager)),
++            Vec::new(),
++            None,
++        )
++        .await
++        .unwrap();
++
++        let model: pa_types::ai::Model = serde_json::from_value(serde_json::json!({
++            "id": "m", "name": "m", "api": "openai-completions", "provider": "test",
++            "baseUrl": "http://localhost", "reasoning": false, "input": ["text"],
++            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
++            "contextWindow": 1000, "maxTokens": 100
++        }))
++        .unwrap();
++
++        // When nativeCompaction is "auto", CLM cancels threshold compaction
++        let auto_cfg = crate::clm::ClmConfig::from_settings(
++            &crate::settings::types::ContextLanguageModelsSettings {
++                enabled: Some(true),
++                native_compaction: Some("auto".into()),
++                ..Default::default()
++            },
++        )
++        .unwrap();
++        let runtime_auto = crate::clm::ClmRuntime::new(auto_cfg, "sess-auto").unwrap();
++        session.set_clm(Some(std::sync::Arc::new(std::sync::Mutex::new(runtime_auto))));
++        assert!(!session.auto_compaction_due(&model).await);
++
++        // When nativeCompaction is "on", cancels_compaction(false) is false
++        let on_cfg = crate::clm::ClmConfig::from_settings(
++            &crate::settings::types::ContextLanguageModelsSettings {
++                enabled: Some(true),
++                native_compaction: Some("on".into()),
++                ..Default::default()
++            },
++        )
++        .unwrap();
++        let runtime_on = crate::clm::ClmRuntime::new(on_cfg, "sess-on").unwrap();
++        session.set_clm(Some(std::sync::Arc::new(std::sync::Mutex::new(runtime_on))));
++        assert!(!session
++            .clm
++            .as_ref()
++            .unwrap()
++            .lock()
++            .unwrap()
++            .cancels_compaction(false));
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+@@ -233,6 +233,9 @@ pub async fn create_session(mut config:
+     let lifecycle_hooks = settings
+         .get_lifecycle_hooks()
+         .map(|hooks| super::lifecycle_hooks::LifecycleHooks::from_settings(&hooks));
++    let clm_config = settings
++        .get_context_language_models()
++        .map(|s| crate::clm::ClmConfig::from_settings(&s));
+     let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
+         mcp_gating(&settings, config.agent_dir.clone()).await?;
+     let mcp_manager = config
+@@ -285,6 +288,40 @@ pub async fn create_session(mut config:
+ 
+     let python_skills = super::runtime_wiring::kernel_python_skills(&resources.skills);
+     let session_id = wiring.session.lock().await.get_session_id().to_string();
++    let clm = match clm_config {
++        Some(Ok(clm_cfg)) if config.rlm_depth.unwrap_or(0) == 0 => {
++            match crate::clm::ClmRuntime::new(clm_cfg, &session_id) {
++                Ok(runtime) => Some(std::sync::Arc::new(std::sync::Mutex::new(runtime))),
++                Err(err) => {
++                    tracing::warn!("Failed to create ClmRuntime: {err}");
++                    None
++                }
++            }
++        }
++        Some(Err(err)) => {
++            tracing::warn!("contextLanguageModels ignored: {err}");
++            None
++        }
++        _ => None,
++    };
++    if let Some(clm) = &clm {
++        let history: Vec<crate::clm::projection::Checkpoint> = wiring
++            .session
++            .lock()
++            .await
++            .get_entries()
++            .into_iter()
++            .filter_map(|entry| match entry {
++                pa_types::session::FileEntry::Custom { payload, .. }
++                    if payload.custom_type == crate::clm::projection::CHECKPOINT_CUSTOM_TYPE =>
++                {
++                    payload.data.and_then(|v| serde_json::from_value(v).ok())
++                }
++                _ => None,
++            })
++            .collect();
++        clm.lock().unwrap().restore(history);
++    }
+     let mut handlers = wiring.handlers.clone();
+     if let Some(extra) = config.extra_host_handlers.clone() {
+         handlers.merge(extra);
+@@ -494,9 +531,21 @@ pub async fn create_session(mut config:
+             rlm_depth: config.rlm_depth,
+             generic_mcp_servers,
+             prompt_guidelines: Some(prompt_guidelines),
+-            // `APPEND_SYSTEM.md` (project `.prime/` or agent dir) was discovered but dropped.
+-            append_system_prompt: Some(resources.append_system_prompt.join("\n\n"))
+-                .filter(|text| !text.trim().is_empty()),
++            // APPEND_SYSTEM.md joined with CLM steering section if active.
++            append_system_prompt: {
++                let mut parts = Vec::new();
++                let append_file = resources.append_system_prompt.join("\n\n");
++                if !append_file.trim().is_empty() {
++                    parts.push(append_file);
++                }
++                if let Some(clm) = &clm {
++                    let section = clm.lock().unwrap().system_prompt_section();
++                    if !section.trim().is_empty() {
++                        parts.push(section);
++                    }
++                }
++                (!parts.is_empty()).then(|| parts.join("\n\n"))
++            },
+             ..Default::default()
+         },
+     );
+@@ -607,8 +656,61 @@ pub async fn create_session(mut config:
+         // wraps a pass-through that marks the turn's dispatch moment.
+         transform_context: Some(super::request_timing::instrument_transform_context(
+             std::sync::Arc::clone(&request_timing_wiring),
+-            super::request_timing::pass_through_transform(),
++            match &clm {
++                Some(clm) => crate::clm::transform_context_fn(
++                    clm.clone(),
++                    super::request_timing::pass_through_transform(),
++                    crate::clm::document::estimate_text_tokens(&system_prompt),
++                    model_context_window,
++                ),
++                None => super::request_timing::pass_through_transform(),
++            },
+         )),
++        before_tool_call: clm.clone().map(|clm| -> pa_agent::agent_loop::BeforeToolCallFn {
++            std::sync::Arc::new(move |ctx, _| {
++                let reason = clm.lock().unwrap().gate_tool_call(&ctx.tool_call.name);
++                Box::pin(async move {
++                    Ok(reason.map(|r| pa_agent::types::BeforeToolCallResult {
++                        block: true,
++                        reason: Some(r),
++                    }))
++                })
++            })
++        }),
++        after_tool_call: clm.clone().map(|clm| -> pa_agent::agent_loop::AfterToolCallFn {
++            let window = model_context_window;
++            std::sync::Arc::new(move |ctx, _| {
++                let clm = clm.clone();
++                Box::pin(async move {
++                    let mut content = ctx.result.content.clone();
++                    let text = content
++                        .iter()
++                        .filter_map(|c| match c {
++                            pa_agent::types::ToolResultContent::Text(t) => Some(t.text.as_str()),
++                            pa_agent::types::ToolResultContent::Image(_) => None,
++                        })
++                        .collect::<Vec<_>>()
++                        .join("\n");
++                    if let Some(trailer) = clm
++                        .lock()
++                        .ok()
++                        .and_then(|c| c.size_trailer(&text, window))
++                    {
++                        if let Some(pa_agent::types::ToolResultContent::Text(t)) = content.last_mut() {
++                            t.text.push_str(&trailer);
++                        } else {
++                            content.push(pa_agent::types::ToolResultContent::text(trailer));
++                        }
++                        Ok(Some(pa_agent::types::AfterToolCallResult {
++                            content: Some(content),
++                            ..Default::default()
++                        }))
++                    } else {
++                        Ok(None)
++                    }
++                })
++            })
++        }),
+         should_stop_after_turn: config.queued_steering_probe.take().map(|probe| {
+             let probe: pa_agent::agent_loop::ShouldStopAfterTurnFn =
+                 std::sync::Arc::new(move |_context| {
+@@ -722,6 +824,57 @@ pub async fn create_session(mut config:
+         )
+         .await;
+     }
++    if let Some(clm) = clm {
++        let session_handle = wiring.session.clone();
++        let clm_for_sub = clm.clone();
++        agent
++            .subscribe(move |event, _| {
++                let clm = clm_for_sub.clone();
++                let session_handle = session_handle.clone();
++                Box::pin(async move {
++                    match event {
++                        pa_agent::types::AgentEvent::TurnStart => {
++                            let checkpoint = {
++                                let mut runtime = clm.lock().unwrap();
++                                runtime.on_turn_start();
++                                runtime.commit_turn()
++                            };
++                            if let Some(checkpoint) = checkpoint {
++                                session_handle.lock().await.append_custom_entry(
++                                    crate::clm::projection::CHECKPOINT_CUSTOM_TYPE,
++                                    Some(serde_json::to_value(&checkpoint)?),
++                                )?;
++                            }
++                        }
++                        pa_agent::types::AgentEvent::TurnEnd {
++                            message,
++                            tool_results,
++                        } => {
++                            let checkpoint = clm.lock().unwrap().commit_turn();
++                            if let Some(checkpoint) = checkpoint {
++                                session_handle.lock().await.append_custom_entry(
++                                    crate::clm::projection::CHECKPOINT_CUSTOM_TYPE,
++                                    Some(serde_json::to_value(&checkpoint)?),
++                                )?;
++                            }
++                            if let (Ok(msg_val), Ok(tools_val)) = (
++                                serde_json::to_value(message),
++                                tool_results
++                                    .iter()
++                                    .map(serde_json::to_value)
++                                    .collect::<Result<Vec<_>, _>>(),
++                            ) {
++                                clm.lock().unwrap().on_turn_end(msg_val, tools_val);
++                            }
++                        }
++                        _ => {}
++                    }
++                    Ok(())
++                })
++            })
++            .await;
++        session.set_clm(Some(clm));
++    }
+     // Rows parked by a boot that settled mid-build merge in; later boots
+     // push straight into the live session's queue.
+     session.adopt_next_turn_rows(boot_notice_rows);
+Index: prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/engine/tests.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
+@@ -370,3 +370,85 @@ async fn create_session_registers_goal_a
+         "tools: {names:?}"
+     );
+ }
++
++#[tokio::test]
++async fn clm_enabled_session_writes_the_mirror_and_persists_a_checkpoint() {
++    let model = pa_agent::types::Model {
++        id: "m".into(),
++        name: "m".into(),
++        api: "test".into(),
++        provider: "test".into(),
++        base_url: "http://localhost".into(),
++        reasoning: false,
++        cost: pa_agent::types::UsageCost::default(),
++        context_window: 100_000,
++        max_tokens: 1_000,
++        max_tokens_explicit: false,
++    };
++    let provider = Arc::new(ScriptedProvider::new(model.clone()));
++    provider.push_text_turn("first assistant answer with dropme text");
++    provider.push_text_turn("second answer");
++
++    let tmp = tempfile::tempdir().unwrap();
++    let cwd = tmp.path().join("project");
++    let agent_dir = tmp.path().join("agent");
++    std::fs::create_dir_all(&cwd).unwrap();
++    std::fs::create_dir_all(&agent_dir).unwrap();
++    std::fs::write(
++        agent_dir.join("settings.json"),
++        r#"{ "contextLanguageModels": { "enabled": true } }"#,
++    )
++    .unwrap();
++
++    let engine = create_session(SessionEngineConfig {
++        cwd: cwd.clone(),
++        agent_dir: agent_dir.clone(),
++        model: Some(model),
++        stream_fn: Some(provider.stream_fn()),
++        ..Default::default()
++    })
++    .await
++    .unwrap();
++
++    let outcome = engine
++        .prompt("first turn", PromptOptions::default())
++        .await
++        .unwrap();
++    assert_eq!(outcome, PromptOutcome::Prompt);
++    engine.session.agent().wait_for_idle().await;
++
++    let clm = engine.session.clm.as_ref().expect("clm runtime installed").clone();
++    let mirror_path = clm.lock().unwrap().mirror_path();
++    assert!(mirror_path.exists(), "mirror file exists after first turn");
++    let mirror_text = std::fs::read_to_string(&mirror_path).unwrap();
++    assert!(mirror_text.contains("dropme"));
++    let filtered_lines: Vec<&str> = mirror_text
++        .lines()
++        .filter(|line| !line.contains("dropme") && !line.contains("role=assistant"))
++        .collect();
++    std::fs::write(&mirror_path, filtered_lines.join("\n")).unwrap();
++
++    let outcome = engine
++        .prompt("second turn", PromptOptions::default())
++        .await
++        .unwrap();
++    assert_eq!(outcome, PromptOutcome::Prompt);
++    engine.session.agent().wait_for_idle().await;
++
++    let entries = engine.session.entries().await;
++    assert!(
++        entries.iter().any(|entry| {
++            matches!(entry, pa_types::session::FileEntry::Custom { payload, .. } if payload.custom_type == crate::clm::projection::CHECKPOINT_CUSTOM_TYPE)
++        }),
++        "session has checkpoint custom entry"
++    );
++
++    let calls = provider.calls();
++    assert_eq!(calls.len(), 2, "provider called twice");
++    let second_call = &calls[1];
++    let second_call_text = format!("{:?}", second_call.messages);
++    assert!(
++        !second_call_text.contains("dropme"),
++        "second call does not contain dropped text: {second_call_text}"
++    );
++}
+Index: prime-agent-src/crates/pa-core/src/session_engine/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/mod.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/mod.rs
+@@ -182,6 +182,7 @@ pub struct AgentSession {
+     /// resolves it (verification harnesses building the session directly
+     /// keep `None`, which reads as the fail-closed disabled default).
+     agent_dir: Option<std::path::PathBuf>,
++    pub clm: Option<std::sync::Arc<std::sync::Mutex<crate::clm::ClmRuntime>>>,
+ }
+ 
+ impl AgentSession {
+@@ -250,6 +251,7 @@ impl AgentSession {
+             side_question_stream_fn: std::sync::Mutex::new(None),
+             agent_dir: None,
+             compaction_flight: tokio::sync::Mutex::new(()),
++            clm: None,
+         };
+         this.ensure_harness_digest_context().await?;
+         Ok(this)
+@@ -260,6 +262,13 @@ impl AgentSession {
+         &self.agent
+     }
+ 
++    pub fn set_clm(
++        &mut self,
++        clm: Option<std::sync::Arc<std::sync::Mutex<crate::clm::ClmRuntime>>>,
++    ) {
++        self.clm = clm;
++    }
++
+     /// The kernel host handlers and the command executor reach the same
+     /// session state as the loop.
+     pub(crate) fn session_handle(&self) -> &Arc<tokio::sync::Mutex<SessionManager>> {
+Index: prime-agent-src/crates/pa-daemon/src/overflow_compaction.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/overflow_compaction.rs
++++ prime-agent-src/crates/pa-daemon/src/overflow_compaction.rs
+@@ -70,6 +70,15 @@ impl AgentSessionEngine {
+         assistant: &pa_agent::types::AssistantMessage,
+         emit: &mut dyn FnMut(EngineEvent) -> bool,
+     ) -> OverflowArmRun {
++        if self
++            .session
++            .blocking_lock()
++            .as_deref()
++            .and_then(|engine| engine.session.clm.as_ref())
++            .is_some_and(|c| c.lock().unwrap().cancels_compaction(true))
++        {
++            return OverflowArmRun::NotApplicable;
++        }
+         match self.overflow_recovery_attempt(assistant, emit) {
+             OverflowAttempt::None => OverflowArmRun::NotApplicable,
+             OverflowAttempt::Retry => OverflowArmRun::RetryTurn,
+@@ -945,4 +954,33 @@ mod tests {
+             ))
+         );
+     }
++
++    #[test]
++    fn clm_native_compaction_gates_overflow_compaction() {
++        let _faux = FAUX_TEST_LOCK
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++
++        // nativeCompaction = "off": overflow compaction is not applicable
++        let (engine, _dir) = faux_engine_with_compaction_settings(
++            &json!({ "responses": [overflow_error(0)] }),
++            &json!({
++                "contextLanguageModels": { "enabled": true, "nativeCompaction": "off" }
++            }),
++        );
++        let mut events: Vec<EngineEvent> = Vec::new();
++        admit(&engine, "probe".to_string(), &mut events);
++        assert!(compaction_starts(&events).is_empty(), "off cancels overflow compaction");
++
++        // nativeCompaction = "on": overflow compaction is attempted
++        let (engine, _dir) = faux_engine_with_compaction_settings(
++            &json!({ "responses": [overflow_error(0)] }),
++            &json!({
++                "contextLanguageModels": { "enabled": true, "nativeCompaction": "on" }
++            }),
++        );
++        let mut events: Vec<EngineEvent> = Vec::new();
++        admit(&engine, "probe".to_string(), &mut events);
++        assert_eq!(compaction_starts(&events).len(), 1, "on allows overflow compaction");
++    }
+ }

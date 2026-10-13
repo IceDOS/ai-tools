@@ -1,0 +1,64 @@
+Index: prime-agent-src/crates/pa-ai/src/utils_inner/stream_failure.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/utils_inner/stream_failure.rs
++++ prime-agent-src/crates/pa-ai/src/utils_inner/stream_failure.rs
+@@ -740,6 +740,17 @@ fn extract_parts_from_http(error: &Provi
+     {
+         kind = classify_stream_failure(None, error.status);
+     }
++    // opencode zen reports flaky upstream rejections as a 400 that succeeds when resent.
++    // The raw body is checked too: a classified error's message is already rewritten.
++    if kind == StreamFailureKind::InvalidRequest
++        && error.status == Some(400)
++        && [error.body.as_deref(), Some(error.message.as_str())]
++            .into_iter()
++            .flatten()
++            .any(|text| text.contains("Upstream request failed"))
++    {
++        kind = StreamFailureKind::ServerError;
++    }
+ 
+     ExtractedParts {
+         info: StreamFailureInfo {
+Index: prime-agent-src/crates/pa-ai/src/utils_inner/stream_failure/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/utils_inner/stream_failure/tests.rs
++++ prime-agent-src/crates/pa-ai/src/utils_inner/stream_failure/tests.rs
+@@ -447,6 +447,37 @@ fn http_error_records_sdk_name() {
+     );
+ }
+ 
++/// opencode zen's "Upstream request failed" 400 is transient: it classifies as a server error
++/// (retryable), while any other 400 stays a permanent rejection.
++#[test]
++fn opencode_upstream_400_classifies_as_server_error() {
++    let upstream = ProviderError::from_http_status_body(
++        400,
++        "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Upstream request failed\"}}",
++        HashMap::default(),
++    );
++    assert_eq!(
++        extract_stream_failure_info(&upstream).kind,
++        StreamFailureKind::ServerError
++    );
++    // A body without JSON still matches through the HTTP message.
++    let bare =
++        ProviderError::from_http_status_body(400, "Upstream request failed", HashMap::default());
++    assert_eq!(
++        extract_stream_failure_info(&bare).kind,
++        StreamFailureKind::ServerError
++    );
++    let other = ProviderError::from_http_status_body(
++        400,
++        "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad\"}}",
++        HashMap::default(),
++    );
++    assert_eq!(
++        extract_stream_failure_info(&other).kind,
++        StreamFailureKind::InvalidRequest
++    );
++}
++
+ /// The stream-drop class: the failure names the class (the telemetry
+ /// classifier's `stream_drop` token rides the message) and the detail
+ /// names the block the stream was inside (the disclosure the silent

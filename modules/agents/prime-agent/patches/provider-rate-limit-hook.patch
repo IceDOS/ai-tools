@@ -1,0 +1,869 @@
+Index: prime-agent-src/crates/pa-core/src/session_engine/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/mod.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/mod.rs
+@@ -28,6 +28,7 @@ pub mod provider_adapter;
+ pub mod provider_failover;
+ pub mod provider_park;
+ pub mod provider_retry;
++pub mod rate_limit_hook;
+ pub mod refine;
+ pub mod request_timing;
+ pub mod rlm_host;
+Index: prime-agent-src/crates/pa-core/src/session_engine/rate_limit_hook.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/session_engine/rate_limit_hook.rs
+@@ -0,0 +1,198 @@
++//! `hooks.rateLimit`: run a command when a listed provider rate-limits a root session.
++
++use std::future::Future;
++use std::pin::Pin;
++
++use pa_agent::types::AssistantMessage;
++
++use super::provider_retry::{provider_stream_failure_kind, provider_stream_failure_status};
++use crate::settings::types::RateLimitHookEntry;
++
++pub const MAX_HOOK_RETRIES_PER_TURN: u32 = 3;
++pub const TIMEOUTS_BEFORE_HOOK: u32 = 2;
++pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
++
++pub type RateLimitFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
++
++/// The retry loops ask this before deciding; `true` means the hook ran and the turn retries now.
++pub type RateLimitHookCallback<'a> = &'a mut dyn FnMut(AssistantMessage) -> RateLimitFuture;
++
++fn has_word(text: &str, word: &str) -> bool {
++    text.split(|c: char| !c.is_ascii_alphanumeric()).any(|part| part == word)
++}
++
++/// Which trigger a failed turn hits, if any; `timeouts` counts timeout failures in this turn.
++#[must_use]
++pub fn classify(message: &AssistantMessage, timeouts: &mut u32) -> Option<&'static str> {
++    let text = message.error_message.as_deref().unwrap_or("").to_ascii_lowercase();
++    let status = provider_stream_failure_status(message);
++    if provider_stream_failure_kind(message).as_deref() == Some("rate_limit")
++        || status == Some(429)
++        || has_word(&text, "429")
++        || text.contains("rate limit")
++        || text.contains("too many requests")
++        || text.contains("quota exceeded")
++    {
++        return Some("rate_limit");
++    }
++    if status == Some(404) || has_word(&text, "404") {
++        return Some("not_found");
++    }
++    if text.contains("timed out") || text.contains("timeout") || text.contains("etimedout") {
++        *timeouts += 1;
++        if *timeouts >= TIMEOUTS_BEFORE_HOOK {
++            *timeouts = 0;
++            return Some("timeout");
++        }
++    }
++    None
++}
++
++#[must_use]
++pub fn entries_for<'a>(entries: &'a [RateLimitHookEntry], provider: &str) -> Vec<&'a RateLimitHookEntry> {
++    entries
++        .iter()
++        .filter(|entry| !entry.command.is_empty() && entry.providers.iter().any(|name| name == provider))
++        .collect()
++}
++
++#[must_use]
++pub fn payload(cwd: &str, session_id: &str, message: &AssistantMessage, kind: &str) -> serde_json::Value {
++    let mut value = super::lifecycle_hooks::hook_payload("RateLimit", cwd, session_id, None);
++    value["provider"] = serde_json::json!(message.provider);
++    value["model"] = serde_json::json!(message.model);
++    value["errorKind"] = serde_json::json!(kind);
++    value["errorMessage"] = serde_json::json!(message.error_message.as_deref().unwrap_or(""));
++    value
++}
++
++/// Run one hook with `payload` on stdin; `true` only for exit 0 within the timeout.
++pub async fn run(entry: &RateLimitHookEntry, payload: &serde_json::Value) -> bool {
++    use tokio::io::AsyncWriteExt;
++    let Some((program, args)) = entry.command.split_first() else { return false };
++    let mut command = tokio::process::Command::new(program);
++    command
++        .args(args)
++        .stdin(std::process::Stdio::piped())
++        .stdout(std::process::Stdio::null())
++        .stderr(std::process::Stdio::null())
++        .kill_on_drop(true);
++    // Own process group: a terminal Ctrl-C aimed at the TUI never reaches the hook.
++    #[cfg(unix)]
++    command.process_group(0);
++    let mut child = match command.spawn() {
++        Ok(child) => child,
++        Err(error) => {
++            tracing::warn!("rateLimit hook {program:?} not started: {error}");
++            return false;
++        }
++    };
++    if let Some(mut stdin) = child.stdin.take() {
++        let _ = stdin.write_all(payload.to_string().as_bytes()).await;
++    }
++    let limit = std::time::Duration::from_millis(entry.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
++    match tokio::time::timeout(limit, child.wait()).await {
++        Ok(Ok(status)) => status.success(),
++        Ok(Err(error)) => {
++            tracing::warn!("rateLimit hook {program:?} failed: {error}");
++            false
++        }
++        Err(_) => {
++            tracing::warn!("rateLimit hook {program:?} timed out");
++            let _ = child.kill().await;
++            false
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use pa_agent::types::{AssistantContent, AssistantMessageDiagnostic, StopReason, TextContent, Usage};
++
++    fn failed(kind: Option<&str>, status: Option<u16>, text: &str) -> AssistantMessage {
++        AssistantMessage {
++            content: vec![AssistantContent::Text(TextContent { text: String::new(), text_signature: None })],
++            api: String::new(),
++            provider: "opencode".to_string(),
++            model: "big-pickle".to_string(),
++            response_model: None,
++            response_id: None,
++            diagnostics: Some(vec![AssistantMessageDiagnostic {
++                kind: "provider_stream_failure".to_string(),
++                timestamp: 0,
++                error: None,
++                details: Some(serde_json::json!({ "kind": kind, "status": status })),
++            }]),
++            usage: Usage::zero(),
++            stop_reason: StopReason::Error,
++            stop_reason_raw: None,
++            error_message: Some(text.to_string()),
++            timestamp: 0,
++        }
++    }
++
++    fn entry(command: &[&str], providers: &[&str], timeout_ms: Option<u64>) -> RateLimitHookEntry {
++        RateLimitHookEntry {
++            command: command.iter().map(ToString::to_string).collect(),
++            providers: providers.iter().map(ToString::to_string).collect(),
++            timeout_ms,
++        }
++    }
++
++    #[test]
++    fn rate_limits_and_404s_fire_at_once() {
++        let mut timeouts = 0;
++        assert_eq!(classify(&failed(Some("rate_limit"), Some(429), "slow down"), &mut timeouts), Some("rate_limit"));
++        assert_eq!(classify(&failed(Some("unknown"), None, "HTTP 429 Too Many Requests"), &mut timeouts), Some("rate_limit"));
++        assert_eq!(classify(&failed(Some("invalid_request"), Some(404), "not found"), &mut timeouts), Some("not_found"));
++        assert_eq!(classify(&failed(Some("server_error"), Some(500), "boom"), &mut timeouts), None);
++    }
++
++    #[test]
++    fn timeouts_fire_on_the_second_and_reset() {
++        let mut timeouts = 0;
++        let timeout = failed(Some("unknown"), None, "Request timed out");
++        assert_eq!(classify(&timeout, &mut timeouts), None);
++        assert_eq!(classify(&timeout, &mut timeouts), Some("timeout"));
++        assert_eq!(timeouts, 0);
++        assert_eq!(classify(&timeout, &mut timeouts), None);
++    }
++
++    #[test]
++    fn entries_match_by_provider() {
++        let entries = vec![entry(&["a"], &["opencode"], None), entry(&["b"], &["openrouter"], None)];
++        let matched = entries_for(&entries, "opencode");
++        assert_eq!(matched.len(), 1);
++        assert_eq!(matched[0].command, vec!["a".to_string()]);
++        assert!(entries_for(&entries, "anthropic").is_empty());
++    }
++
++    #[test]
++    fn payload_names_the_event_and_the_failure() {
++        let value = payload("/w", "s1", &failed(Some("rate_limit"), Some(429), "slow"), "rate_limit");
++        assert_eq!(value["hook_event_name"], "RateLimit");
++        assert_eq!(value["provider"], "opencode");
++        assert_eq!(value["model"], "big-pickle");
++        assert_eq!(value["errorKind"], "rate_limit");
++        assert_eq!(value["errorMessage"], "slow");
++    }
++
++    #[tokio::test]
++    async fn run_reports_the_exit_status_and_feeds_stdin() {
++        let dir = tempfile::tempdir().unwrap();
++        let out = dir.path().join("payload.json");
++        let script = format!("cat > {}; exit 0", out.display());
++        assert!(run(&entry(&["sh", "-c", &script], &["opencode"], None), &serde_json::json!({ "x": 1 })).await);
++        assert_eq!(std::fs::read_to_string(&out).unwrap(), r#"{"x":1}"#);
++        assert!(!run(&entry(&["sh", "-c", "exit 3"], &["opencode"], None), &serde_json::json!({})).await);
++        assert!(!run(&entry(&["/nonexistent/hook"], &["opencode"], None), &serde_json::json!({})).await);
++    }
++
++    #[tokio::test]
++    async fn run_kills_a_hook_past_its_timeout() {
++        let started = std::time::Instant::now();
++        assert!(!run(&entry(&["sleep", "5"], &["opencode"], Some(200)), &serde_json::json!({})).await);
++        assert!(started.elapsed() < std::time::Duration::from_secs(3));
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/settings/types.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/types.rs
++++ prime-agent-src/crates/pa-core/src/settings/types.rs
+@@ -247,6 +247,16 @@ pub enum LifecycleHookEntry {
+     },
+ }
+ 
++/// One `hooks.rateLimit` command: run when a listed provider rate-limits; exit 0 retries at once.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct RateLimitHookEntry {
++    pub command: Vec<String>,
++    pub providers: Vec<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub timeout_ms: Option<u64>,
++}
++
+ /// `hooks`: detached commands fed a JSON payload on stdin at session and run
+ /// boundaries. Read from the global scope only, so a project file never runs commands.
+ #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+@@ -257,6 +267,8 @@ pub struct LifecycleHooksSettings {
+     pub agent_end: Option<Vec<LifecycleHookEntry>>,
+     /// Failed or aborted runs; when unset, `agentEnd` fires for them too.
+     pub agent_error: Option<Vec<LifecycleHookEntry>>,
++    /// Root-session provider rate limits (429, 404, repeated timeouts).
++    pub rate_limit: Option<Vec<RateLimitHookEntry>>,
+     /// Also fire inside RLM child sessions (default false).
+     pub include_subagents: Option<bool>,
+ }
+Index: prime-agent-src/crates/pa-core/src/session_engine/auto_retry.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/auto_retry.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/auto_retry.rs
+@@ -22,6 +22,8 @@ use super::provider_retry::{
+ pub enum RetryStartReason {
+     /// Ordinary quick retry on the current provider.
+     Quick,
++    /// The `hooks.rateLimit` command ran and exited 0; the turn re-issues at once.
++    RateLimitHook,
+     /// The failed turn re-routes to another configured provider serving the
+     /// same model; `backup_model` is the `"provider/model-id"` reference.
+     Backup { backup_model: String },
+@@ -49,6 +51,32 @@ pub enum AutoRetryEvent {
+     },
+ }
+ 
++/// [`run_turn_with_auto_retry_hooked`] without a rate-limit hook.
++///
++/// # Errors
++///
++/// As [`run_turn_with_auto_retry_hooked`].
++#[allow(clippy::too_many_arguments)]
++pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
++    policy: &ProviderRetryPolicy,
++    context_window: u64,
++    signal: Option<&AbortSignal>,
++    attempt: A,
++    emit: E,
++    wait: W,
++    park: Option<ParkDecisionCallback<'_>>,
++) -> anyhow::Result<AssistantMessage>
++where
++    A: FnMut() -> AF,
++    AF: Future<Output = anyhow::Result<AssistantMessage>>,
++    E: FnMut(AutoRetryEvent) -> EF,
++    EF: Future<Output = anyhow::Result<()>>,
++    W: FnMut(std::time::Duration) -> WF,
++    WF: Future<Output = bool>,
++{
++    run_turn_with_auto_retry_hooked(policy, context_window, signal, attempt, emit, wait, park, None).await
++}
++
+ /// Drive `attempt` under the shared retry policy until it settles: a turn
+ /// with stop reason `Error` is classified against the policy; `emit` observes
+ /// retry events, `wait` sleeps one delay (returning `false` aborts).
+@@ -61,7 +89,7 @@ pub enum AutoRetryEvent {
+ /// Returns the `attempt` future's error when a turn attempt fails, or the
+ /// `emit` callback's error while observing retry events.
+ #[allow(clippy::too_many_arguments)]
+-pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
++pub async fn run_turn_with_auto_retry_hooked<A, AF, E, EF, W, WF>(
+     policy: &ProviderRetryPolicy,
+     context_window: u64,
+     signal: Option<&AbortSignal>,
+@@ -69,6 +97,7 @@ pub async fn run_turn_with_auto_retry<A,
+     mut emit: E,
+     mut wait: W,
+     mut park: Option<ParkDecisionCallback<'_>>,
++    mut rate_limit: Option<crate::session_engine::rate_limit_hook::RateLimitHookCallback<'_>>,
+ ) -> anyhow::Result<AssistantMessage>
+ where
+     A: FnMut() -> AF,
+@@ -79,10 +108,11 @@ where
+     WF: Future<Output = bool>,
+ {
+     let mut retries_performed = 0u32;
++    let mut hook_retries = 0u32;
+     loop {
+         let message = attempt().await?;
+         if message.stop_reason != StopReason::Error {
+-            if retries_performed > 0 {
++            if retries_performed + hook_retries > 0 {
+                 emit(AutoRetryEvent::End {
+                     success: true,
+                     attempt: retries_performed,
+@@ -96,6 +126,22 @@ where
+         if signal.is_some_and(AbortSignal::is_aborted) {
+             return Ok(with_stop_reason_aborted(message));
+         }
++        if hook_retries < crate::session_engine::rate_limit_hook::MAX_HOOK_RETRIES_PER_TURN {
++            if let Some(hook) = rate_limit.as_deref_mut() {
++                if hook(message.clone()).await {
++                    hook_retries += 1;
++                    emit(AutoRetryEvent::Start {
++                        attempt: hook_retries,
++                        max_attempts: crate::session_engine::rate_limit_hook::MAX_HOOK_RETRIES_PER_TURN,
++                        delay_ms: 0,
++                        error_message: final_error_of(&message),
++                        reason: RetryStartReason::RateLimitHook,
++                    })
++                    .await?;
++                    continue;
++                }
++            }
++        }
+         // Non-retryable failures never enter the retry bookkeeping: a
+         // permanent failure only closes the active retry.
+         let non_retryable = is_agent_lifecycle_failure(&message)
+@@ -114,7 +160,7 @@ where
+             // outcome row is FAILURE-scoped, not episode-scoped. TS emits retry
+             // events only once a retry was attempted; here a provider failure
+             // discloses at attempt 0, the self-managed arms stay silent.
+-            if retries_performed > 0
++            if retries_performed + hook_retries > 0
+                 || (has_provider_stream_failure(&message)
+                     && !is_context_overflow_failure(&message, context_window))
+             {
+Index: prime-agent-src/crates/pa-core/src/session_engine/auto_retry/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/auto_retry/tests.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/auto_retry/tests.rs
+@@ -882,3 +882,130 @@ async fn unsupported_tool_failures_surfa
+         }]
+     );
+ }
++
++fn rate_limit_seam(
++    calls: Arc<std::sync::atomic::AtomicUsize>,
++    answer: bool,
++) -> impl FnMut(AssistantMessage) -> crate::session_engine::rate_limit_hook::RateLimitFuture {
++    move |_message| {
++        let calls = Arc::clone(&calls);
++        Box::pin(async move {
++            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            answer
++        })
++    }
++}
++
++/// A hook that ran retries at once with the hook reason, outside the retry budget.
++#[tokio::test]
++async fn a_successful_rate_limit_hook_retries_without_backoff() {
++    let events = Arc::new(Mutex::new(Vec::new()));
++    let events_for_emit = Arc::clone(&events);
++    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++    let mut seam = rate_limit_seam(Arc::clone(&calls), true);
++    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++    let attempts_for_turn = Arc::clone(&attempts);
++    let message = run_turn_with_auto_retry_hooked(
++        &fast_policy(),
++        0,
++        None,
++        move || {
++            let attempts = Arc::clone(&attempts_for_turn);
++            async move {
++                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
++                    Ok(error_message(Some("rate_limit"), Some(429), None))
++                } else {
++                    Ok(ok_message())
++                }
++            }
++        },
++        move |event| {
++            let events = Arc::clone(&events_for_emit);
++            async move {
++                events.lock().unwrap().push(event);
++                Ok(())
++            }
++        },
++        // A hook retry never waits; a wait here would abort and fail the Stop assert.
++        |_| async { false },
++        None,
++        Some(&mut seam),
++    )
++    .await
++    .unwrap();
++    assert_eq!(message.stop_reason, StopReason::Stop);
++    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
++    let events = events.lock().unwrap().clone();
++    assert!(matches!(
++        events.as_slice(),
++        [
++            AutoRetryEvent::Start { attempt: 1, delay_ms: 0, reason: RetryStartReason::RateLimitHook, .. },
++            AutoRetryEvent::End { success: true, .. },
++        ]
++    ), "{events:?}");
++}
++
++/// The hook runs at most three times per turn; then the normal policy decides.
++#[tokio::test]
++async fn the_rate_limit_hook_is_capped_per_turn() {
++    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++    let mut seam = rate_limit_seam(Arc::clone(&calls), true);
++    let message = run_turn_with_auto_retry_hooked(
++        &fast_policy(),
++        0,
++        None,
++        || async { Ok(error_message(Some("rate_limit"), Some(429), None)) },
++        |_| async { Ok(()) },
++        |_| async { true },
++        None,
++        Some(&mut seam),
++    )
++    .await
++    .unwrap();
++    assert_eq!(message.stop_reason, StopReason::Error);
++    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
++}
++
++/// A failing hook leaves the ordinary quick retry in charge.
++#[tokio::test]
++async fn a_failed_rate_limit_hook_falls_back_to_quick_retry() {
++    let events = Arc::new(Mutex::new(Vec::new()));
++    let events_for_emit = Arc::clone(&events);
++    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++    let mut seam = rate_limit_seam(Arc::clone(&calls), false);
++    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++    let attempts_for_turn = Arc::clone(&attempts);
++    run_turn_with_auto_retry_hooked(
++        &fast_policy(),
++        0,
++        None,
++        move || {
++            let attempts = Arc::clone(&attempts_for_turn);
++            async move {
++                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
++                    Ok(error_message(Some("rate_limit"), Some(429), None))
++                } else {
++                    Ok(ok_message())
++                }
++            }
++        },
++        move |event| {
++            let events = Arc::clone(&events_for_emit);
++            async move {
++                events.lock().unwrap().push(event);
++                Ok(())
++            }
++        },
++        |_| async { true },
++        None,
++        Some(&mut seam),
++    )
++    .await
++    .unwrap();
++    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
++    let events = events.lock().unwrap().clone();
++    assert!(matches!(
++        events.first(),
++        Some(AutoRetryEvent::Start { reason: RetryStartReason::Quick, .. })
++    ), "{events:?}");
++}
+Index: prime-agent-src/crates/pa-core/src/session_engine/provider_failover.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/provider_failover.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/provider_failover.rs
+@@ -9,7 +9,7 @@ use pa_agent::abort::AbortSignal;
+ use pa_agent::types::{AssistantMessage, StopReason};
+ use pa_types::ai::Model;
+ 
+-use super::auto_retry::{run_turn_with_auto_retry, AutoRetryEvent, RetryStartReason};
++use super::auto_retry::{run_turn_with_auto_retry_hooked, AutoRetryEvent, RetryStartReason};
+ use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
+ use super::provider_retry::{
+     has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
+@@ -76,6 +76,54 @@ pub fn failover_retry_delay(
+     )
+ }
+ 
++/// [`run_turn_with_provider_failover_hooked`] without a rate-limit hook.
++///
++/// # Errors
++///
++/// As [`run_turn_with_provider_failover_hooked`].
++#[allow(clippy::too_many_arguments)]
++pub async fn run_turn_with_provider_failover<A, AF, E, EF, W, WF, S, SF, R, RF>(
++    quick_policy: &ProviderRetryPolicy,
++    failover: &ProviderFailoverPolicy,
++    candidates: &[Model],
++    context_window: u64,
++    signal: Option<&AbortSignal>,
++    attempt: A,
++    emit: E,
++    wait: W,
++    switch: S,
++    restore: R,
++    park: Option<ParkDecisionCallback<'_>>,
++) -> anyhow::Result<AssistantMessage>
++where
++    A: FnMut() -> AF,
++    AF: Future<Output = anyhow::Result<AssistantMessage>>,
++    E: FnMut(AutoRetryEvent) -> EF,
++    EF: Future<Output = anyhow::Result<()>>,
++    W: FnMut(std::time::Duration) -> WF,
++    WF: Future<Output = bool>,
++    S: FnMut(&Model) -> SF,
++    SF: Future<Output = anyhow::Result<()>>,
++    R: FnMut() -> RF,
++    RF: Future<Output = anyhow::Result<Option<String>>>,
++{
++    run_turn_with_provider_failover_hooked(
++        quick_policy,
++        failover,
++        candidates,
++        context_window,
++        signal,
++        attempt,
++        emit,
++        wait,
++        switch,
++        restore,
++        park,
++        None,
++    )
++    .await
++}
++
+ /// Drive one turn through the provider-failover chain. With failover disabled or no candidates this
+ /// is exactly [`run_turn_with_auto_retry`] under `quick_policy`; otherwise each provider gets
+ /// `failover.max_retries` quick retries, and a spent budget switches to the next candidate
+@@ -88,7 +136,7 @@ pub fn failover_retry_delay(
+ /// budget, or a callback's error as it surfaces. An `attempt` that
+ /// errors outright propagates immediately, without spending budget.
+ #[allow(clippy::too_many_arguments)]
+-pub async fn run_turn_with_provider_failover<A, AF, E, EF, W, WF, S, SF, R, RF>(
++pub async fn run_turn_with_provider_failover_hooked<A, AF, E, EF, W, WF, S, SF, R, RF>(
+     quick_policy: &ProviderRetryPolicy,
+     failover: &ProviderFailoverPolicy,
+     candidates: &[Model],
+@@ -100,6 +148,7 @@ pub async fn run_turn_with_provider_fail
+     mut switch: S,
+     mut restore: R,
+     mut park: Option<ParkDecisionCallback<'_>>,
++    mut rate_limit: Option<crate::session_engine::rate_limit_hook::RateLimitHookCallback<'_>>,
+ ) -> anyhow::Result<AssistantMessage>
+ where
+     A: FnMut() -> AF,
+@@ -116,7 +165,7 @@ where
+     if !failover.enabled || candidates.is_empty() {
+         // The pass-through moves the park seam: the loop below cannot
+         // reach (and must not reborrow) it.
+-        return run_turn_with_auto_retry(
++        return run_turn_with_auto_retry_hooked(
+             quick_policy,
+             context_window,
+             signal,
+@@ -124,10 +173,12 @@ where
+             emit,
+             wait,
+             park,
++            rate_limit,
+         )
+         .await;
+     }
+     let mut total_retries = 0u32;
++    let mut hook_retries = 0u32;
+     let mut retries_on_provider = 0u32;
+     let mut candidate_index = 0usize;
+     let mut switched = false;
+@@ -143,7 +194,7 @@ where
+                     restored_model,
+                 })
+                 .await?;
+-            } else if total_retries > 0 {
++            } else if total_retries + hook_retries > 0 {
+                 emit(AutoRetryEvent::End {
+                     success: true,
+                     attempt: total_retries,
+@@ -160,6 +211,22 @@ where
+             }
+             return Ok(with_stop_reason_aborted(message));
+         }
++        if hook_retries < crate::session_engine::rate_limit_hook::MAX_HOOK_RETRIES_PER_TURN {
++            if let Some(hook) = rate_limit.as_deref_mut() {
++                if hook(message.clone()).await {
++                    hook_retries += 1;
++                    emit(AutoRetryEvent::Start {
++                        attempt: hook_retries,
++                        max_attempts: crate::session_engine::rate_limit_hook::MAX_HOOK_RETRIES_PER_TURN,
++                        delay_ms: 0,
++                        error_message: final_error_of(&message),
++                        reason: RetryStartReason::RateLimitHook,
++                    })
++                    .await?;
++                    continue;
++                }
++            }
++        }
+         // Permanent and deterministic failures never walk the chain: a
+         // rejected request fails the same way on every provider.
+         let non_retryable = is_agent_lifecycle_failure(&message)
+@@ -181,7 +248,7 @@ where
+             // a first-attempt provider failure still discloses at
+             // attempt 0; the self-managed arms (overflow recovery,
+             // lifecycle, faux) stay silent.
+-            if total_retries > 0
++            if total_retries + hook_retries > 0
+                 || (has_provider_stream_failure(&message)
+                     && !is_context_overflow_failure(&message, context_window))
+             {
+@@ -428,10 +495,11 @@ mod tests {
+ 
+     /// Run the driver over a scripted attempt sequence (one assistant
+     /// message per attempt).
+-    async fn drive(
++    async fn drive_hooked(
+         failover: &ProviderFailoverPolicy,
+         candidates: &[Model],
+         script: Vec<AssistantMessage>,
++        rate_limit: Option<crate::session_engine::rate_limit_hook::RateLimitHookCallback<'_>>,
+     ) -> Harness {
+         let script = Arc::new(Mutex::new(script));
+         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+@@ -439,7 +507,7 @@ mod tests {
+         let restores: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+         let waits: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+         let events: Arc<Mutex<Vec<AutoRetryEvent>>> = Arc::new(Mutex::new(Vec::new()));
+-        run_turn_with_provider_failover(
++        run_turn_with_provider_failover_hooked(
+             &quick_policy(),
+             failover,
+             candidates,
+@@ -506,6 +574,7 @@ mod tests {
+                 }
+             },
+             None,
++            rate_limit,
+         )
+         .await
+         .unwrap();
+@@ -522,6 +591,14 @@ mod tests {
+         harness
+     }
+ 
++    async fn drive(
++        failover: &ProviderFailoverPolicy,
++        candidates: &[Model],
++        script: Vec<AssistantMessage>,
++    ) -> Harness {
++        drive_hooked(failover, candidates, script, None).await
++    }
++
+     #[test]
+     fn backoff_schedule_starts_at_base_doubles_and_caps() {
+         let failover = ProviderFailoverPolicy {
+@@ -841,4 +918,35 @@ mod tests {
+         assert!(harness.switches.is_empty());
+         assert!(harness.restores.is_empty());
+     }
++
++    /// A hook retry stays on the current provider and spends no failover budget.
++    #[tokio::test]
++    async fn a_successful_rate_limit_hook_retries_the_same_provider() {
++        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++        let calls_for_seam = Arc::clone(&calls);
++        let mut seam = move |_message: AssistantMessage| -> crate::session_engine::rate_limit_hook::RateLimitFuture {
++            let calls = Arc::clone(&calls_for_seam);
++            Box::pin(async move {
++                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++                true
++            })
++        };
++        let script = vec![
++            error_message(Some("rate_limit"), Some(429), "rate limited"),
++            ok_message("done"),
++        ];
++        let harness = drive_hooked(&fast_failover(), &[model("backup")], script, Some(&mut seam)).await;
++        assert_eq!(harness.attempts, 2);
++        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
++        assert!(harness.switches.is_empty(), "{:?}", harness.switches);
++        assert!(harness.waits.is_empty(), "{:?}", harness.waits);
++        assert!(matches!(
++            harness.events.as_slice(),
++            [
++                AutoRetryEvent::Start { attempt: 1, delay_ms: 0, reason: RetryStartReason::RateLimitHook, .. },
++                AutoRetryEvent::End { success: true, .. },
++            ]
++        ), "{:?}", harness.events);
++    }
+ }
++
+Index: prime-agent-src/crates/pa-core/src/settings/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/mod.rs
++++ prime-agent-src/crates/pa-core/src/settings/mod.rs
+@@ -6,7 +6,7 @@ pub(crate) mod load;
+ pub(crate) mod manager;
+ pub(crate) mod merge;
+ pub(crate) mod storage;
+-pub(crate) mod types;
++pub mod types;
+ 
+ pub use manager::{
+     IdleEviction, SessionArchivePolicy, SettingsError, SettingsManager,
+Index: prime-agent-src/crates/pa-daemon/src/agent_engine/turn/model.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/agent_engine/turn/model.rs
++++ prime-agent-src/crates/pa-daemon/src/agent_engine/turn/model.rs
+@@ -164,12 +164,55 @@ impl AgentSessionEngine {
+                     outcome
+                 })
+             });
++        // `hooks.rateLimit` (root sessions only): a matching failure runs the hook, exit 0 retries now.
++        let rate_limit_entries: Vec<pa_core::settings::types::RateLimitHookEntry> =
++            if self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed) == 0 {
++                pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir)
++                    .get_lifecycle_hooks()
++                    .and_then(|hooks| hooks.rate_limit)
++                    .unwrap_or_default()
++            } else {
++                Vec::new()
++            };
++        let hook_session = persistence.clone();
++        let mut hook_timeouts = 0u32;
++        let mut rate_limit_seam = move |message: pa_agent::types::AssistantMessage| -> pa_core::session_engine::rate_limit_hook::RateLimitFuture {
++            use pa_core::session_engine::rate_limit_hook as hook;
++            let entries: Vec<_> = hook::entries_for(&rate_limit_entries, &message.provider)
++                .into_iter()
++                .cloned()
++                .collect();
++            if entries.is_empty() {
++                return Box::pin(async { false });
++            }
++            let Some(kind) = hook::classify(&message, &mut hook_timeouts) else {
++                return Box::pin(async { false });
++            };
++            let session = hook_session.clone();
++            Box::pin(async move {
++                let (cwd, session_id) = match &session {
++                    Some(session) => {
++                        let manager = session.lock().await;
++                        (manager.get_cwd().display().to_string(), manager.get_session_id().to_string())
++                    }
++                    None => (String::new(), String::new()),
++                };
++                let payload = hook::payload(&cwd, &session_id, &message, kind);
++                let mut retried = false;
++                for entry in &entries {
++                    retried |= hook::run(entry, &payload).await;
++                }
++                retried
++            })
++        };
++        let rate_limit: Option<pa_core::session_engine::rate_limit_hook::RateLimitHookCallback> =
++            Some(&mut rate_limit_seam);
+         let overflow_window = match self.armed_image_route() {
+             Some(route) => route.target.model.context_window,
+             None => model.context_window,
+         };
+         let result = self.runtime.block_on(
+-            pa_core::session_engine::provider_failover::run_turn_with_provider_failover(
++            pa_core::session_engine::provider_failover::run_turn_with_provider_failover_hooked(
+                 &policy,
+                 &failover_policy,
+                 &candidates,
+@@ -368,6 +411,7 @@ impl AgentSessionEngine {
+                     }
+                 },
+                 park,
++                rate_limit,
+             ),
+         );
+         match result {
+Index: prime-agent-src/crates/pa-daemon/src/worker/turn.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/turn.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/turn.rs
+@@ -876,6 +876,9 @@ impl TurnRunner {
+                                 event["reason"] = json!("backup");
+                                 event["backupModel"] = json!(backup_model);
+                             }
++                            pa_core::session_engine::auto_retry::RetryStartReason::RateLimitHook => {
++                                event["reason"] = json!("rateLimitHook");
++                            }
+                         }
+                         vec![event]
+                     }
+Index: prime-agent-src/crates/pa-tui/src/chat.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/chat.rs
++++ prime-agent-src/crates/pa-tui/src/chat.rs
+@@ -537,6 +537,10 @@ impl RetryState {
+                 "Primary model unavailable ({}) — retrying on backup model {backup_model}...",
+                 self.error_message
+             ),
++            RetryStartReason::RateLimitHook => format!(
++                "{} (rate-limit hook ran, retrying {}/{})...",
++                self.error_message, self.attempt, self.max_attempts
++            ),
+         }
+     }
+ }
+Index: prime-agent-src/crates/pa-tui/src/chat/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/chat/tests.rs
++++ prime-agent-src/crates/pa-tui/src/chat/tests.rs
+@@ -856,3 +856,15 @@ fn live_abort_text_matches_ts() {
+         "Aborted after 2 retry attempts \u{00b7} 1m 05s"
+     );
+ }
++
++#[test]
++fn a_rate_limit_hook_retry_names_the_hook() {
++    let retry = RetryState {
++        attempt: 1,
++        max_attempts: 3,
++        ends_at: std::time::Instant::now(),
++        error_message: "HTTP 429".to_string(),
++        reason: RetryStartReason::RateLimitHook,
++    };
++    assert_eq!(retry.message(), "HTTP 429 (rate-limit hook ran, retrying 1/3)...");
++}
+Index: prime-agent-src/crates/pa-tui/src/snapshot/decoder.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/snapshot/decoder.rs
++++ prime-agent-src/crates/pa-tui/src/snapshot/decoder.rs
+@@ -141,6 +141,8 @@ pub enum RetryStartReason {
+     /// Provider-failover switch: the failed turn re-routes to
+     /// `backup_model` ("provider/model-id").
+     Backup { backup_model: String },
++    /// The `hooks.rateLimit` command ran; the turn re-issues at once.
++    RateLimitHook,
+ }
+ 
+ /// Decode the `event` payload of a `session_event` frame.
+@@ -306,6 +308,7 @@ pub fn event_to_update(event: &Value) ->
+                         .unwrap_or("unknown")
+                         .to_string(),
+                 },
++                Some("rateLimitHook") => RetryStartReason::RateLimitHook,
+                 _ => RetryStartReason::Quick,
+             },
+         }),

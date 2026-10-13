@@ -1,0 +1,64 @@
+Index: prime-agent-src/crates/pa-core/src/update/homebrew.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/update/homebrew.rs
++++ prime-agent-src/crates/pa-core/src/update/homebrew.rs
+@@ -13,6 +13,8 @@ pub enum HomebrewKind {
+     Formula,
+     /// A cask version under `Caskroom/prime-agent`.
+     Cask,
++    /// A Nix store path: the system configuration owns updates.
++    Nix,
+ }
+ 
+ impl HomebrewKind {
+@@ -22,15 +24,24 @@ impl HomebrewKind {
+         match self {
+             Self::Formula => "formula",
+             Self::Cask => "cask",
++            Self::Nix => "nix",
+         }
+     }
+ }
+ 
++/// A binary under `/nix/store` is owned by the system configuration.
++fn nix_kind_for(resolved: &Path) -> Option<HomebrewKind> {
++    resolved.starts_with("/nix/store").then_some(HomebrewKind::Nix)
++}
++
+ /// Resolve the executable and identify a Homebrew-managed ancestor pair.
+ /// Unresolvable paths and unrelated install layouts are not Homebrew-owned.
+ #[must_use]
+ pub fn managed_kind(executable: &Path) -> Option<HomebrewKind> {
+     let resolved = executable.canonicalize().ok()?;
++    if let Some(kind) = nix_kind_for(&resolved) {
++        return Some(kind);
++    }
+     for ancestor in resolved.ancestors() {
+         if ancestor.file_name() != Some(OsStr::new("prime-agent")) {
+             continue;
+@@ -52,6 +63,9 @@ pub fn upgrade_instruction(kind: Homebre
+     match kind {
+         HomebrewKind::Formula => "Update with: brew upgrade prime-agent".to_string(),
+         HomebrewKind::Cask => "Update with: brew upgrade --cask prime-agent".to_string(),
++        HomebrewKind::Nix => {
++            "prime-agent is managed by Nix: update it through your system configuration".to_string()
++        }
+     }
+ }
+ 
+@@ -103,4 +117,15 @@ mod tests {
+             assert_eq!(managed_kind(&executable), None);
+         }
+     }
++
++    #[test]
++    fn nix_store_binary_is_managed_by_nix() {
++        assert_eq!(
++            nix_kind_for(Path::new(
++                "/nix/store/abc-prime-agent/libexec/prime-agent/prime-agent"
++            )),
++            Some(HomebrewKind::Nix)
++        );
++        assert_eq!(nix_kind_for(Path::new("/home/u/.local/bin/prime-agent")), None);
++    }
+ }

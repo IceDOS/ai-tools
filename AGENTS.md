@@ -33,8 +33,9 @@ module name is `mcp-server`) and `integrations` (agent-launch, ai-accounts, alim
 `modules/default` loads whenever the repo is listed and owns the shared options.
 
 ## Shared options (`icedos.ai-tools.*`)
-- `icedos.ai-tools.rules` — name = markdown. prime-agent turns each into a `rule-<name>`
-  system-prompt extension, antigravity writes `~/.gemini/config/rules/<name>.md`, opencode
+- `icedos.ai-tools.rules` — name = markdown. prime-agent writes them all to
+  `<dataDir>/APPEND_SYSTEM.md`, which 0.10.0 appends to every system prompt,
+  antigravity writes `~/.gemini/config/rules/<name>.md`, opencode
   writes `~/.config/opencode/rules/<name>.md` and lists it in `instructions`, and `claude-code`
   sets `programs.claude-code.rules` (mkDefault per entry).
 - `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: prime-agent
@@ -89,15 +90,15 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   (self-materialised via `genDefaults`). `ai-account exec <agent> --` picks an account (flag,
   `AI_ACCOUNT_<AGENT>`, sticky, alimit headroom, `default`) and execs the real binary with
   per-account env. Agent modules wrap their package through `lib/wrap.nix` only when
-  `lib/has-accounts.nix` finds declared accounts; `prime-agent` and `opencode` also count as
-  declaring when `ollama` does, because they pass its key in.
+  `lib/has-accounts.nix` finds declared accounts; `opencode` also counts as declaring when
+  `ollama` does, because it passes its key in.
   - State lives in `~/.local/state/ai-accounts/<agent>/<account>/`. Shared mode links the real dir
     except `adapters.*_PRIVATE` (never linked) and `adapters.*_SEED` (copied once, then owned by the
     account, because agents rewrite those files by renaming over the target).
   - A logged-out account fails with exit 3 when stdin is not a tty. On a tty the launch signs in
     first: ollama prompts for the key, opencode runs `opencode auth login`, the other agents start
-    and show their own sign-in. A prime-agent or opencode launch also prompts for the key of the
-    ollama account it tags, when that account has no key.
+    and show their own sign-in. An opencode launch also prompts for the key of the ollama account
+    it tags, when that account has no key.
   - alimit keys for non-default accounts are `<provider>@<tag>/<window>`. Status lines read
     `AI_ACCOUNT_TAGS`, and `alimit headroom` feeds auto-pick.
   - Per-account `settings` merge over the agent module's `icedos.managed-settings.<agent>` into the

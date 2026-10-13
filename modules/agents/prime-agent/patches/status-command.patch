@@ -1,0 +1,679 @@
+Index: prime-agent-src/crates/pa-cli/src/client_settings.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-cli/src/client_settings.rs
++++ prime-agent-src/crates/pa-cli/src/client_settings.rs
+@@ -139,6 +139,39 @@ impl ClientSettings for CliClientSetting
+             agent_dir: self.agent_dir.clone(),
+         }))
+     }
++
++    fn status_command(&self) -> Option<pa_tui::status_hook::StatusCommandConfig> {
++        let manager = self.manager();
++        let settings = manager.settings();
++        let value = settings.extra.get("statusCommand")?;
++        let command: Vec<String> = value
++            .get("command")?
++            .as_array()?
++            .iter()
++            .filter_map(|v| v.as_str().map(str::to_owned))
++            .collect();
++        if command.is_empty() {
++            return None;
++        }
++        let ms = |key: &str, default: u64| {
++            std::time::Duration::from_millis(
++                value
++                    .get(key)
++                    .and_then(serde_json::Value::as_u64)
++                    .unwrap_or(default),
++            )
++        };
++        Some(pa_tui::status_hook::StatusCommandConfig {
++            command,
++            interval: ms("intervalMs", 30_000),
++            busy_interval: ms("busyIntervalMs", 2_000),
++            timeout: ms("timeoutMs", 5_000),
++            visible: value
++                .get("visible")
++                .and_then(serde_json::Value::as_bool)
++                .unwrap_or(true),
++        })
++    }
+     setting!(
+         enable_skill_commands,
+         set_enable_skill_commands,
+@@ -396,4 +429,19 @@ mod tests {
+         assert_eq!(config.model.as_deref(), Some("opencode-go/x"));
+         assert!(!cli_settings_with("{}").prompt_suggestions().enabled);
+     }
++
++    #[test]
++    fn status_command_reads_argv_and_intervals() {
++        let settings = cli_settings_with(
++            r#"{"statusCommand":{"command":["helper","--config","/c.json"],"busyIntervalMs":1500}}"#,
++        );
++        let config = settings.status_command().expect("configured");
++        assert_eq!(config.command, ["helper", "--config", "/c.json"]);
++        assert_eq!(config.busy_interval, std::time::Duration::from_millis(1500));
++        assert_eq!(config.interval, std::time::Duration::from_millis(30_000));
++        assert!(config.visible);
++        assert!(cli_settings_with(r#"{"statusCommand":{"command":[]}}"#)
++            .status_command()
++            .is_none());
++    }
+ }
+Index: prime-agent-src/crates/pa-tui/src/chrome.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/chrome.rs
++++ prime-agent-src/crates/pa-tui/src/chrome.rs
+@@ -82,6 +82,8 @@ pub struct ChromeState {
+     /// The footer's tok/sec readout: the dim bottom row's text; `None`
+     /// renders no row (kept until the first completed response).
+     pub speed_text: Option<String>,
++    /// External status command output lines rendered under the editor.
++    pub status_rows: Vec<crate::Line>,
+     /// Hide the splash `cwd` line (the scoped agents view keeps its
+     /// metadata rows centered against the logo).
+     pub splash_hide_cwd: bool,
+Index: prime-agent-src/crates/pa-tui/src/client_settings.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/client_settings.rs
++++ prime-agent-src/crates/pa-tui/src/client_settings.rs
+@@ -50,6 +50,10 @@ pub trait ClientSettings: Send + Sync {
+     fn prompt_suggester(&self) -> Option<std::sync::Arc<dyn crate::prompt_suggest::PromptSuggester>> {
+         None
+     }
++    /// `statusCommand`: the external footer command.
++    fn status_command(&self) -> Option<crate::status_hook::StatusCommandConfig> {
++        None
++    }
+     /// `images.autoResize` (TS default true).
+     fn image_auto_resize(&self) -> bool;
+     /// Persists `images.autoResize` to the global scope.
+Index: prime-agent-src/crates/pa-tui/src/interactive/run.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/interactive/run.rs
++++ prime-agent-src/crates/pa-tui/src/interactive/run.rs
+@@ -210,6 +210,7 @@ async fn run_interactive_surface(
+         mpsc::unbounded_channel::<crate::session_ui::CommandCatalogUpdate>();
+     let (suggest_tx, mut suggest_rx) =
+         mpsc::unbounded_channel::<crate::prompt_suggest::SuggestNote>();
++    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<Option<String>>();
+     // The double-Ctrl+C force-quit guard: the terminal reader observes the pair while this loop is
+     // wedged in a daemon request; a std-thread watchdog enforces the exit deadline without the
+     // runtime.
+@@ -1547,6 +1548,15 @@ async fn run_interactive_surface(
+                     session.apply_suggest_note(note, &mut view);
+                 }
+             }
++            maybe_status = status_rx.recv() => {
++                if let Some(outcome) = maybe_status {
++                    if let Some(hook) = session.status_hook.as_mut() {
++                        hook.finish(outcome);
++                        view.chrome.status_rows = hook.rows().to_vec();
++                        session.dirty = true;
++                    }
++                }
++            }
+             maybe_reload = reload_rx.recv() => {
+                 if let Some(outcome) = maybe_reload {
+                     session.apply_reload_outcome(outcome, &mut view).await;
+@@ -1969,6 +1979,17 @@ async fn run_interactive_surface(
+             }
+         }
+ 
++        if let Some(hook) = session.status_hook.as_mut() {
++            if hook.due(session.turn_active, Instant::now()) {
++                let config = hook.config.clone();
++                let payload = session.status_payload(&view);
++                let tx = status_tx.clone();
++                tokio::spawn(async move {
++                    let _ = tx.send(crate::status_hook::run(&config, &payload).await);
++                });
++            }
++        }
++
+         // The Ctrl+C exit hint expires on a timer: once the window passed, the hint row repaints
+         // away — the expiry's wake arm lives in the pre-select inventory, and the same
+         // iteration's frame gate repaints it away.
+Index: prime-agent-src/crates/pa-tui/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/lib.rs
++++ prime-agent-src/crates/pa-tui/src/lib.rs
+@@ -103,6 +103,7 @@ pub mod session_ui;
+ pub mod settings_menu;
+ pub mod side_question;
+ pub mod snapshot;
++pub mod status_hook;
+ pub mod subagents;
+ mod suspend;
+ mod terminal_image;
+Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui.rs
+@@ -173,6 +173,7 @@ pub(crate) struct SessionUi {
+     speed_stats: Option<SpeedStats>,
+     pub(crate) suggest: crate::prompt_suggest::SuggestState,
+     suggest_notes: Option<tokio::sync::mpsc::UnboundedSender<crate::prompt_suggest::SuggestNote>>,
++    pub(crate) status_hook: Option<crate::status_hook::StatusHook>,
+     service_tier: Option<String>,
+     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
+     /// The ban-risk warning's view-local dedup (TS
+@@ -448,6 +449,29 @@ impl SessionUi {
+         self.suggest_notes = Some(tx);
+     }
+ 
++    pub(crate) fn status_payload(&self, view: &AgentView) -> crate::status_hook::StatusPayload {
++        let model = view
++            .chrome
++            .model_provider
++            .as_ref()
++            .zip(view.chrome.model_id.as_ref())
++            .map(|(provider, id)| crate::status_hook::StatusModel {
++                provider: provider.clone(),
++                id: id.clone(),
++            });
++        let context_percent = view.chrome.context.as_ref().map(crate::chrome::ContextUsage::percent);
++        crate::status_hook::StatusPayload {
++            session_id: Some(self.active_session_id.clone()),
++            session_file: self.session_file.clone(),
++            cwd: self.cwd.display().to_string(),
++            model,
++            turn_active: self.turn_active,
++            cost_usd: view.chrome.cost_usd,
++            context_percent,
++            pid: std::process::id(),
++        }
++    }
++
+     /// Take the one-shot post-first-frame trim request.
+     pub(crate) fn take_trim_after_frame(&mut self) -> bool {
+         std::mem::take(&mut self.trim_after_frame)
+Index: prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/apply.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
+@@ -375,6 +375,9 @@ impl SessionUi {
+                 self.turn_error_shown = false;
+                 self.suggest.cancel();
+                 view.prompt_suggestion = None;
++                if let Some(hook) = self.status_hook.as_mut() {
++                    hook.mark_dirty();
++                }
+                 // No card from a previous run settles on this one's failure.
+                 self.pending_tools.clear();
+                 self.aborted_tools.clear();
+@@ -470,6 +473,9 @@ impl SessionUi {
+                 self.streaming_index = None;
+                 self.turn_ends_seen += 1;
+                 self.turn_active = false;
++                if let Some(hook) = self.status_hook.as_mut() {
++                    hook.mark_dirty();
++                }
+                 view.working = None;
+                 view.working_since = None;
+                 view.retry = None;
+Index: prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/commands.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
+@@ -808,6 +808,30 @@ impl SessionUi {
+                 let note = if enable { "Prompt suggestions on" } else { "Prompt suggestions off" };
+                 self.note(note, view);
+             }
++            "cost" => {
++                let Some(hook) = self.status_hook.as_mut() else {
++                    self.note("No status command configured (settings statusCommand)", view);
++                    return Ok(());
++                };
++                let arg = resolved.args.trim().to_lowercase();
++                let enable = match arg.as_str() {
++                    "on" => true,
++                    "off" => false,
++                    "" | "toggle" => !hook.visible,
++                    _ => {
++                        self.error_row("Usage: /cost [on|off]", view);
++                        return Ok(());
++                    }
++                };
++                hook.visible = enable;
++                if enable {
++                    hook.mark_dirty();
++                } else {
++                    view.chrome.status_rows.clear();
++                }
++                let note = if enable { "Status footer on" } else { "Status footer off" };
++                self.note(note, view);
++            }
+             "reload" => {
+                 if !resolved.args.is_empty() {
+                     view.editor
+Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/lifecycle.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
+@@ -95,6 +95,11 @@ impl SessionUi {
+                 options.client_settings.as_ref().and_then(|s| s.prompt_suggester()),
+             ),
+             suggest_notes: None,
++            status_hook: options
++                .client_settings
++                .as_ref()
++                .and_then(|s| s.status_command())
++                .map(crate::status_hook::StatusHook::new),
+             client_settings: options.client_settings.clone(),
+             anthropic_subscription_warning_shown: false,
+             anthropic_warning_mark_pending: std::sync::Arc::default(),
+@@ -275,6 +280,7 @@ impl SessionUi {
+             speed_stats: None,
+             suggest: crate::prompt_suggest::SuggestState::default(),
+             suggest_notes: None,
++            status_hook: None,
+             client_settings: None,
+             anthropic_subscription_warning_shown: false,
+             anthropic_warning_mark_pending: std::sync::Arc::default(),
+@@ -606,6 +612,9 @@ impl SessionUi {
+         // stop must not route into a stale shutdown recovery's reconnect hang.
+         self.daemon_closing_notice = None;
+         self.session_name.clone_from(&reconstructed.session_name);
++        if let Some(hook) = self.status_hook.as_mut() {
++            hook.mark_dirty();
++        }
+         self.first_user_text = reconstructed.chat.iter().find_map(|entry| match entry {
+             ChatEntry::User { text } => Some(text.clone()),
+             _ => None,
+@@ -803,6 +812,9 @@ impl SessionUi {
+         if let Some(model) = self.pending_model.take() {
+             view.chrome.model_id = Some(model);
+             view.chrome.model_provider = self.pending_model_provider.take();
++            if let Some(hook) = self.status_hook.as_mut() {
++                hook.mark_dirty();
++            }
+         }
+         // The tray badge mirrors the session-scoped tier on every rebuild: an
+         // attach that reports no tier clears the previous session's badge.
+Index: prime-agent-src/crates/pa-tui/src/session_ui/model_picker.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/model_picker.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/model_picker.rs
+@@ -489,6 +489,9 @@ impl SessionUi {
+             view.chrome.model_provider = Some(picked_provider.to_string());
+             view.chrome.thinking_suffix = None;
+         }
++        if let Some(hook) = self.status_hook.as_mut() {
++            hook.mark_dirty();
++        }
+         self.dirty = true;
+     }
+ }
+Index: prime-agent-src/crates/pa-tui/src/status_hook.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-tui/src/status_hook.rs
+@@ -0,0 +1,307 @@
++//! External status command (`statusCommand` setting): the TUI pipes a JSON session payload to
++//! the command's stdin and renders its stdout lines (SGR colors kept) under the editor.
++
++use crate::{Line, Span};
++use ratatui::style::{Color, Modifier, Style};
++use serde::Serialize;
++use std::process::Stdio;
++use std::time::{Duration, Instant};
++use tokio::io::AsyncWriteExt;
++
++const MAX_LINES: usize = 8;
++const MAX_LINE_BYTES: usize = 1024;
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct StatusCommandConfig {
++    /// argv; the first element is the program.
++    pub command: Vec<String>,
++    pub interval: Duration,
++    /// Rerun interval while a turn runs (keeps vigor leases fresh: its staleness limit is 5 s).
++    pub busy_interval: Duration,
++    pub timeout: Duration,
++    /// `/cost` starts on or off.
++    pub visible: bool,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct StatusPayload {
++    pub session_id: Option<String>,
++    pub session_file: Option<String>,
++    pub cwd: String,
++    pub model: Option<StatusModel>,
++    pub turn_active: bool,
++    pub cost_usd: Option<f64>,
++    pub context_percent: Option<f64>,
++    pub pid: u32,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++pub struct StatusModel {
++    pub provider: String,
++    pub id: String,
++}
++
++/// Scheduling for one surface: at most one run in flight, reruns on events or interval.
++#[derive(Debug)]
++pub struct StatusHook {
++    pub config: StatusCommandConfig,
++    pub visible: bool,
++    pub lines: Vec<Line>,
++    in_flight: bool,
++    dirty: bool,
++    last_run: Option<Instant>,
++}
++
++impl StatusHook {
++    #[must_use]
++    pub fn new(config: StatusCommandConfig) -> Self {
++        let visible = config.visible;
++        Self { config, visible, lines: Vec::new(), in_flight: false, dirty: true, last_run: None }
++    }
++
++    /// Request a rerun at the next tick (turn start or end, model change).
++    pub fn mark_dirty(&mut self) {
++        self.dirty = true;
++    }
++
++    /// Whether a run should start now; marks it in flight when so.
++    pub fn due(&mut self, busy: bool, now: Instant) -> bool {
++        if !self.visible || self.in_flight {
++            return false;
++        }
++        let interval = if busy { self.config.busy_interval } else { self.config.interval };
++        let elapsed = self.last_run.is_none_or(|last| now.saturating_duration_since(last) >= interval);
++        if !(self.dirty || elapsed) {
++            return false;
++        }
++        self.in_flight = true;
++        self.dirty = false;
++        self.last_run = Some(now);
++        true
++    }
++
++    /// Store a finished run's output; a failed run keeps the previous lines.
++    pub fn finish(&mut self, output: Option<String>) {
++        self.in_flight = false;
++        if let Some(output) = output {
++            self.lines = parse_output(&output);
++        }
++    }
++
++    /// The rows to render; empty while hidden.
++    #[must_use]
++    pub fn rows(&self) -> &[Line] {
++        if self.visible { &self.lines } else { &[] }
++    }
++}
++
++/// Run the command once with `payload` on stdin; `None` on spawn failure, timeout, or non-zero exit.
++pub async fn run(config: &StatusCommandConfig, payload: &StatusPayload) -> Option<String> {
++    let (program, args) = config.command.split_first()?;
++    let input = serde_json::to_vec(payload).ok()?;
++    let mut child = tokio::process::Command::new(program)
++        .args(args)
++        .stdin(Stdio::piped())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::null())
++        .kill_on_drop(true)
++        .spawn()
++        .ok()?;
++    let mut stdin = child.stdin.take()?;
++    let work = async move {
++        // A command that ignores stdin may close it early; that is not an error.
++        let _ = stdin.write_all(&input).await;
++        drop(stdin);
++        child.wait_with_output().await
++    };
++    let output = tokio::time::timeout(config.timeout, work).await.ok()?.ok()?;
++    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
++}
++
++#[must_use]
++pub fn parse_output(output: &str) -> Vec<Line> {
++    output
++        .lines()
++        .filter(|line| !line.trim().is_empty())
++        .take(MAX_LINES)
++        .map(|line| parse_sgr_line(truncate_bytes(line, MAX_LINE_BYTES)))
++        .collect()
++}
++
++fn truncate_bytes(line: &str, max: usize) -> &str {
++    if line.len() <= max {
++        return line;
++    }
++    let mut end = max;
++    while !line.is_char_boundary(end) {
++        end -= 1;
++    }
++    &line[..end]
++}
++
++/// Minimal SGR parser: 0, 1, 2, 3, 4, 22-24, 30-37, 39, 90-97, 38;5;n and 38;2;r;g;b.
++/// Other escape sequences and control bytes are dropped.
++#[must_use]
++pub fn parse_sgr_line(line: &str) -> Line {
++    let mut spans: Line = Vec::new();
++    let mut style = Style::default();
++    let mut text = String::new();
++    let mut chars = line.chars().peekable();
++    while let Some(c) = chars.next() {
++        if c != '\x1b' {
++            if !c.is_control() || c == '\t' {
++                text.push(if c == '\t' { ' ' } else { c });
++            }
++            continue;
++        }
++        if chars.peek() != Some(&'[') {
++            continue;
++        }
++        chars.next();
++        let mut params = String::new();
++        let mut terminator = None;
++        for next in chars.by_ref() {
++            if next.is_ascii_digit() || next == ';' {
++                params.push(next);
++            } else {
++                terminator = Some(next);
++                break;
++            }
++        }
++        if terminator != Some('m') {
++            continue;
++        }
++        if !text.is_empty() {
++            spans.push(Span::styled(std::mem::take(&mut text), style));
++        }
++        style = apply_sgr(style, &params);
++    }
++    if !text.is_empty() {
++        spans.push(Span::styled(text, style));
++    }
++    spans
++}
++
++fn apply_sgr(mut style: Style, params: &str) -> Style {
++    let codes: Vec<u16> = params.split(';').map(|p| p.parse().unwrap_or(0)).collect();
++    let mut i = 0;
++    while i < codes.len() {
++        match codes[i] {
++            0 => style = Style::default(),
++            1 => style = style.add_modifier(Modifier::BOLD),
++            2 => style = style.add_modifier(Modifier::DIM),
++            3 => style = style.add_modifier(Modifier::ITALIC),
++            4 => style = style.add_modifier(Modifier::UNDERLINED),
++            22 => style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
++            23 => style = style.remove_modifier(Modifier::ITALIC),
++            24 => style = style.remove_modifier(Modifier::UNDERLINED),
++            code @ 30..=37 => style = style.fg(Color::Indexed((code - 30) as u8)),
++            code @ 90..=97 => style = style.fg(Color::Indexed((code - 90 + 8) as u8)),
++            39 => style.fg = None,
++            38 => match codes.get(i + 1) {
++                Some(5) => {
++                    if let Some(&n) = codes.get(i + 2) {
++                        style = style.fg(Color::Indexed(n.min(255) as u8));
++                    }
++                    i += 2;
++                }
++                Some(2) => {
++                    if let (Some(&r), Some(&g), Some(&b)) = (codes.get(i + 2), codes.get(i + 3), codes.get(i + 4)) {
++                        style = style.fg(Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8));
++                    }
++                    i += 4;
++                }
++                _ => {}
++            },
++            _ => {}
++        }
++        i += 1;
++    }
++    style
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn config(command: &[&str]) -> StatusCommandConfig {
++        StatusCommandConfig {
++            command: command.iter().map(|s| (*s).to_owned()).collect(),
++            interval: Duration::from_secs(30),
++            busy_interval: Duration::from_secs(2),
++            timeout: Duration::from_secs(5),
++            visible: true,
++        }
++    }
++
++    fn payload() -> StatusPayload {
++        StatusPayload {
++            session_id: Some("s1".into()),
++            session_file: None,
++            cwd: "/tmp".into(),
++            model: Some(StatusModel { provider: "opencode-go".into(), id: "glm".into() }),
++            turn_active: true,
++            cost_usd: Some(0.5),
++            context_percent: None,
++            pid: 1,
++        }
++    }
++
++    #[test]
++    fn sgr_parser_keeps_colors_and_drops_other_escapes() {
++        let line = parse_sgr_line("\x1b[1;31mred\x1b[0m plain \x1b[38;2;1;2;3mrgb\x1b[2K\x07");
++        assert_eq!(line.len(), 3);
++        assert_eq!(line[0].content, "red");
++        assert_eq!(line[0].style, Style::default().fg(Color::Indexed(1)).add_modifier(Modifier::BOLD));
++        assert_eq!(line[1], Span::raw(" plain "));
++        assert_eq!(line[2].content, "rgb");
++        assert_eq!(line[2].style.fg, Some(Color::Rgb(1, 2, 3)));
++        assert_eq!(parse_sgr_line("\x1b[38;5;208mx")[0].style.fg, Some(Color::Indexed(208)));
++    }
++
++    #[test]
++    fn output_skips_blank_lines_and_caps_rows() {
++        let rows = parse_output("a\n\n  \nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
++        assert_eq!(rows.len(), 8);
++        assert_eq!(rows[1][0].content, "b");
++    }
++
++    #[test]
++    fn payload_uses_camel_case() {
++        let json = serde_json::to_value(payload()).expect("json");
++        assert_eq!(json["sessionId"], "s1");
++        assert_eq!(json["turnActive"], true);
++        assert_eq!(json["model"]["provider"], "opencode-go");
++    }
++
++    #[test]
++    fn schedule_runs_once_in_flight_and_honours_intervals() {
++        let mut hook = StatusHook::new(config(&["true"]));
++        let t0 = Instant::now();
++        assert!(hook.due(false, t0));
++        assert!(!hook.due(false, t0), "one run in flight");
++        hook.finish(Some("x\n".into()));
++        assert!(!hook.due(false, t0 + Duration::from_secs(5)));
++        assert!(hook.due(true, t0 + Duration::from_secs(2)));
++        hook.finish(None);
++        assert_eq!(hook.rows().len(), 1, "a failed run keeps the last output");
++        hook.mark_dirty();
++        assert!(hook.due(false, t0 + Duration::from_secs(3)));
++        hook.finish(None);
++        hook.visible = false;
++        assert!(hook.rows().is_empty());
++        assert!(!hook.due(true, t0 + Duration::from_secs(60)));
++    }
++
++    #[tokio::test]
++    async fn run_pipes_payload_to_stdin() {
++        let out = run(&config(&["sh", "-c", "cat"]), &payload()).await.expect("output");
++        assert!(out.contains("\"sessionId\":\"s1\""));
++        assert_eq!(run(&config(&["sh", "-c", "exit 3"]), &payload()).await, None);
++        let mut slow = config(&["sh", "-c", "sleep 5"]);
++        slow.timeout = Duration::from_millis(100);
++        assert_eq!(run(&slow, &payload()).await, None);
++        assert_eq!(run(&config(&[]), &payload()).await, None);
++    }
++}
+Index: prime-agent-src/crates/pa-tui/src/view/frame.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/view/frame.rs
++++ prime-agent-src/crates/pa-tui/src/view/frame.rs
+@@ -158,6 +158,9 @@ impl AgentView {
+                         width,
+                     ));
+                 }
++                for row in &self.chrome.status_rows {
++                    dock.push(crate::width::truncate_line(row, width, ""));
++                }
+                 dock
+             }
+             None => self.render_dock(width),
+Index: prime-agent-src/crates/pa-tui/src/view/panels.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/view/panels.rs
++++ prime-agent-src/crates/pa-tui/src/view/panels.rs
+@@ -68,6 +68,9 @@ impl AgentView {
+                 width,
+             ));
+         }
++        for row in &self.chrome.status_rows {
++            lines.push(crate::width::truncate_line(row, width, ""));
++        }
+         lines
+     }
+ 
+Index: prime-agent-src/crates/pa-tui/src/view/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/view/tests.rs
++++ prime-agent-src/crates/pa-tui/src/view/tests.rs
+@@ -1656,3 +1656,13 @@ fn prompt_suggestion_renders_as_dim_plac
+     assert!(text.contains("run the tests  (tab)"));
+ }
+ 
++#[test]
++fn status_rows_render_under_the_editor() {
++    let mut v = view();
++    v.chrome.status_rows = crate::status_hook::parse_output("◆ $0.42\nplan 5h 40%\n");
++    let text: String = v.render_dock(80).iter().map(text_of).collect::<Vec<_>>().join("\n");
++    assert!(text.contains("◆ $0.42"));
++    assert!(text.contains("plan 5h 40%"));
++}
++
++
+Index: prime-agent-src/crates/pa-types/src/slash_commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/slash_commands.rs
++++ prime-agent-src/crates/pa-types/src/slash_commands.rs
+@@ -81,6 +81,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS:
+     BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+     BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "suggest", description: "Toggle ghost-text suggestions for your next prompt", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
++    BuiltinSlashCommand { name: "cost", description: "Toggle footer readout of session cost, limits, and system status", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "quit", description: "Quit Prime Agent", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+ ];
+ 

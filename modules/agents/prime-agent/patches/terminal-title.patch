@@ -1,0 +1,618 @@
+Index: prime-agent-src/crates/pa-tui/src/daemon_client.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/daemon_client.rs
++++ prime-agent-src/crates/pa-tui/src/daemon_client.rs
+@@ -282,6 +282,26 @@ pub struct DaemonClient {
+ }
+ 
+ impl DaemonClient {
++    #[cfg(test)]
++    pub(crate) fn mock_dummy() -> Self {
++        let (writer, _) = mpsc::unbounded_channel();
++        let (_dead_tx, reader_dead_rx) = tokio::sync::watch::channel(false);
++        Self {
++            socket_path: PathBuf::from("/mock.sock"),
++            client_id: "mock".into(),
++            protocol: DaemonProtocolInfo {
++                name: pa_types::daemon::DAEMON_PROTOCOL_NAME.into(),
++                version: pa_types::daemon::DAEMON_PROTOCOL_VERSION,
++            },
++            hello: Value::Null,
++            next_request_id: Arc::new(AtomicU64::new(1)),
++            shared: Arc::new(Shared::default()),
++            writer,
++            direct: std::sync::Arc::new(crate::direct_transport::DirectState::default()),
++            reader_dead_rx,
++        }
++    }
++
+     /// Connect to `socket_path`, complete the hello handshake, and return the
+     /// client plus the event receiver (the receiver must be polled or the
+     /// reader task stalls once the channel's buffer fills).
+Index: prime-agent-src/crates/pa-tui/src/exit_restore.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/exit_restore.rs
++++ prime-agent-src/crates/pa-tui/src/exit_restore.rs
+@@ -73,6 +73,7 @@ pub(crate) fn restore_terminal() {
+     if out.is_terminal() {
+         crate::enhanced_keys::drain_for_exit(&mut out);
+         let _ = crate::mouse_tracking::disable(&mut out);
++        let _ = crate::terminal_title::restore(&mut out);
+         let _ = crate::enhanced_keys::disable(&mut out);
+         // The unconditional leave: the restore must not trust the ownership flag
+         // — a desynced flag would keep the alt buffer up past the process death.
+@@ -109,6 +110,7 @@ pub(crate) fn terminal_release_tail(out:
+     // inside the alt screen, never lands on the relay's stack (see
+     // enhanced_keys::pop_stale_levels).
+     crate::enhanced_keys::pop_stale_levels(out);
++    let _ = crate::terminal_title::restore(out);
+     let _ = out.write_all(SYNC_OUTPUT_OFF);
+     let _ = out.write_all(SGR_RESET);
+     let _ = crossterm::execute!(out, crossterm::cursor::Show);
+Index: prime-agent-src/crates/pa-tui/src/interactive/run.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/interactive/run.rs
++++ prime-agent-src/crates/pa-tui/src/interactive/run.rs
+@@ -821,6 +821,8 @@ async fn run_interactive_surface(
+     // worker); it re-attaches through the supervisor so the respawned worker serves the session
+     // again.
+     let mut session_reconnect: Option<SessionReconnect> = None;
++    let mut title_state = crate::terminal_title::TitleConfig::from_env()
++        .map(|config| crate::terminal_title::TitleState::new(config, Instant::now()));
+ 
+     'run: while running {
+         if enhanced_keys_pending {
+@@ -1014,6 +1016,9 @@ async fn run_interactive_surface(
+                                     let _ = renderer.resume();
+                                 }
+                             }
++                            if let Some(title) = title_state.as_mut() {
++                                title.invalidate();
++                            }
+                         }
+                         // Hand the terminal to the editor, then resume. The input reader would
+                         // steal the editor's keys, so it stops (flag + join) and respawns after the
+@@ -1073,6 +1078,9 @@ async fn run_interactive_surface(
+                                 }
+                                 spawn_session_reader(ui_tx, exit_guard);
+                                 session.apply_external_editor_outcome(outcome, &mut view);
++                                if let Some(title) = title_state.as_mut() {
++                                    title.invalidate();
++                                }
+                             }
+                         }
+                         // The `/mcp` view resolved to an auth request: mount the inline auth panel
+@@ -1936,6 +1944,23 @@ async fn run_interactive_surface(
+             last_pulse_phase = usize::MAX;
+         }
+ 
++        if let Some(title) = title_state.as_mut() {
++            let working = session.turn_active || view.compaction.is_some();
++            let headline = session.terminal_title_headline();
++            if let Some(next) = title.next(working, &headline, Instant::now()) {
++                if renderer.is_terminal() {
++                    let _ = crate::terminal_title::write(&mut std::io::stdout(), &next);
++                }
++            }
++            // While working, wake at the next 250 ms frame.
++            if working {
++                let next_frame = Instant::now() + Duration::from_millis(250);
++                if render_deadline.is_none_or(|deadline| deadline > next_frame) {
++                    render_deadline = Some(next_frame);
++                }
++            }
++        }
++
+         // The Ctrl+C exit hint expires on a timer: once the window passed, the hint row repaints
+         // away — the expiry's wake arm lives in the pre-select inventory, and the same
+         // iteration's frame gate repaints it away.
+Index: prime-agent-src/crates/pa-tui/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/lib.rs
++++ prime-agent-src/crates/pa-tui/src/lib.rs
+@@ -105,6 +105,7 @@ pub mod snapshot;
+ pub mod subagents;
+ mod suspend;
+ mod terminal_image;
++pub(crate) mod terminal_title;
+ pub mod theme;
+ pub mod toast;
+ pub mod tool_card;
+Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui.rs
+@@ -139,6 +139,8 @@ pub(crate) struct SessionUi {
+     /// nothing — its collapsed empty/zero key could alias across attaches of the same entry count.
+     pub(crate) attach_cursor_present: bool,
+     session_name: Option<String>,
++    /// The first user prompt of the attached session (terminal title fallback).
++    pub(crate) first_user_text: Option<String>,
+     cwd: PathBuf,
+     session_dir: Option<PathBuf>,
+     script_path: Option<PathBuf>,
+@@ -482,6 +484,14 @@ impl SessionUi {
+             .unwrap_or_else(|| crate::chrome::display_name(&self.cwd.to_string_lossy()))
+     }
+ 
++    pub(crate) fn terminal_title_headline(&self) -> String {
++        crate::terminal_title::headline(
++            self.session_name.as_deref(),
++            self.first_user_text.as_deref(),
++            &self.cwd,
++        )
++    }
++
+     pub(crate) async fn current_model_provider(&mut self) -> Option<String> {
+         let state = self
+             .bounded_request(
+Index: prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/apply.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
+@@ -379,6 +379,9 @@ impl SessionUi {
+                 self.start_loader(view);
+             }
+             TurnUpdate::UserMessage(text) => {
++                if self.first_user_text.is_none() {
++                    self.first_user_text = Some(text.clone());
++                }
+                 match crate::custom_message::skill_invocation_entries(&text) {
+                     Some(entries) => {
+                         for entry in entries {
+@@ -944,3 +947,25 @@ impl SessionUi {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::theme::{ColorMode, Theme};
++    use crate::view::AgentView;
++    use std::path::PathBuf;
++
++    fn test_session() -> (SessionUi, AgentView) {
++        let session = SessionUi::test_new(PathBuf::from("/test/repo"));
++        let view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
++        (session, view)
++    }
++
++    #[test]
++    fn first_user_message_feeds_the_title_headline() {
++        let (mut session, mut view) = test_session();
++        session.apply_update(TurnUpdate::UserMessage("fix the flaky test".into()), &mut view);
++        session.apply_update(TurnUpdate::UserMessage("second prompt".into()), &mut view);
++        assert_eq!(session.terminal_title_headline(), "fix the flaky test");
++    }
++}
+Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/lifecycle.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
+@@ -61,6 +61,7 @@ impl SessionUi {
+             last_event_sequence: 0,
+             attach_cursor_present: false,
+             session_name: None,
++            first_user_text: None,
+             cwd: options.cwd.clone(),
+             session_dir: options.session_dir.clone(),
+             script_path: options.script_path.clone(),
+@@ -216,6 +217,176 @@ impl SessionUi {
+         Ok(session)
+     }
+ 
++    #[cfg(test)]
++    pub(crate) fn test_new(cwd: std::path::PathBuf) -> Self {
++        let (catalog_updates, _) = mpsc::unbounded_channel();
++        let (orders_tx, _orders_rx) = mpsc::unbounded_channel::<PromptOrder>();
++        let (reload_notes, _) = mpsc::unbounded_channel();
++        let (share_notes, _) = mpsc::unbounded_channel();
++        let (traces_upload_notes, _) = mpsc::unbounded_channel();
++        let (auth_panel_notes, _) = mpsc::unbounded_channel();
++        let (notes, _) = mpsc::unbounded_channel();
++        let (compaction_abort_notes, _) = mpsc::unbounded_channel();
++        let (update_notes, _) = mpsc::unbounded_channel();
++        let (cmd_tx, _) = mpsc::unbounded_channel();
++        let (hb_tx, _) = mpsc::unbounded_channel();
++        let (bash_tx, _) = mpsc::unbounded_channel();
++        let (factory_tx, _) = mpsc::unbounded_channel();
++
++        Self {
++            client: crate::daemon_client::DaemonClient::mock_dummy(),
++            active_session_id: String::new(),
++            session_id: String::new(),
++            attach_event_generation: String::new(),
++            attach_event_sequence: 0,
++            last_event_sequence: 0,
++            attach_cursor_present: false,
++            session_name: None,
++            first_user_text: None,
++            cwd,
++            session_dir: None,
++            script_path: None,
++            model_selection: crate::interactive::ModelSelection::default(),
++            models: None,
++            model_catalog: Vec::new(),
++            model_configured_providers: std::collections::HashSet::default(),
++            model_recent_models: Vec::new(),
++            default_thinking_level: None,
++            models_fetched_at: None,
++            catalog_updates,
++            heartbeat_updates: hb_tx,
++            telemetry_disabled: Some(true),
++            code_block_indent: String::new(),
++            tree_filter_mode: crate::tree_list::FilterMode::All,
++            branch_summary_skip_prompt: false,
++            last_status_index: None,
++            show_images: false,
++            fullscreen_mouse: false,
++            service_tier: None,
++            speed_display_enabled: false,
++            speed_stats: None,
++            client_settings: None,
++            anthropic_subscription_warning_shown: false,
++            anthropic_warning_mark_pending: std::sync::Arc::default(),
++            active_side_question_id: None,
++            side_question_counter: 0,
++            share: None,
++            reload: None,
++            reload_notes,
++            share_notes,
++            trace_upload: None,
++            traces_upload_notes,
++            pending_traces_login: None,
++            traces_login_run: None,
++            traces_login_gen: 0,
++            pasted_images: std::collections::BTreeMap::default(),
++            next_image_marker_id: 1,
++            pending_snapshot: None,
++            trim_after_frame: false,
++            pending_model: None,
++            pending_model_provider: None,
++            pending_thinking_suffix: None,
++            pending_queue: None,
++            queue_selection: crate::queued::QueueSelection::default(),
++            context: None,
++            list_rows: Vec::new(),
++            turn_active: false,
++            turn_ends_seen: 0,
++            last_prompt_turn_end: 0,
++            steering_mode: "all".to_string(),
++            streaming_index: None,
++            working_tokens: LoaderTokenTracker::default(),
++            turn_error_shown: false,
++            pending_tools: std::collections::HashSet::default(),
++            aborted_tools: std::collections::HashSet::default(),
++            last_assistant_text: None,
++            osc_sink: crate::clipboard::OscSink::Stdout,
++            pending_confirm: None,
++            traces: None,
++            provider_auth: None,
++            pending_model_sign_in: None,
++            auth_panel_notes,
++            auth_panel_cancel: None,
++            update_commands: None,
++            update_notes,
++            update_in_flight: false,
++            exit_requested: false,
++            open_agents_view: false,
++            scoped_agents_view: None,
++            roster: Vec::new(),
++            heartbeat_catalog: Vec::new(),
++            heartbeat_refresh_in_flight: false,
++            heartbeat_refresh_queued: false,
++            heartbeat_refresh_epoch: 0,
++            command_updates: cmd_tx,
++            command_refresh_epoch: 0,
++            skill_commands_cache: Vec::new(),
++            bash_activities: serde_json::json!({"activities": []}),
++            bash_list_epoch: 0,
++            bash_updates: bash_tx,
++            factory_graph: serde_json::json!({"runs": []}),
++            factory_view_session: None,
++            factory_refresh_in_flight: false,
++            factory_refresh_queued: false,
++            factory_list_epoch: 0,
++            factory_updates: factory_tx,
++            factory_selected_run: None,
++            subagents_focused: false,
++            activity_group: crate::chrome::ActivityGroup::Subagents,
++            subagent_counts: crate::subagents::SubagentCounts::default(),
++            session_file: None,
++            pending_selection: None,
++            return_to_agents_view: false,
++            client_auth: None,
++            keybindings: crate::keybindings::KeybindingsManager::new(),
++            prompt_stash: std::sync::Arc::default(),
++            stash_session_id: String::new(),
++            dirty: true,
++            ctrl_c_hint_until: None,
++            goal_view: GoalView::new(),
++            notes,
++            compaction_abort_notes,
++            prompt_orders: orders_tx,
++            input_submission_generation: 0,
++            prompt_in_flight: 0,
++            transcript_stale: false,
++            telemetry: None,
++            scroll_adoption_emitted: false,
++            exit_reason: "daemon_closed",
++            reconnect: None,
++            daemon_closing_notice: None,
++            transport_lost: None,
++            pending_rebind: None,
++            reconnection_failed: None,
++            exit_guard: crate::exit_guard::ExitGuard::new(),
++            escape_repeat_action: None,
++            escape_repeat_until: None,
++            escape_tree_shortcut_spent: false,
++            user_bash_running: false,
++            user_bash_card: None,
++            user_bash_started_at: None,
++            user_bash_counter: 0,
++            resync_bash: None,
++            loader_anchor_ms: None,
++            side_bash: None,
++            side_bash_discarded: None,
++            side_bash_counter: 0,
++            suspend_requested: false,
++            external_editor_request: None,
++            pending_mcp_auth: None,
++            picker_restored_draft: false,
++            suspend_adoption_emitted: false,
++            selection_auto_scroll: None,
++            selection_adoption_emitted: false,
++            copies: Vec::new(),
++            pressed_hyperlink: None,
++            left_mouse_dragged: false,
++            opened_urls: Vec::new(),
++            pressed_click: None,
++            click_adoption_emitted: false,
++        }
++    }
++
+     /// Spec §10.2-§10.5: reattach after a restart — the fresh client replaces the dead one, the
+     /// attach goes by DURABLE session id. `kind` names the driver: the update restart paints its
+     /// §10.5 banner, a lost or announced-shutdown window reports the restart version-honestly.
+@@ -425,6 +596,10 @@ impl SessionUi {
+         // stop must not route into a stale shutdown recovery's reconnect hang.
+         self.daemon_closing_notice = None;
+         self.session_name.clone_from(&reconstructed.session_name);
++        self.first_user_text = reconstructed.chat.iter().find_map(|entry| match entry {
++            ChatEntry::User { text } => Some(text.clone()),
++            _ => None,
++        });
+         self.service_tier.clone_from(&reconstructed.service_tier);
+         self.session_file = attach
+             .snapshot
+Index: prime-agent-src/crates/pa-tui/src/terminal_title.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-tui/src/terminal_title.rs
+@@ -0,0 +1,225 @@
++//! Opt-in terminal window title: `<glyph> <session headline>`. Enabled only when
++//! `PRIME_AGENT_TITLE_IDLE_GLYPH` or `PRIME_AGENT_TITLE_WORKING_GLYPHS` is set.
++//! The first write pushes the title stack (XTWINOPS 22) and exit pops it (23).
++
++use std::io::Write;
++use std::path::Path;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::time::{Duration, Instant};
++
++pub(crate) const IDLE_ENV: &str = "PRIME_AGENT_TITLE_IDLE_GLYPH";
++pub(crate) const WORKING_ENV: &str = "PRIME_AGENT_TITLE_WORKING_GLYPHS";
++const DEFAULT_IDLE: &str = "❄";
++const DEFAULT_WORKING: [&str; 4] = ["❅", "❅", "❆", "❆"];
++const FRAME: Duration = Duration::from_millis(250);
++const MAX_HEADLINE_CHARS: usize = 80;
++const APP_TITLE: &str = "Prime Agent";
++
++static PUSHED: AtomicBool = AtomicBool::new(false);
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct TitleConfig {
++    pub idle: String,
++    pub working: Vec<String>,
++}
++
++impl TitleConfig {
++    pub(crate) fn from_env() -> Option<Self> {
++        Self::from_values(
++            std::env::var(IDLE_ENV).ok(),
++            std::env::var(WORKING_ENV).ok(),
++        )
++    }
++
++    /// `None` when both values are absent; an empty value falls back to the default glyphs.
++    #[allow(clippy::needless_pass_by_value)]
++    pub(crate) fn from_values(idle: Option<String>, working: Option<String>) -> Option<Self> {
++        if idle.is_none() && working.is_none() {
++            return None;
++        }
++        let idle = idle
++            .map(|value| value.trim().to_owned())
++            .filter(|value| !value.is_empty())
++            .unwrap_or_else(|| DEFAULT_IDLE.to_owned());
++        let working: Vec<String> = working
++            .as_deref()
++            .unwrap_or_default()
++            .split_whitespace()
++            .map(str::to_owned)
++            .collect();
++        let working = if working.is_empty() {
++            DEFAULT_WORKING.iter().map(|g| (*g).to_owned()).collect()
++        } else {
++            working
++        };
++        Some(Self { idle, working })
++    }
++
++    pub(crate) fn glyph(&self, working: bool, frame: usize) -> &str {
++        if working {
++            &self.working[frame % self.working.len()]
++        } else {
++            &self.idle
++        }
++    }
++}
++
++/// Session name, then the first user prompt, then `Prime Agent - <cwd basename>`.
++pub(crate) fn headline(session_name: Option<&str>, first_user_text: Option<&str>, cwd: &Path) -> String {
++    for candidate in [session_name, first_user_text].into_iter().flatten() {
++        let clean = sanitize(candidate);
++        if !clean.is_empty() {
++            return truncate(&clean);
++        }
++    }
++    match cwd.file_name().and_then(|name| name.to_str()) {
++        Some(base) if !base.is_empty() => format!("{APP_TITLE} - {}", sanitize(base)),
++        _ => APP_TITLE.to_owned(),
++    }
++}
++
++/// Collapse whitespace and drop control characters so a prompt cannot end the OSC early.
++fn sanitize(text: &str) -> String {
++    text.split(|c: char| c.is_whitespace() || c.is_control())
++        .filter(|part| !part.is_empty())
++        .collect::<Vec<_>>()
++        .join(" ")
++}
++
++fn truncate(text: &str) -> String {
++    if text.chars().count() <= MAX_HEADLINE_CHARS {
++        return text.to_owned();
++    }
++    let mut out: String = text.chars().take(MAX_HEADLINE_CHARS - 1).collect();
++    out.push('…');
++    out
++}
++
++/// Per-surface title tracker: returns a title only when it differs from the last one written.
++#[derive(Debug)]
++pub(crate) struct TitleState {
++    config: TitleConfig,
++    started: Instant,
++    last: Option<String>,
++}
++
++impl TitleState {
++    pub(crate) fn new(config: TitleConfig, now: Instant) -> Self {
++        Self { config, started: now, last: None }
++    }
++
++    pub(crate) fn next(&mut self, working: bool, headline: &str, now: Instant) -> Option<String> {
++        let frame = (now.saturating_duration_since(self.started).as_millis() / FRAME.as_millis()) as usize;
++        let title = format!("{} {headline}", self.config.glyph(working, frame));
++        if self.last.as_deref() == Some(title.as_str()) && PUSHED.load(Ordering::SeqCst) {
++            return None;
++        }
++        self.last = Some(title.clone());
++        Some(title)
++    }
++
++    /// Forget the last title so the next tick rewrites it (after suspend or an external editor).
++    pub(crate) fn invalidate(&mut self) {
++        self.last = None;
++    }
++}
++
++pub(crate) fn write(out: &mut impl Write, title: &str) -> std::io::Result<()> {
++    if !PUSHED.swap(true, Ordering::SeqCst) {
++        out.write_all(b"\x1b[22;0t")?;
++    }
++    write!(out, "\x1b]0;{title}\x07")?;
++    out.flush()
++}
++
++/// Pop the title stack once; a no-op when nothing was pushed.
++pub(crate) fn restore(out: &mut impl Write) -> std::io::Result<()> {
++    if PUSHED.swap(false, Ordering::SeqCst) {
++        out.write_all(b"\x1b[23;0t")?;
++        out.flush()?;
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++pub(crate) static STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::path::PathBuf;
++
++    fn lock() -> std::sync::MutexGuard<'static, ()> {
++        match STATE_TEST_LOCK.lock() {
++            Ok(guard) => guard,
++            Err(poisoned) => poisoned.into_inner(),
++        }
++    }
++
++    #[test]
++    fn config_is_opt_in() {
++        assert_eq!(TitleConfig::from_values(None, None), None);
++        let config = TitleConfig::from_values(Some(String::new()), None).expect("enabled");
++        assert_eq!(config.idle, "❄");
++        assert_eq!(config.working, vec!["❅", "❅", "❆", "❆"]);
++        let config = TitleConfig::from_values(Some("*".into()), Some(" a  b ".into())).expect("enabled");
++        assert_eq!(config.idle, "*");
++        assert_eq!(config.working, vec!["a", "b"]);
++    }
++
++    #[test]
++    fn glyph_cycles_while_working() {
++        let config = TitleConfig::from_values(Some("i".into()), Some("a b".into())).expect("enabled");
++        assert_eq!(config.glyph(false, 7), "i");
++        assert_eq!(config.glyph(true, 0), "a");
++        assert_eq!(config.glyph(true, 3), "b");
++    }
++
++    #[test]
++    fn headline_prefers_name_then_prompt_then_cwd() {
++        let cwd = PathBuf::from("/home/u/proj");
++        assert_eq!(headline(Some("fix  build"), Some("hi"), &cwd), "fix build");
++        assert_eq!(headline(Some("  "), Some("run\nthe\ttests"), &cwd), "run the tests");
++        assert_eq!(headline(None, None, &cwd), "Prime Agent - proj");
++        assert_eq!(headline(None, None, Path::new("/")), "Prime Agent");
++    }
++
++    #[test]
++    fn headline_strips_control_bytes_and_truncates() {
++        let cwd = PathBuf::from("/x");
++        assert_eq!(headline(Some("a\x07b\x1b]0;evil"), None, &cwd), "a b ]0;evil");
++        let long = "w".repeat(200);
++        let out = headline(Some(&long), None, &cwd);
++        assert_eq!(out.chars().count(), 80);
++        assert!(out.ends_with('…'));
++    }
++
++    #[test]
++    fn state_dedupes_and_pushes_once() {
++        let _lock = lock();
++        PUSHED.store(false, Ordering::SeqCst);
++        let config = TitleConfig::from_values(Some("i".into()), Some("a b".into())).expect("enabled");
++        let start = Instant::now();
++        let mut state = TitleState::new(config, start);
++        let mut out = Vec::new();
++
++        let title = state.next(false, "h", start).expect("first title");
++        write(&mut out, &title).expect("write");
++        assert_eq!(out, b"\x1b[22;0t\x1b]0;i h\x07");
++        assert_eq!(state.next(false, "h", start + Duration::from_millis(900)), None);
++
++        out.clear();
++        let working = state.next(true, "h", start + Duration::from_millis(250)).expect("working");
++        assert_eq!(working, "b h");
++        write(&mut out, &working).expect("write");
++        assert_eq!(out, b"\x1b]0;b h\x07");
++
++        state.invalidate();
++        assert!(state.next(true, "h", start + Duration::from_millis(250)).is_some());
++
++        out.clear();
++        restore(&mut out).expect("restore");
++        restore(&mut out).expect("second restore is a no-op");
++        assert_eq!(out, b"\x1b[23;0t");
++    }
++}

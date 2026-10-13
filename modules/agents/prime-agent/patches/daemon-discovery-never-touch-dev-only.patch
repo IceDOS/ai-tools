@@ -1,0 +1,46 @@
+Index: prime-agent-src/crates/pa-cli/src/daemon_discovery/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-cli/src/daemon_discovery/mod.rs
++++ prime-agent-src/crates/pa-cli/src/daemon_discovery/mod.rs
+@@ -2,7 +2,7 @@
+ //! it for identity and session count — the OS census of listening sockets
+ //! plus a sweep of the default socket dir (orphaned files included).
+ //! Containment is operator-mandated: everything is scoped to one
+-//! [`DaemonStateRoot`], and [`NEVER_TOUCH_SOCKET_DIRS`] is checked always.
++//! [`DaemonStateRoot`], and [`NEVER_TOUCH_SOCKET_DIRS`] is checked in debug builds.
+ 
+ use std::collections::BTreeSet;
+ use std::path::{Path, PathBuf};
+@@ -55,9 +55,15 @@ pub(crate) const NEVER_TOUCH_SOCKET_DIRS
+ ];
+ 
+ pub(crate) fn is_never_touch(path: &Path) -> bool {
+-    NEVER_TOUCH_SOCKET_DIRS
+-        .iter()
+-        .any(|dir| path.starts_with(Path::new(dir)))
++    // Debug builds (tests) only: a release build must find a uid-1000 user's own daemon.
++    never_touch_when(cfg!(debug_assertions), path)
++}
++
++fn never_touch_when(guarded: bool, path: &Path) -> bool {
++    guarded
++        && NEVER_TOUCH_SOCKET_DIRS
++            .iter()
++            .any(|dir| path.starts_with(Path::new(dir)))
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+@@ -586,6 +592,13 @@ mod tests {
+     }
+ 
+     #[test]
++    fn release_builds_see_the_product_default_socket_dir() {
++        let socket = Path::new("/tmp/prime-agent-1000/daemon.sock");
++        assert!(never_touch_when(true, socket));
++        assert!(!never_touch_when(false, socket));
++    }
++
++    #[test]
+     fn a_scan_rooted_on_a_never_touch_dir_surfaces_no_listeners() {
+         // The ambient mission daemon's workers listen under these dirs, owned
+         // by real `prime-agent` processes: root matching alone would find them.

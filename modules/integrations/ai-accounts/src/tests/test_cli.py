@@ -70,13 +70,21 @@ class CliTest(unittest.TestCase):
         self.assertIn("claude=work", env["AI_ACCOUNT_TAGS"])
         self.assertEqual(env["ALIMIT_DB"], str(Path(os.environ["XDG_DATA_HOME"]) / "alimit/usage.db"))
 
-    def test_build_env_composes_ollama_for_prime_agent(self):
+    def test_build_env_composes_ollama_for_opencode(self):
+        self.login("ollama", "home", "key", "sk-h")
+        state.set_sticky("ollama", "home")
+        acct = config.Account("opencode", "default")
+        env = cli.build_env(self.cfg, "opencode", acct, adapters.Launch({}, []), dict(os.environ))
+        self.assertEqual(env["OLLAMA_API_KEY"], "sk-h")
+        self.assertIn("ollama=home", env["AI_ACCOUNT_TAGS"])
+
+    def test_build_env_leaves_ollama_out_of_prime_agent(self):
         self.login("ollama", "home", "key", "sk-h")
         state.set_sticky("ollama", "home")
         acct = config.Account("prime-agent", "default")
-        env = cli.build_env(self.cfg, "prime-agent", acct, adapters.Launch({}, []), dict(os.environ))
-        self.assertEqual(env["OLLAMA_API_KEY"], "sk-h")
-        self.assertIn("ollama=home", env["AI_ACCOUNT_TAGS"])
+        env = cli.build_env(self.cfg, "prime-agent", acct, adapters.Launch({}, []), {})
+        self.assertNotIn("OLLAMA_API_KEY", env)
+        self.assertNotIn("ollama=", env["AI_ACCOUNT_TAGS"])
 
     def test_exec_without_accounts_passes_through(self):
         with mock.patch.object(cli.os, "execvp") as ex:
@@ -100,17 +108,16 @@ class CliTest(unittest.TestCase):
         self.assertIn("claude/work is not logged in; sign in when the agent asks", err.getvalue())
 
     def test_exec_tty_prompts_for_the_key_a_dependent_ollama_account_needs(self):
-        # prime-agent carries an ollama tag, so a keyless ollama account must ask
+        # opencode carries an ollama tag, so a keyless ollama account must ask
         # here instead of failing once the agent is already up.
-        self.cfg.accounts["prime-agent"] = {"work": config.Account("prime-agent", "work")}
-        self.cfg.real_dirs["prime-agent"] = str(Path(self.tmp.name) / "real")
-        self.login("prime-agent", "work", "auth.json")
+        self.cfg.accounts["opencode"] = {"work": config.Account("opencode", "work")}
+        self.login("opencode", "work", "opencode/auth.json")
         state.set_sticky("ollama", "home")
         with mock.patch.object(cli.config, "load", return_value=self.cfg), \
              mock.patch.object(cli.sys, "stdin", TtyInput()), \
              mock.patch.object(cli.getpass, "getpass", return_value="sk-home") as ask, \
              mock.patch.object(cli.os, "execvpe") as ex:
-            cli.main(["exec", "prime-agent", "--account", "work", "--", "/x/prime-agent"])
+            cli.main(["exec", "opencode", "--account", "work", "--", "/x/opencode"])
         ask.assert_called_once()
         ex.assert_called_once()
         self.assertEqual(ex.call_args.args[2]["OLLAMA_API_KEY"], "sk-home")
@@ -120,14 +127,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual(key.stat().st_mode & 0o777, 0o600)
 
     def test_exec_without_tty_still_exits_3_when_the_ollama_key_is_missing(self):
-        self.cfg.accounts["prime-agent"] = {"work": config.Account("prime-agent", "work")}
-        self.cfg.real_dirs["prime-agent"] = str(Path(self.tmp.name) / "real")
-        self.login("prime-agent", "work", "auth.json")
+        self.cfg.accounts["opencode"] = {"work": config.Account("opencode", "work")}
+        self.login("opencode", "work", "opencode/auth.json")
         state.set_sticky("ollama", "home")
         with mock.patch.object(cli.config, "load", return_value=self.cfg), \
              mock.patch.object(cli.sys, "stdin", io.StringIO()):
             self.assertEqual(
-                cli.main(["exec", "prime-agent", "--account", "work", "--", "/x/prime-agent"]), 3)
+                cli.main(["exec", "opencode", "--account", "work", "--", "/x/opencode"]), 3)
 
     def test_exec_logged_out_tty_prompts_for_the_ollama_key(self):
         with mock.patch.object(cli.sys, "stdin", TtyInput()), \

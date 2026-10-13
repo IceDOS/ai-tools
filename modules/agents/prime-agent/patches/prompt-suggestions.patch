@@ -1,0 +1,749 @@
+Index: prime-agent-src/crates/pa-cli/src/client_settings.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-cli/src/client_settings.rs
++++ prime-agent-src/crates/pa-cli/src/client_settings.rs
+@@ -116,6 +116,29 @@ impl ClientSettings for CliClientSetting
+     fn speed_display(&self) -> bool {
+         self.manager().get_speed()
+     }
++
++    fn prompt_suggestions(&self) -> pa_tui::prompt_suggest::PromptSuggestConfig {
++        let manager = self.manager();
++        let settings = manager.settings();
++        let value = settings.extra.get("promptSuggestions");
++        pa_tui::prompt_suggest::PromptSuggestConfig {
++            enabled: value
++                .and_then(|v| v.get("enabled"))
++                .and_then(serde_json::Value::as_bool)
++                .unwrap_or(false),
++            model: value
++                .and_then(|v| v.get("model"))
++                .and_then(serde_json::Value::as_str)
++                .filter(|s| !s.trim().is_empty())
++                .map(str::to_owned),
++        }
++    }
++
++    fn prompt_suggester(&self) -> Option<std::sync::Arc<dyn pa_tui::prompt_suggest::PromptSuggester>> {
++        Some(std::sync::Arc::new(crate::prompt_suggest::CliPromptSuggester {
++            agent_dir: self.agent_dir.clone(),
++        }))
++    }
+     setting!(
+         enable_skill_commands,
+         set_enable_skill_commands,
+@@ -354,4 +377,23 @@ mod tests {
+         // The sibling key in the same block still reads.
+         assert!(!settings.manager().get_fullscreen_mouse());
+     }
++
++    fn cli_settings_with(json: &str) -> std::sync::Arc<CliClientSettings> {
++        let dir = tempfile::TempDir::new().expect("temp dir");
++        let path = dir.path().to_path_buf();
++        std::mem::forget(dir);
++        let agent_dir = path.join("agent");
++        std::fs::create_dir_all(&agent_dir).expect("agent dir");
++        std::fs::write(agent_dir.join("settings.json"), json).expect("settings file");
++        CliClientSettings::new(path, agent_dir)
++    }
++
++    #[test]
++    fn prompt_suggestions_reads_the_extra_key() {
++        let settings = cli_settings_with(r#"{"promptSuggestions":{"enabled":true,"model":"opencode-go/x"}}"#);
++        let config = settings.prompt_suggestions();
++        assert!(config.enabled);
++        assert_eq!(config.model.as_deref(), Some("opencode-go/x"));
++        assert!(!cli_settings_with("{}").prompt_suggestions().enabled);
++    }
+ }
+Index: prime-agent-src/crates/pa-cli/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-cli/src/lib.rs
++++ prime-agent-src/crates/pa-cli/src/lib.rs
+@@ -43,6 +43,7 @@ pub(crate) mod mode;
+ pub(crate) mod package_command;
+ pub(crate) mod prime_inference_login;
+ pub(crate) mod prompt_command;
++pub(crate) mod prompt_suggest;
+ pub(crate) mod provider_login;
+ pub(crate) mod public_command;
+ pub(crate) mod self_update;
+Index: prime-agent-src/crates/pa-cli/src/prompt_suggest.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-cli/src/prompt_suggest.rs
+@@ -0,0 +1,93 @@
++//! pa-cli side of next-prompt suggestions: resolve the model and run one short completion.
++
++use pa_tui::prompt_suggest::{PromptSuggester, SuggestFuture, SuggestRequest, SYSTEM_PROMPT};
++use std::path::PathBuf;
++use std::time::Duration;
++
++const MAX_TOKENS: u64 = 1024;
++const TIMEOUT: Duration = Duration::from_secs(20);
++
++pub(crate) struct CliPromptSuggester {
++    pub agent_dir: PathBuf,
++}
++
++impl PromptSuggester for CliPromptSuggester {
++    fn suggest(&self, request: SuggestRequest) -> SuggestFuture {
++        let agent_dir = self.agent_dir.clone();
++        Box::pin(async move {
++            let resolved = tokio::task::spawn_blocking(move || resolve(&agent_dir, &request))
++                .await
++                .ok()??;
++            let (model, api_key, headers, prompt) = resolved;
++            let context = pa_types::ai::Context {
++                system_prompt: Some(SYSTEM_PROMPT.to_owned()),
++                messages: vec![pa_types::ai::Message::User(pa_types::ai::UserMessage {
++                    content: pa_types::ai::UserContent::Text(prompt),
++                    timestamp: now_ms(),
++                    rest: serde_json::Map::default(),
++                })],
++                tools: None,
++            };
++            let mut options = pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
++                max_tokens: Some(MAX_TOKENS),
++                api_key,
++                headers: headers.map(|h| h.into_iter().collect()),
++                ..Default::default()
++            });
++            if model.reasoning {
++                options.reasoning = Some(pa_types::ai::ModelThinkingLevel::Minimal);
++            }
++            let call = pa_ai::complete_simple(&model, &context, Some(options));
++            let response = tokio::time::timeout(TIMEOUT, call).await.ok()?.ok()?;
++            if response.stop_reason != pa_types::ai::StopReason::Stop {
++                return None;
++            }
++            let text = response
++                .content
++                .iter()
++                .filter_map(|block| match block {
++                    pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.as_str()),
++                    _ => None,
++                })
++                .collect::<Vec<_>>()
++                .join("\n");
++            Some(text)
++        })
++    }
++}
++
++type Resolved = (
++    pa_types::ai::Model,
++    Option<String>,
++    Option<std::collections::BTreeMap<String, String>>,
++    String,
++);
++
++/// `provider/id` override first, then the session model; `None` when neither resolves or has auth.
++fn resolve(agent_dir: &std::path::Path, request: &SuggestRequest) -> Option<Resolved> {
++    let auth = pa_core::auth::AuthStorage::create(agent_dir);
++    let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
++    registry.load_private_authorization_from_cache();
++    let wanted = request
++        .model
++        .as_deref()
++        .and_then(|spec| spec.split_once('/'))
++        .map(|(provider, id)| (provider.to_owned(), id.to_owned()))
++        .or_else(|| request.session_model.clone())?;
++    let model = registry
++        .get_all()
++        .iter()
++        .find(|m| m.provider == wanted.0 && m.id == wanted.1)?
++        .clone();
++    let auth = registry.get_api_key_and_headers(&model, model.headers.as_ref());
++    if !auth.ok {
++        return None;
++    }
++    Some((model, auth.api_key, auth.headers, request.prompt.clone()))
++}
++
++fn now_ms() -> u64 {
++    std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map_or(0, |d| d.as_millis() as u64)
++}
+Index: prime-agent-src/crates/pa-tui/src/client_settings.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/client_settings.rs
++++ prime-agent-src/crates/pa-tui/src/client_settings.rs
+@@ -42,6 +42,14 @@ pub trait ClientSettings: Send + Sync {
+     fn speed_display(&self) -> bool {
+         false
+     }
++    /// `promptSuggestions` (top-level settings key): ghost-text next-prompt suggestions.
++    fn prompt_suggestions(&self) -> crate::prompt_suggest::PromptSuggestConfig {
++        crate::prompt_suggest::PromptSuggestConfig { enabled: false, model: None }
++    }
++    /// The model call behind suggestions; `None` disables the feature.
++    fn prompt_suggester(&self) -> Option<std::sync::Arc<dyn crate::prompt_suggest::PromptSuggester>> {
++        None
++    }
+     /// `images.autoResize` (TS default true).
+     fn image_auto_resize(&self) -> bool;
+     /// Persists `images.autoResize` to the global scope.
+Index: prime-agent-src/crates/pa-tui/src/interactive/run.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/interactive/run.rs
++++ prime-agent-src/crates/pa-tui/src/interactive/run.rs
+@@ -208,6 +208,8 @@ async fn run_interactive_surface(
+     // autocomplete provider.
+     let (commands_tx, mut commands_rx) =
+         mpsc::unbounded_channel::<crate::session_ui::CommandCatalogUpdate>();
++    let (suggest_tx, mut suggest_rx) =
++        mpsc::unbounded_channel::<crate::prompt_suggest::SuggestNote>();
+     // The double-Ctrl+C force-quit guard: the terminal reader observes the pair while this loop is
+     // wedged in a daemon request; a std-thread watchdog enforces the exit deadline without the
+     // runtime.
+@@ -649,6 +651,7 @@ async fn run_interactive_surface(
+         }
+     };
+     session.exit_guard = exit_guard.clone();
++    session.set_suggest_notes(suggest_tx.clone());
+     // The supervisor reader's death watch: the event channel stays open across a supervisor socket
+     // loss, so this watch is the signal the reconnect driver arms on. Taken from the LIVE session
+     // client after the open (a wait retry may have reconnected).
+@@ -1539,6 +1542,11 @@ async fn run_interactive_surface(
+                     session.apply_update_note(outcome, &mut view);
+                 }
+             }
++            maybe_suggest = suggest_rx.recv() => {
++                if let Some(note) = maybe_suggest {
++                    session.apply_suggest_note(note, &mut view);
++                }
++            }
+             maybe_reload = reload_rx.recv() => {
+                 if let Some(outcome) = maybe_reload {
+                     session.apply_reload_outcome(outcome, &mut view).await;
+Index: prime-agent-src/crates/pa-tui/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/lib.rs
++++ prime-agent-src/crates/pa-tui/src/lib.rs
+@@ -91,6 +91,7 @@ pub mod osc133;
+ pub mod osc52;
+ pub(crate) mod prompt_highlight;
+ pub mod prompt_stash;
++pub mod prompt_suggest;
+ pub mod provider_auth;
+ pub mod queued;
+ pub(crate) mod search_input;
+Index: prime-agent-src/crates/pa-tui/src/prompt_suggest.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-tui/src/prompt_suggest.rs
+@@ -0,0 +1,274 @@
++//! Next-prompt suggestion: after a turn ends with a plain answer, ask a small model for the
++//! user's likely next message and show it as dim ghost text in the empty editor (Tab accepts).
++//! The model call lives behind [`PromptSuggester`], which pa-cli implements.
++
++use crate::chat::{ChatEntry, MessageBlock};
++use std::future::Future;
++use std::pin::Pin;
++use std::sync::Arc;
++
++pub const SYSTEM_PROMPT: &str = "You predict the next message a user will type into a coding agent, given the recent transcript.
++
++Rules:
++- Output only the predicted message, max 12 words, no quotes, no explanation.
++- Write it as the user would: terse, imperative, lowercase is fine.
++- Prefer the obvious next step the assistant's last reply points to (apply, run, test, commit, rebuild, continue, answer its question).
++- If the assistant asked a yes/no question, predict the likely answer (\"yes\", \"go ahead\").
++- If there is no clear next step, output exactly NONE.";
++
++const MAX_MESSAGES: usize = 8;
++const MAX_CHARS: usize = 1200;
++const MAX_SUGGESTION_CHARS: usize = 120;
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct SuggestRequest {
++    /// The `<transcript>` user message body.
++    pub prompt: String,
++    /// `provider/id` from `promptSuggestions.model`; `None` uses the session model.
++    pub model: Option<String>,
++    /// The session's current `(provider, id)`.
++    pub session_model: Option<(String, String)>,
++}
++
++pub type SuggestFuture = Pin<Box<dyn Future<Output = Option<String>> + Send>>;
++
++/// Runs one suggestion call; returns the raw model text, or `None` on any failure.
++pub trait PromptSuggester: Send + Sync {
++    fn suggest(&self, request: SuggestRequest) -> SuggestFuture;
++}
++
++/// A finished suggestion, tagged with the generation that requested it.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct SuggestNote {
++    pub generation: u64,
++    pub text: Option<String>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct PromptSuggestConfig {
++    pub enabled: bool,
++    pub model: Option<String>,
++}
++
++/// The transcript prompt, or `None` when the last entry is not a finished plain answer.
++#[must_use]
++pub fn build_prompt(entries: &[ChatEntry]) -> Option<String> {
++    let last = entries.iter().rev().find(|entry| conversational(entry))?;
++    let ChatEntry::Assistant(message) = last else {
++        return None;
++    };
++    if message.streaming || message.aborted || message.error.is_some() || message.has_tool_calls {
++        return None;
++    }
++    let lines: Vec<String> = entries
++        .iter()
++        .filter_map(|entry| match entry {
++            ChatEntry::User { text } => Some(("USER", text.clone())),
++            ChatEntry::Assistant(message) => Some(("ASSISTANT", assistant_text(&message.blocks))),
++            _ => None,
++        })
++        .filter(|(_, text)| !text.trim().is_empty())
++        .map(|(role, text)| format!("{role}: {}", tail(text.trim())))
++        .collect();
++    let start = lines.len().saturating_sub(MAX_MESSAGES);
++    if lines[start..].is_empty() {
++        return None;
++    }
++    Some(format!(
++        "<transcript>\n{}\n</transcript>\n\nPredict my next message.",
++        lines[start..].join("\n\n")
++    ))
++}
++
++fn conversational(entry: &ChatEntry) -> bool {
++    matches!(entry, ChatEntry::User { .. } | ChatEntry::Assistant(_) | ChatEntry::Tool(_))
++}
++
++fn assistant_text(blocks: &[MessageBlock]) -> String {
++    blocks
++        .iter()
++        .filter_map(|block| match block {
++            MessageBlock::Text(text) => Some(text.as_str()),
++            MessageBlock::Thinking(_) => None,
++        })
++        .collect::<Vec<_>>()
++        .join("\n")
++}
++
++/// Keep the last `MAX_CHARS` characters; the end of a reply carries the question or next step.
++fn tail(text: &str) -> String {
++    let count = text.chars().count();
++    if count <= MAX_CHARS {
++        return text.to_owned();
++    }
++    let kept: String = text.chars().skip(count - MAX_CHARS).collect();
++    format!("…{kept}")
++}
++
++/// First line, quotes stripped; `None` for empty, `NONE`, or overlong output.
++#[must_use]
++pub fn clean(raw: &str) -> Option<String> {
++    let line = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
++    let line = line
++        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '“' | '”'))
++        .trim();
++    if line.is_empty() || line.eq_ignore_ascii_case("none") || line.chars().count() > MAX_SUGGESTION_CHARS {
++        return None;
++    }
++    Some(line.to_owned())
++}
++
++/// The placeholder text the editor renders dim.
++#[must_use]
++pub fn ghost(text: &str) -> String {
++    format!("{text}  (tab)")
++}
++
++/// Session-side suggestion state: one request in flight, stale results dropped by generation.
++#[derive(Default)]
++pub struct SuggestState {
++    pub enabled: bool,
++    pub model: Option<String>,
++    pub suggester: Option<Arc<dyn PromptSuggester>>,
++    generation: u64,
++    task: Option<tokio::task::JoinHandle<()>>,
++}
++
++impl SuggestState {
++    #[must_use]
++    pub fn new(config: PromptSuggestConfig, suggester: Option<Arc<dyn PromptSuggester>>) -> Self {
++        Self { enabled: config.enabled, model: config.model, suggester, ..Self::default() }
++    }
++
++    /// Abort any in-flight request and invalidate its result.
++    pub fn cancel(&mut self) {
++        self.generation = self.generation.wrapping_add(1);
++        if let Some(task) = self.task.take() {
++            task.abort();
++        }
++    }
++
++    /// Start a request when enabled; the note arrives on `notes`.
++    pub fn request(
++        &mut self,
++        entries: &[ChatEntry],
++        session_model: Option<(String, String)>,
++        notes: &tokio::sync::mpsc::UnboundedSender<SuggestNote>,
++    ) -> bool {
++        self.cancel();
++        let (true, Some(suggester)) = (self.enabled, self.suggester.clone()) else {
++            return false;
++        };
++        let Some(prompt) = build_prompt(entries) else {
++            return false;
++        };
++        let request = SuggestRequest { prompt, model: self.model.clone(), session_model };
++        let generation = self.generation;
++        let notes = notes.clone();
++        self.task = Some(tokio::spawn(async move {
++            let text = suggester.suggest(request).await.as_deref().and_then(clean);
++            let _ = notes.send(SuggestNote { generation, text });
++        }));
++        true
++    }
++
++    /// The note's text when it belongs to the current generation.
++    #[must_use]
++    pub fn accept(&mut self, note: SuggestNote) -> Option<String> {
++        if note.generation != self.generation {
++            return None;
++        }
++        self.task = None;
++        note.text
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::chat::AssistantMessage;
++
++    fn user(text: &str) -> ChatEntry {
++        ChatEntry::User { text: text.into() }
++    }
++
++    fn assistant(text: &str) -> ChatEntry {
++        ChatEntry::Assistant(Box::new(AssistantMessage {
++            blocks: vec![MessageBlock::Thinking("hmm".into()), MessageBlock::Text(text.into())],
++            has_tool_calls: false,
++            streaming: false,
++            error: None,
++            aborted: false,
++        }))
++    }
++
++    struct Fixed(&'static str);
++
++    impl PromptSuggester for Fixed {
++        fn suggest(&self, request: SuggestRequest) -> SuggestFuture {
++            assert!(request.prompt.starts_with("<transcript>"));
++            let text = self.0.to_owned();
++            Box::pin(async move { Some(text) })
++        }
++    }
++
++    #[test]
++    fn prompt_needs_a_finished_answer_last() {
++        assert_eq!(build_prompt(&[]), None);
++        assert_eq!(build_prompt(&[assistant("done"), user("next")]), None);
++        let ChatEntry::Assistant(mut aborted) = assistant("x") else { unreachable!() };
++        aborted.aborted = true;
++        assert_eq!(build_prompt(&[user("go"), ChatEntry::Assistant(aborted)]), None);
++    }
++
++    #[test]
++    fn prompt_lists_recent_turns_without_thinking() {
++        let prompt = build_prompt(&[user("fix it"), assistant("Fixed. Run tests?")]).expect("prompt");
++        assert_eq!(
++            prompt,
++            "<transcript>\nUSER: fix it\n\nASSISTANT: Fixed. Run tests?\n</transcript>\n\nPredict my next message."
++        );
++    }
++
++    #[test]
++    fn prompt_keeps_last_eight_and_tails_long_text() {
++        let mut entries: Vec<ChatEntry> = (0..10).map(|i| user(&format!("u{i}"))).collect();
++        entries.push(assistant(&format!("{}END", "x".repeat(2000))));
++        let prompt = build_prompt(&entries).expect("prompt");
++        assert!(!prompt.contains("USER: u2\n"));
++        assert!(prompt.contains("USER: u3"));
++        assert!(prompt.contains("ASSISTANT: …x"));
++        assert!(prompt.contains("END\n</transcript>"));
++    }
++
++    #[test]
++    fn clean_rejects_none_and_long_output() {
++        assert_eq!(clean("\n \"run the tests\"\nwhy"), Some("run the tests".into()));
++        assert_eq!(clean("NONE"), None);
++        assert_eq!(clean("none"), None);
++        assert_eq!(clean(&"a".repeat(121)), None);
++        assert_eq!(clean("  "), None);
++        assert_eq!(ghost("yes"), "yes  (tab)");
++    }
++
++    #[tokio::test]
++    async fn stale_generation_is_dropped() {
++        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
++        let config = PromptSuggestConfig { enabled: true, model: None };
++        let mut state = SuggestState::new(config, Some(Arc::new(Fixed("\"commit it\""))));
++        let entries = [user("fix"), assistant("Done.")];
++
++        assert!(state.request(&entries, None, &tx));
++        let note = rx.recv().await.expect("note");
++        assert_eq!(state.accept(note), Some("commit it".into()));
++
++        assert!(state.request(&entries, None, &tx));
++        let generation = state.generation;
++        state.cancel();
++        let stale_note = SuggestNote { generation, text: Some("old".into()) };
++        assert_eq!(state.accept(stale_note), None);
++
++        state.enabled = false;
++        assert!(!state.request(&entries, None, &tx));
++    }
++}
+Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui.rs
+@@ -171,6 +171,8 @@ pub(crate) struct SessionUi {
+     /// Per-session output tok/sec accumulation over completed responses;
+     /// `None` until the first sample, a rebind restarts it.
+     speed_stats: Option<SpeedStats>,
++    pub(crate) suggest: crate::prompt_suggest::SuggestState,
++    suggest_notes: Option<tokio::sync::mpsc::UnboundedSender<crate::prompt_suggest::SuggestNote>>,
+     service_tier: Option<String>,
+     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
+     /// The ban-risk warning's view-local dedup (TS
+@@ -442,6 +444,10 @@ pub(crate) enum DockFold {
+ }
+ 
+ impl SessionUi {
++    pub(crate) fn set_suggest_notes(&mut self, tx: tokio::sync::mpsc::UnboundedSender<crate::prompt_suggest::SuggestNote>) {
++        self.suggest_notes = Some(tx);
++    }
++
+     /// Take the one-shot post-first-frame trim request.
+     pub(crate) fn take_trim_after_frame(&mut self) -> bool {
+         std::mem::take(&mut self.trim_after_frame)
+Index: prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/apply.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
+@@ -373,6 +373,8 @@ impl SessionUi {
+             TurnUpdate::TurnStarted => {
+                 self.turn_active = true;
+                 self.turn_error_shown = false;
++                self.suggest.cancel();
++                view.prompt_suggestion = None;
+                 // No card from a previous run settles on this one's failure.
+                 self.pending_tools.clear();
+                 self.aborted_tools.clear();
+@@ -600,6 +602,12 @@ impl SessionUi {
+             TurnUpdate::Idle => {
+                 if !self.turn_active {
+                     view.working = None;
++                    if view.editor.get_text().is_empty() && view.queued.is_empty() {
++                        if let Some(tx) = self.suggest_notes.clone() {
++                            let model = view.chrome.model_provider.clone().zip(view.chrome.model_id.clone());
++                            self.suggest.request(&view.chat, model, &tx);
++                        }
++                    }
+                 }
+             }
+             TurnUpdate::GoalUpdate(goal) => {
+@@ -939,6 +947,15 @@ impl SessionUi {
+         });
+     }
+ 
++    pub(crate) fn apply_suggest_note(&mut self, note: crate::prompt_suggest::SuggestNote, view: &mut AgentView) {
++        let Some(text) = self.suggest.accept(note) else { return };
++        if self.turn_active || !view.editor.get_text().is_empty() {
++            return;
++        }
++        view.prompt_suggestion = Some(text);
++        self.dirty = true;
++    }
++
+     /// Update the loader activity label (agent-activity tracker subset).
+     fn set_working_activity(activity: &'static str, download: bool, view: &mut AgentView) {
+         if let Some(working) = &mut view.working {
+Index: prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/commands.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
+@@ -785,6 +785,29 @@ impl SessionUi {
+                 };
+                 self.set_speed_display(enable, view);
+             }
++            "suggest" => {
++                if self.suggest.suggester.is_none() {
++                    self.note("Prompt suggestions are not available", view);
++                    return Ok(());
++                }
++                let arg = resolved.args.trim().to_lowercase();
++                let enable = match arg.as_str() {
++                    "on" => true,
++                    "off" => false,
++                    "" | "toggle" => !self.suggest.enabled,
++                    _ => {
++                        self.error_row("Usage: /suggest [on|off]", view);
++                        return Ok(());
++                    }
++                };
++                self.suggest.enabled = enable;
++                if !enable {
++                    self.suggest.cancel();
++                    view.prompt_suggestion = None;
++                }
++                let note = if enable { "Prompt suggestions on" } else { "Prompt suggestions off" };
++                self.note(note, view);
++            }
+             "reload" => {
+                 if !resolved.args.is_empty() {
+                     view.editor
+Index: prime-agent-src/crates/pa-tui/src/session_ui/keys.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/keys.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/keys.rs
+@@ -333,6 +333,9 @@ impl SessionUi {
+         if key_event_to_id(&key).is_some_and(|id| id != "escape") {
+             self.escape_tree_shortcut_spent = false;
+         }
++        if key_event_to_id(&key).is_none_or(|id| id != "tab") {
++            view.prompt_suggestion = None;
++        }
+         // The `/model` picker owns the frame while open: its keys go before the
+         // editor, viewport keys, and Ctrl+C.
+         if view.model_picker.is_some() {
+@@ -800,6 +803,16 @@ impl SessionUi {
+             self.dirty = true;
+             return Ok(());
+         }
++        if view.editor.keybindings().matches(&id, "tui.input.tab")
++            && !view.editor.is_showing_autocomplete()
++            && view.editor.get_text().is_empty()
++        {
++            if let Some(text) = view.prompt_suggestion.take() {
++                view.editor.set_text(&text);
++                self.dirty = true;
++                return Ok(());
++            }
++        }
+         // Tab in a picker-command argument context opens the command's menu prefilled with the
+         // typed partial. An open completion dropdown keeps its own Tab; this is the no-menu path.
+         if view.editor.keybindings().matches(&id, "tui.input.tab")
+Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/lifecycle.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
+@@ -87,6 +87,14 @@ impl SessionUi {
+                 .as_ref()
+                 .is_some_and(|settings| settings.speed_display()),
+             speed_stats: None,
++            suggest: crate::prompt_suggest::SuggestState::new(
++                options.client_settings.as_ref().map_or(
++                    crate::prompt_suggest::PromptSuggestConfig { enabled: false, model: None },
++                    |s| s.prompt_suggestions(),
++                ),
++                options.client_settings.as_ref().and_then(|s| s.prompt_suggester()),
++            ),
++            suggest_notes: None,
+             client_settings: options.client_settings.clone(),
+             anthropic_subscription_warning_shown: false,
+             anthropic_warning_mark_pending: std::sync::Arc::default(),
+@@ -265,6 +273,8 @@ impl SessionUi {
+             service_tier: None,
+             speed_display_enabled: false,
+             speed_stats: None,
++            suggest: crate::prompt_suggest::SuggestState::default(),
++            suggest_notes: None,
+             client_settings: None,
+             anthropic_subscription_warning_shown: false,
+             anthropic_warning_mark_pending: std::sync::Arc::default(),
+@@ -732,6 +742,8 @@ impl SessionUi {
+         // A rebind replaces the whole view: the previous session's open bash view
+         // dies with its transcript, and the tok/sec stats restart per session.
+         if matches!(kind, RebuildKind::Rebind) {
++            self.suggest.cancel();
++            view.prompt_suggestion = None;
+             view.bash_view = None;
+             // The factory view dies the same death — it snapshots the
+             // previous session's kernel runs, and its refresh lane must
+Index: prime-agent-src/crates/pa-tui/src/view.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/view.rs
++++ prime-agent-src/crates/pa-tui/src/view.rs
+@@ -75,6 +75,8 @@ pub struct AgentView {
+     pub compaction_generation: u64,
+     /// Animation frame for spinners and the working icon.
+     pub pulse_frame: usize,
++    /// Ghost next-prompt suggestion shown in the empty editor; Tab accepts.
++    pub prompt_suggestion: Option<String>,
+     /// When the current working loader started (elapsed label).
+     pub working_since: Option<std::time::Instant>,
+     pub retry: Option<crate::chat::RetryState>,
+@@ -291,6 +293,7 @@ impl AgentView {
+             compaction: None,
+             compaction_generation: 0,
+             pulse_frame: 0,
++            prompt_suggestion: None,
+             working_since: None,
+             retry: None,
+             onboarding: None,
+Index: prime-agent-src/crates/pa-tui/src/view/panels.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/view/panels.rs
++++ prime-agent-src/crates/pa-tui/src/view/panels.rs
+@@ -108,13 +108,14 @@ impl AgentView {
+                 dim,
+             )]
+         });
++        let ghost = self.prompt_suggestion.as_deref().map(crate::prompt_suggest::ghost);
+         let surface = editor_surface::render(
+             &mut self.editor,
+             &self.theme,
+             width,
+             self.terminal_rows,
+             header,
+-            None,
++            ghost.as_deref(),
+         );
+         // The content rows' click surface: one region over the visible content rows,
+         // shifted by the header block's rows.
+Index: prime-agent-src/crates/pa-tui/src/view/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/view/tests.rs
++++ prime-agent-src/crates/pa-tui/src/view/tests.rs
+@@ -1647,3 +1647,12 @@ fn settled_rows_survive_a_cache_roundtri
+         "a fresh view renders the same rows (the Took clock may move)"
+     );
+ }
++
++#[test]
++fn prompt_suggestion_renders_as_dim_placeholder() {
++    let mut v = view();
++    v.prompt_suggestion = Some("run the tests".into());
++    let text: String = v.render_dock(80).iter().map(text_of).collect::<Vec<_>>().join("\n");
++    assert!(text.contains("run the tests  (tab)"));
++}
++
+Index: prime-agent-src/crates/pa-types/src/slash_commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/slash_commands.rs
++++ prime-agent-src/crates/pa-types/src/slash_commands.rs
+@@ -80,6 +80,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS:
+     BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+     BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
++    BuiltinSlashCommand { name: "suggest", description: "Toggle ghost-text suggestions for your next prompt", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "quit", description: "Quit Prime Agent", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+ ];
+ 

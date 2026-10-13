@@ -1,0 +1,225 @@
+Index: prime-agent-src/crates/pa-ai/src/providers/anthropic/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/providers/anthropic/mod.rs
++++ prime-agent-src/crates/pa-ai/src/providers/anthropic/mod.rs
+@@ -410,8 +410,9 @@ pub(crate) fn build_request_headers(
+         }
+     };
+ 
+-    // withOpenCodeHeaders: session header for opencode providers.
+-    if model.provider == "opencode" || model.provider == "opencode-go" {
++    // withOpenCodeHeaders: session_id plus zen's x-opencode-session (opencode providers only).
++    if let Some((name, value)) = super::opencode_session::session_header(&model.provider, session_id) {
++        default_headers.entry(name).or_insert(json!(value));
+         if let Some(session_id) = session_id {
+             default_headers.insert("session_id".into(), json!(session_id));
+         }
+Index: prime-agent-src/crates/pa-ai/src/providers/google.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/providers/google.rs
++++ prime-agent-src/crates/pa-ai/src/providers/google.rs
+@@ -276,6 +276,11 @@ async fn run_stream(
+         if let Some(session_id) = &options.base.session_id {
+             headers.push(("session_id".into(), session_id.clone()));
+         }
++        crate::providers::opencode_session::push_session_header(
++            &mut headers,
++            &model.provider,
++            options.base.session_id.as_deref(),
++        );
+     }
+     headers.push(("x-goog-api-key".into(), api_key));
+ 
+Index: prime-agent-src/crates/pa-ai/src/providers/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/providers/mod.rs
++++ prime-agent-src/crates/pa-ai/src/providers/mod.rs
+@@ -16,5 +16,6 @@ pub mod openai_responses_hooks;
+ pub mod openai_responses_shared;
+ pub mod openai_responses_stream;
+ pub mod opencode_tools;
++pub(crate) mod opencode_session;
+ pub mod simple_options;
+ pub mod transform_messages;
+Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/params.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/params.rs
++++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/params.rs
+@@ -351,8 +351,8 @@ pub(crate) fn build_headers(
+         }
+     }
+ 
++    crate::providers::opencode_session::push_session_header(&mut headers, &model.provider, conversation_id);
+     headers.insert(0, ("Authorization".into(), format!("Bearer {api_key}")));
+-    let _ = conversation_id;
+     headers
+ }
+ 
+Index: prime-agent-src/crates/pa-ai/src/providers/openai_responses.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/providers/openai_responses.rs
++++ prime-agent-src/crates/pa-ai/src/providers/openai_responses.rs
+@@ -182,6 +182,11 @@ fn build_headers(
+             headers.push((name.clone(), value.clone()));
+         }
+     }
++    crate::providers::opencode_session::push_session_header(
++        &mut headers,
++        &model.provider,
++        options.base.session_id.as_deref(),
++    );
+     headers.push(("Authorization".into(), format!("Bearer {api_key}")));
+     headers
+ }
+Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
+@@ -0,0 +1,125 @@
++use std::fmt::Write as _;
++use std::sync::OnceLock;
++
++use sha2::{Digest, Sha256};
++
++pub use crate::providers::opencode_tools::is_opencode_provider;
++
++pub const SESSION_HEADER: &str = "x-opencode-session";
++
++const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
++
++fn now_millis() -> u64 {
++    std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map_or(0, |elapsed| {
++            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
++        })
++}
++
++// ses_<12 hex><14 base62>; a uuidv7 input keeps its embedded creation time.
++#[must_use]
++pub fn opencode_session_id(session_id: &str) -> String {
++    opencode_session_id_at(session_id, now_millis())
++}
++
++#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
++fn opencode_session_id_at(session_id: &str, fallback_millis: u64) -> String {
++    let hex: String = session_id.chars().filter(|c| *c != '-').collect();
++    let timestamp = match (hex.chars().nth(12), hex.get(..12)) {
++        (Some('7'), Some(prefix)) => u64::from_str_radix(prefix, 16).unwrap_or(fallback_millis),
++        _ => fallback_millis,
++    };
++    let now = !(i128::from(timestamp) * 0x1000 + 1);
++    let mut out = String::with_capacity(4 + 12 + 14);
++    out.push_str("ses_");
++    for i in 0..6 {
++        let byte = ((now >> (40 - 8 * i)) & 0xff) as u8;
++        let _ = write!(out, "{byte:02x}");
++    }
++    let digest = Sha256::digest(session_id.as_bytes());
++    for byte in digest.iter().take(14) {
++        out.push(BASE62[usize::from(*byte) % 62] as char);
++    }
++    out
++}
++
++// Header for opencode provider request; calls without session id share a process id.
++#[must_use]
++pub fn session_header(provider: &str, session_id: Option<&str>) -> Option<(String, String)> {
++    static PROCESS_ID: OnceLock<String> = OnceLock::new();
++    if !is_opencode_provider(provider) {
++        return None;
++    }
++    let source = match session_id.filter(|id| !id.is_empty()) {
++        Some(id) => id.to_string(),
++        None => PROCESS_ID
++            .get_or_init(|| format!("prime-agent-{}-{}", std::process::id(), now_millis()))
++            .clone(),
++    };
++    Some((SESSION_HEADER.to_string(), opencode_session_id(&source)))
++}
++
++// Append header unless caller already set one (a models.json pin wins).
++pub fn push_session_header(
++    headers: &mut Vec<(String, String)>,
++    provider: &str,
++    session_id: Option<&str>,
++) {
++    if headers
++        .iter()
++        .any(|(name, _)| name.eq_ignore_ascii_case(SESSION_HEADER))
++    {
++        return;
++    }
++    if let Some(header) = session_header(provider, session_id) {
++        headers.push(header);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn uuidv7_input_reuses_its_timestamp() {
++        let id = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
++        assert_eq!(opencode_session_id(id), "ses_65e4d3c2bffeWm3vAwwKMFbd8o");
++        let first = opencode_session_id_at(id, 1);
++        let second = opencode_session_id_at(id, 2);
++        assert_eq!(
++            first, second,
++            "the fallback clock must not leak into a v7 id"
++        );
++        assert!(first.starts_with("ses_"));
++        assert_eq!(first.len(), 4 + 12 + 14);
++    }
++
++    #[test]
++    fn non_v7_input_uses_the_clock_and_a_stable_suffix() {
++        let a = opencode_session_id_at("not-a-uuid", 1_000);
++        let b = opencode_session_id_at("not-a-uuid", 2_000);
++        assert_ne!(a[4..16], b[4..16]);
++        assert_eq!(a[16..], b[16..], "the suffix hashes the session id only");
++        assert!(a[16..].bytes().all(|c| BASE62.contains(&c)));
++    }
++
++    #[test]
++    fn descending_ids_sort_newer_first() {
++        let older = opencode_session_id_at("x", 1_700_000_000_000);
++        let newer = opencode_session_id_at("x", 1_700_000_000_500);
++        assert!(newer[4..16] < older[4..16]);
++    }
++
++    #[test]
++    fn header_only_for_opencode_providers_and_never_twice() {
++        assert!(session_header("anthropic", Some("s")).is_none());
++        assert!(session_header("opencode-go", None).is_some());
++        let mut headers = vec![("X-OpenCode-Session".to_string(), "pinned".to_string())];
++        push_session_header(&mut headers, "opencode", Some("s"));
++        assert_eq!(headers.len(), 1);
++        let mut headers = Vec::new();
++        push_session_header(&mut headers, "opencode", Some("s"));
++        assert_eq!(headers[0].0, SESSION_HEADER);
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+@@ -408,7 +408,7 @@ pub async fn create_session(mut config:
+             as crate::kernel::provisioner::UnavailableSkillsCallback)
+     };
+     let provisioner = super::runtime_wiring::kernel_provisioner(
+-        session_id,
++        session_id.clone(),
+         handlers,
+         python_skills,
+         cwd.clone(),
+@@ -620,6 +620,8 @@ pub async fn create_session(mut config:
+         should_stop_before_turn: config.queued_steering_probe.clone(),
+         steering_mode: config.steering_mode,
+         follow_up_mode: config.follow_up_mode,
++        // Provider session headers and OpenAI prompt_cache_key read this.
++        session_id: Some(session_id),
+         ..Default::default()
+     });
+ 

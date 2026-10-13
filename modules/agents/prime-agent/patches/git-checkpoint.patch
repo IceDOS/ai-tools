@@ -1,0 +1,772 @@
+Index: prime-agent-src/crates/pa-daemon/src/git_checkpoint.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-daemon/src/git_checkpoint.rs
+@@ -0,0 +1,131 @@
++//! Per-turn git checkpoints: `git stash create` commits kept under `refs/prime-agent/checkpoints/`.
++
++use std::path::Path;
++use std::process::Command;
++
++pub(crate) const REF_PREFIX: &str = "refs/prime-agent/checkpoints/";
++/// One repo top-level per line; the `icedos gc` hook prunes refs of deleted sessions there.
++pub(crate) const REPOS_FILE: &str = "git-checkpoint-repos";
++
++fn git(cwd: &Path, args: &[&str]) -> Option<String> {
++    let output = Command::new("git").arg("-C").arg(cwd).args(args).output().ok()?;
++    output
++        .status
++        .success()
++        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
++}
++
++pub(crate) fn ref_name(session_id: &str, entry_id: &str) -> String {
++    format!("{REF_PREFIX}{session_id}/{entry_id}")
++}
++
++/// The stash commit of the tracked changes; `None` on a clean tree or outside a repo.
++pub(crate) fn snapshot(cwd: &Path) -> Option<String> {
++    git(cwd, &["stash", "create"]).filter(|commit| !commit.is_empty())
++}
++
++pub(crate) fn save(cwd: &Path, ref_name: &str, commit: &str, agent_dir: &Path) -> anyhow::Result<()> {
++    git(cwd, &["update-ref", ref_name, commit])
++        .ok_or_else(|| anyhow::anyhow!("git update-ref {ref_name} failed"))?;
++    if let Some(top) = git(cwd, &["rev-parse", "--show-toplevel"]) {
++        record_repo(agent_dir, &top)?;
++    }
++    Ok(())
++}
++
++fn record_repo(agent_dir: &Path, repo: &str) -> anyhow::Result<()> {
++    use std::io::Write;
++    let path = agent_dir.join(REPOS_FILE);
++    let known = std::fs::read_to_string(&path).unwrap_or_default();
++    if known.lines().any(|line| line == repo) {
++        return Ok(());
++    }
++    std::fs::create_dir_all(agent_dir)?;
++    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
++    writeln!(file, "{repo}")?;
++    Ok(())
++}
++
++pub(crate) fn lookup(cwd: &Path, ref_name: &str) -> Option<String> {
++    let spec = format!("{ref_name}^{{commit}}");
++    git(cwd, &["rev-parse", "--verify", "--quiet", &spec])
++}
++
++/// `git stash apply` of a checkpoint; returns git's output.
++pub(crate) fn restore(cwd: &Path, ref_name: &str) -> anyhow::Result<String> {
++    anyhow::ensure!(ref_name.starts_with(REF_PREFIX), "not a checkpoint ref: {ref_name}");
++    let commit = lookup(cwd, ref_name).ok_or_else(|| anyhow::anyhow!("checkpoint missing"))?;
++    let output = Command::new("git")
++        .arg("-C")
++        .arg(cwd)
++        .args(["stash", "apply", &commit])
++        .output()?;
++    let text = format!(
++        "{}{}",
++        String::from_utf8_lossy(&output.stdout),
++        String::from_utf8_lossy(&output.stderr)
++    )
++    .trim()
++    .to_string();
++    anyhow::ensure!(output.status.success(), "git stash apply failed: {text}");
++    Ok(text)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::process::Command;
++
++    fn git_ok(dir: &Path, args: &[&str]) {
++        let status = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
++        assert!(status.success(), "git {args:?}");
++    }
++
++    fn repo() -> tempfile::TempDir {
++        let dir = tempfile::tempdir().unwrap();
++        git_ok(dir.path(), &["init", "-q"]);
++        git_ok(dir.path(), &["config", "user.name", "t"]);
++        git_ok(dir.path(), &["config", "user.email", "t@example.com"]);
++        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
++        git_ok(dir.path(), &["add", "a.txt"]);
++        git_ok(dir.path(), &["commit", "-qm", "init"]);
++        dir
++    }
++
++    #[test]
++    fn a_clean_tree_or_a_plain_dir_has_no_snapshot() {
++        let repo = repo();
++        assert_eq!(snapshot(repo.path()), None);
++        let plain = tempfile::tempdir().unwrap();
++        assert_eq!(snapshot(plain.path()), None);
++    }
++
++    #[test]
++    fn a_saved_checkpoint_restores_the_edit_and_records_the_repo_once() {
++        let repo = repo();
++        let agent = tempfile::tempdir().unwrap();
++        std::fs::write(repo.path().join("a.txt"), "two\n").unwrap();
++        let commit = snapshot(repo.path()).expect("dirty tree snapshots");
++        let name = ref_name("s1", "e1");
++        assert_eq!(name, "refs/prime-agent/checkpoints/s1/e1");
++        save(repo.path(), &name, &commit, agent.path()).unwrap();
++        save(repo.path(), &name, &commit, agent.path()).unwrap();
++        assert_eq!(lookup(repo.path(), &name), Some(commit));
++        let repos = std::fs::read_to_string(agent.path().join(REPOS_FILE)).unwrap();
++        assert_eq!(repos.lines().count(), 1, "{repos}");
++
++        git_ok(repo.path(), &["checkout", "--", "a.txt"]);
++        assert_eq!(std::fs::read_to_string(repo.path().join("a.txt")).unwrap(), "one\n");
++        restore(repo.path(), &name).unwrap();
++        assert_eq!(std::fs::read_to_string(repo.path().join("a.txt")).unwrap(), "two\n");
++    }
++
++    #[test]
++    fn restore_refuses_foreign_refs_and_reports_a_missing_one() {
++        let repo = repo();
++        let foreign = restore(repo.path(), "refs/heads/master").unwrap_err();
++        assert!(format!("{foreign:#}").contains("not a checkpoint ref"), "{foreign:#}");
++        let missing = restore(repo.path(), &ref_name("s1", "gone")).unwrap_err();
++        assert_eq!(format!("{missing:#}"), "checkpoint missing");
++    }
++}
+Index: prime-agent-src/crates/pa-daemon/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/lib.rs
++++ prime-agent-src/crates/pa-daemon/src/lib.rs
+@@ -45,6 +45,8 @@ pub(crate) mod context_tree_children;
+ pub(crate) mod create_reuse;
+ pub mod descriptor;
+ pub mod engine;
++pub(crate) mod git_checkpoint;
++pub(crate) mod git_checkpoint_commands;
+ pub(crate) mod clm_commands;
+ pub(crate) mod todo_commands;
+ pub(crate) mod factory_activity;
+Index: prime-agent-src/crates/pa-daemon/src/git_checkpoint_commands.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-daemon/src/git_checkpoint_commands.rs
+@@ -0,0 +1,176 @@
++//! `get_git_checkpoint` and `restore_git_checkpoint`: the fork selector's restore offer.
++
++use std::path::PathBuf;
++
++use serde_json::{json, Value};
++
++use crate::git_checkpoint;
++use crate::protocol::{response_failure, response_success, DaemonResponse};
++use crate::worker::Worker;
++
++impl Worker {
++    /// The session cwd and durable session id, or `None` without a store.
++    fn checkpoint_scope(&self) -> Option<(PathBuf, String)> {
++        let core = self.core.lock().unwrap();
++        let store = core.store.as_ref()?;
++        Some((PathBuf::from(&core.cwd), store.session_id().to_string()))
++    }
++
++    pub(crate) async fn handle_get_git_checkpoint(&self, payload: &Value) -> DaemonResponse {
++        const COMMAND: &str = "get_git_checkpoint";
++        if let Err(response) = self.require_created(COMMAND) {
++            return response;
++        }
++        let Some(entry_id) = payload.get("entryId").and_then(Value::as_str) else {
++            return response_failure(None, COMMAND, "entryId is required", None);
++        };
++        let Some((cwd, session_id)) = self.checkpoint_scope() else {
++            return response_success(None, COMMAND, Some(json!({ "checkpoint": null })));
++        };
++        let name = git_checkpoint::ref_name(&session_id, entry_id);
++        let lookup_name = name.clone();
++        let commit = tokio::task::spawn_blocking(move || git_checkpoint::lookup(&cwd, &lookup_name))
++            .await
++            .ok()
++            .flatten();
++        let checkpoint = commit.map_or(Value::Null, |commit| json!({ "ref": name, "commit": commit }));
++        response_success(None, COMMAND, Some(json!({ "checkpoint": checkpoint })))
++    }
++
++    pub(crate) async fn handle_restore_git_checkpoint(&self, payload: &Value) -> DaemonResponse {
++        const COMMAND: &str = "restore_git_checkpoint";
++        if let Err(response) = self.require_created(COMMAND) {
++            return response;
++        }
++        let Some(name) = payload.get("checkpointRef").and_then(Value::as_str).map(str::to_string) else {
++            return response_failure(None, COMMAND, "checkpointRef is required", None);
++        };
++        let cwd = PathBuf::from(&self.core.lock().unwrap().cwd);
++        match tokio::task::spawn_blocking(move || git_checkpoint::restore(&cwd, &name)).await {
++            Ok(Ok(output)) => response_success(None, COMMAND, Some(json!({ "output": output }))),
++            Ok(Err(error)) => response_failure(None, COMMAND, &format!("{error:#}"), None),
++            Err(error) => response_failure(None, COMMAND, &format!("{error}"), None),
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::path::{Path, PathBuf};
++    use std::process::Command;
++
++    use serde_json::{json, Value};
++
++    use crate::worker::{Worker, WorkerConfig};
++
++    fn git_ok(dir: &Path, args: &[&str]) {
++        let status = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
++        assert!(status.success(), "git {args:?}");
++    }
++
++    fn repo(dir: &Path) -> PathBuf {
++        let repo = dir.join("repo");
++        std::fs::create_dir_all(&repo).unwrap();
++        git_ok(&repo, &["init", "-q"]);
++        git_ok(&repo, &["config", "user.name", "t"]);
++        git_ok(&repo, &["config", "user.email", "t@example.com"]);
++        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
++        git_ok(&repo, &["add", "a.txt"]);
++        git_ok(&repo, &["commit", "-qm", "init"]);
++        repo
++    }
++
++    async fn worker_in(dir: &Path, cwd: &Path) -> (Worker, PathBuf) {
++        let path = dir.join("session.jsonl");
++        let mut file = crate::session_store::SessionFile::create(cwd.to_str().unwrap(), None, 0);
++        file.set_path(path.clone());
++        file.rewrite().unwrap();
++        let worker = Worker::new(
++            WorkerConfig {
++                socket_path: dir.join("worker.sock"),
++                supervisor_socket_path: PathBuf::new(),
++                token: "test-token".into(),
++                worker_instance_id: String::new(),
++                active_session_id: "checkpoint-session".into(),
++                agent_dir: dir.join("agent"),
++                recovery_journal_path: dir.join("recovery.jsonl"),
++                telemetry_disabled: Some(true),
++                script: Some(json!({ "responses": ["done"] })),
++            },
++            None,
++        );
++        let created = worker
++            .dispatch("create", &json!({ "sessionPath": path, "cwd": cwd }))
++            .await;
++        assert!(created.success, "create failed: {created:?}");
++        (worker, path)
++    }
++
++    fn user_entry_id(path: &Path) -> String {
++        std::fs::read_to_string(path)
++            .unwrap()
++            .lines()
++            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
++            .find(|entry| entry["type"] == "message" && entry["message"]["role"] == "user")
++            .and_then(|entry| entry["id"].as_str().map(str::to_string))
++            .expect("a persisted user entry")
++    }
++
++    async fn prompt(worker: &Worker) {
++        let done = worker
++            .dispatch(
++                "prompt_and_wait",
++                &json!({ "activeSessionId": "checkpoint-session", "message": "go" }),
++            )
++            .await;
++        assert!(done.success, "{done:?}");
++    }
++
++    #[tokio::test]
++    async fn a_dirty_turn_leaves_a_checkpoint_that_restores() {
++        let dir = tempfile::tempdir().unwrap();
++        let repo = repo(dir.path());
++        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
++        let (worker, path) = worker_in(dir.path(), &repo).await;
++        prompt(&worker).await;
++
++        let entry_id = user_entry_id(&path);
++        let found = worker
++            .dispatch("get_git_checkpoint", &json!({ "entryId": entry_id }))
++            .await;
++        assert!(found.success, "{found:?}");
++        let checkpoint = found.data.as_ref().unwrap()["checkpoint"].clone();
++        let checkpoint_ref = checkpoint["ref"].as_str().expect("a checkpoint").to_string();
++        assert!(checkpoint_ref.ends_with(&format!("/{entry_id}")), "{checkpoint_ref}");
++        let repos = std::fs::read_to_string(dir.path().join("agent").join(crate::git_checkpoint::REPOS_FILE)).unwrap();
++        assert_eq!(repos.lines().count(), 1, "{repos}");
++
++        git_ok(&repo, &["checkout", "--", "a.txt"]);
++        let restored = worker
++            .dispatch("restore_git_checkpoint", &json!({ "checkpointRef": checkpoint_ref }))
++            .await;
++        assert!(restored.success, "{restored:?}");
++        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "two\n");
++
++        git_ok(&repo, &["update-ref", "-d", &checkpoint_ref]);
++        let missing = worker
++            .dispatch("restore_git_checkpoint", &json!({ "checkpointRef": checkpoint_ref }))
++            .await;
++        assert!(!missing.success);
++        assert_eq!(missing.error.as_deref(), Some("checkpoint missing"));
++    }
++
++    #[tokio::test]
++    async fn a_clean_turn_leaves_no_checkpoint() {
++        let dir = tempfile::tempdir().unwrap();
++        let repo = repo(dir.path());
++        let (worker, path) = worker_in(dir.path(), &repo).await;
++        prompt(&worker).await;
++        let found = worker
++            .dispatch("get_git_checkpoint", &json!({ "entryId": user_entry_id(&path) }))
++            .await;
++        assert!(found.success, "{found:?}");
++        assert_eq!(found.data.as_ref().unwrap()["checkpoint"], Value::Null);
++        assert!(!dir.path().join("agent").join(crate::git_checkpoint::REPOS_FILE).exists());
++    }
++}
+Index: prime-agent-src/crates/pa-daemon/src/protocol.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/protocol.rs
++++ prime-agent-src/crates/pa-daemon/src/protocol.rs
+@@ -165,6 +165,8 @@ pub const KNOWN_COMMAND_TYPES: &[&str] =
+     "set_mcp_static_token",
+     "remove_mcp_connection",
+     "mark_anthropic_warning_shown",
++    "get_git_checkpoint",
++    "restore_git_checkpoint",
+     "get_clm_view",
+     "clm_configure",
+     "get_todos",
+@@ -711,6 +713,12 @@ pub fn command_active_session_id(command
+         | DaemonCommand::GetSessionStats {
+             active_session_id, ..
+         }
++        | DaemonCommand::GetGitCheckpoint {
++            active_session_id, ..
++        }
++        | DaemonCommand::RestoreGitCheckpoint {
++            active_session_id, ..
++        }
+         | DaemonCommand::GetClmView {
+             active_session_id, ..
+         }
+@@ -1000,6 +1008,8 @@ pub fn command_type_name(command: &Daemo
+         DaemonCommand::GetMessages { .. } => "get_messages",
+         DaemonCommand::GetRlmChildren { .. } => "get_rlm_children",
+         DaemonCommand::GetSessionStats { .. } => "get_session_stats",
++        DaemonCommand::GetGitCheckpoint { .. } => "get_git_checkpoint",
++        DaemonCommand::RestoreGitCheckpoint { .. } => "restore_git_checkpoint",
+         DaemonCommand::GetClmView { .. } => "get_clm_view",
+         DaemonCommand::ClmConfigure { .. } => "clm_configure",
+         DaemonCommand::GetTodos { .. } => "get_todos",
+Index: prime-agent-src/crates/pa-daemon/src/worker/commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/commands.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/commands.rs
+@@ -159,6 +159,8 @@ impl Worker {
+             "mutate_queued_message" => self.handle_mutate_queued_message(payload),
+             "resume_queue" => self.handle_resume_queue(),
+             "factory_activity" => self.handle_factory_activity(payload).await,
++            "get_git_checkpoint" => self.handle_get_git_checkpoint(payload).await,
++            "restore_git_checkpoint" => self.handle_restore_git_checkpoint(payload).await,
+             "get_clm_view" => self.handle_get_clm_view(payload).await,
+             "clm_configure" => self.handle_clm_configure(payload).await,
+             "get_todos" => self.handle_get_todos(),
+Index: prime-agent-src/crates/pa-daemon/src/worker/turn.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/turn.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/turn.rs
+@@ -419,6 +419,27 @@ impl TurnRunner {
+         // post-join flag read raced `handle_abort`).
+         let abort_gate_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+         let abort_gate_armed_seen = Arc::clone(&abort_gate_armed);
++        // git-checkpoint: root turns snapshot tracked changes before the prompt row lands.
++        let checkpoint_scope = {
++            let core = self.core.lock().unwrap();
++            match core.store.as_ref() {
++                Some(store) if core.rlm_depth == 0 => Some((core.cwd.clone(), store.session_id().to_string())),
++                _ => None,
++            }
++        };
++        let checkpoint_commit = match &checkpoint_scope {
++            Some((cwd, _)) => {
++                let cwd = std::path::PathBuf::from(cwd);
++                tokio::task::spawn_blocking(move || crate::git_checkpoint::snapshot(&cwd))
++                    .await
++                    .ok()
++                    .flatten()
++            }
++            None => None,
++        };
++        let checkpoint_armed = checkpoint_commit.is_some();
++        let checkpoint_entry = Arc::new(std::sync::Mutex::new(None::<String>));
++        let checkpoint_entry_slot = Arc::clone(&checkpoint_entry);
+         let turn = tokio::task::spawn_blocking(move || {
+             // The engine's own terminal `turn_end` frame keeps the
+             // trailing `Done` fallback silent.
+@@ -575,7 +596,17 @@ impl TurnRunner {
+                     | EngineEvent::AssistantMessage(message)
+                     | EngineEvent::ToolResultMessage(message) => {
+                         if let Some(store) = core.store.as_mut() {
+-                            let _ = store.persist_entry("message", json!({ "message": message }));
++                            let persisted = store.persist_entry("message", json!({ "message": message }));
++                            // The turn's first own user row keys the checkpoint.
++                            if checkpoint_armed
++                                && !emitting_prefix_rows.get()
++                                && matches!(&event, EngineEvent::UserMessage(_))
++                            {
++                                let mut slot = checkpoint_entry_slot.lock().unwrap();
++                                if slot.is_none() {
++                                    *slot = persisted.ok();
++                                }
++                            }
+                         }
+                     }
+                     // The in-flight tool-call set, updated under the same core lock
+@@ -1015,6 +1046,21 @@ impl TurnRunner {
+             );
+         });
+         let _ = turn.await;
++        let checkpoint_entry_id = checkpoint_entry.lock().unwrap().take();
++        if let (Some((cwd, session_id)), Some(commit), Some(entry_id)) =
++            (checkpoint_scope, checkpoint_commit, checkpoint_entry_id)
++        {
++            let agent_dir = self.passivation.agent_dir.clone();
++            let _ = tokio::task::spawn_blocking(move || {
++                let name = crate::git_checkpoint::ref_name(&session_id, &entry_id);
++                if let Err(error) =
++                    crate::git_checkpoint::save(std::path::Path::new(&cwd), &name, &commit, &agent_dir)
++                {
++                    eprintln!("pa-daemon: git checkpoint {name}: {error:#}");
++                }
++            })
++            .await;
++        }
+         // The emit path is joined: a stale parked partial must not
+         // surface after the settle events.
+         coalescer.close();
+Index: prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/tests/command_breadth.rs
++++ prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
+@@ -520,6 +520,11 @@ const WIRE_FIXTURES: &[(&str, &str)] = &
+         "mark_anthropic_warning_shown",
+         r#"{"type": "mark_anthropic_warning_shown", "activeSessionId": "sess"}"#,
+     ),
++    ("get_git_checkpoint", r#"{"type": "get_git_checkpoint", "activeSessionId": "sess", "entryId": "e1"}"#),
++    (
++        "restore_git_checkpoint",
++        r#"{"type": "restore_git_checkpoint", "activeSessionId": "sess", "checkpointRef": "refs/prime-agent/checkpoints/s/e1"}"#,
++    ),
+     ("get_clm_view", r#"{"type": "get_clm_view", "activeSessionId": "sess"}"#),
+     ("clm_configure", r#"{"type": "clm_configure", "activeSessionId": "sess", "action": "on"}"#),
+     ("get_todos", r#"{"type": "get_todos", "activeSessionId": "sess"}"#),
+@@ -552,6 +557,8 @@ fn known_command_types_match_the_ts_list
+                     | "tail_kernel_bash"
+                     | "kill_kernel_bash"
+                     | "mark_anthropic_warning_shown"
++                    | "get_git_checkpoint"
++                    | "restore_git_checkpoint"
+                     | "get_clm_view"
+                     | "clm_configure"
+                     | "get_todos"
+Index: prime-agent-src/crates/pa-types/src/daemon/command.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/daemon/command.rs
++++ prime-agent-src/crates/pa-types/src/daemon/command.rs
+@@ -616,6 +616,24 @@ pub enum DaemonCommand {
+         #[serde(flatten)]
+         rest: JsonMap,
+     },
++    /// The git checkpoint taken before the turn of user entry `entry_id`, if any.
++    GetGitCheckpoint {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<String>,
++        active_session_id: String,
++        entry_id: String,
++        #[serde(flatten)]
++        rest: JsonMap,
++    },
++    /// `git stash apply` of a checkpoint ref in the session cwd.
++    RestoreGitCheckpoint {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<String>,
++        active_session_id: String,
++        checkpoint_ref: String,
++        #[serde(flatten)]
++        rest: JsonMap,
++    },
+     GetClmView {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         id: Option<String>,
+@@ -1301,6 +1319,17 @@ mod tests {
+ 
+     #[test]
+     fn clm_commands_use_their_wire_names() {
++        let checkpoint: crate::daemon::DaemonCommand = serde_json::from_str(
++            r#"{"type":"get_git_checkpoint","activeSessionId":"s","entryId":"e1"}"#,
++        )
++        .unwrap();
++        assert!(matches!(checkpoint, crate::daemon::DaemonCommand::GetGitCheckpoint { ref entry_id, .. } if entry_id == "e1"));
++        let restore: crate::daemon::DaemonCommand = serde_json::from_str(
++            r#"{"type":"restore_git_checkpoint","activeSessionId":"s","checkpointRef":"refs/prime-agent/checkpoints/s/e1"}"#,
++        )
++        .unwrap();
++        assert!(matches!(restore, crate::daemon::DaemonCommand::RestoreGitCheckpoint { ref checkpoint_ref, .. } if checkpoint_ref.ends_with("/e1")));
++
+         let view: crate::daemon::DaemonCommand = serde_json::from_str(
+             r#"{"type":"get_clm_view","activeSessionId":"s","revision":2}"#,
+         )
+Index: prime-agent-src/crates/pa-types/src/daemon/plane.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/daemon/plane.rs
++++ prime-agent-src/crates/pa-types/src/daemon/plane.rs
+@@ -48,6 +48,8 @@ pub fn command_plane(command_type: &str)
+         | "get_messages"
+         | "get_rlm_children"
+         | "get_session_stats"
++        | "get_git_checkpoint"
++        | "restore_git_checkpoint"
+         | "get_clm_view"
+         | "clm_configure"
+         | "get_todos"
+@@ -133,6 +135,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str]
+     "get_messages",
+     "get_rlm_children",
+     "get_session_stats",
++    "get_git_checkpoint",
+     "get_clm_view",
+     "get_todos",
+     "get_context_tree",
+Index: prime-agent-src/crates/pa-tui/src/confirm.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/confirm.rs
++++ prime-agent-src/crates/pa-tui/src/confirm.rs
+@@ -44,6 +44,14 @@ impl ConfirmPanel {
+         }
+     }
+ 
++    /// Yes/No/Cancel: `Cancel` and escape both back out.
++    #[must_use]
++    pub fn yes_no_cancel(title: &str, message: &str) -> Self {
++        let mut panel = Self::yes_no(title, message);
++        panel.options.push("Cancel".to_string());
++        panel
++    }
++
+     /// One key id: up/down move, confirm selects, escape and ctrl+c
+     /// cancel.
+     pub fn handle_key(&mut self, kb: &KeybindingsManager, id: &str) -> ConfirmAction {
+@@ -168,4 +176,16 @@ mod tests {
+             .iter()
+             .any(|row| row.contains("↑/↓ navigate · Enter select · Esc close")));
+     }
++
++    #[test]
++    fn yes_no_cancel_offers_three_answers() {
++        let mut panel = ConfirmPanel::yes_no_cancel("Fork", "Restore code to this point?");
++        assert_eq!(panel.handle_key(&kb(), "down"), ConfirmAction::None);
++        assert_eq!(panel.handle_key(&kb(), "down"), ConfirmAction::None);
++        assert_eq!(panel.handle_key(&kb(), "down"), ConfirmAction::None);
++        assert_eq!(
++            panel.handle_key(&kb(), "enter"),
++            ConfirmAction::Select("Cancel".to_string())
++        );
++    }
+ }
+Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui.rs
+@@ -6,6 +6,7 @@
+ mod apply;
+ mod auth;
+ mod bash;
++mod checkpoint;
+ mod clm;
+ mod commands;
+ mod factory;
+Index: prime-agent-src/crates/pa-tui/src/session_ui/checkpoint.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-tui/src/session_ui/checkpoint.rs
+@@ -0,0 +1,89 @@
++//! git-checkpoint: offer to restore the code when forking from a checkpointed prompt.
++
++use std::time::Duration;
++
++use anyhow::Result;
++use serde_json::{Map, Value};
++
++use pa_types::daemon::DaemonCommand;
++
++use super::settings::PendingConfirm;
++use super::{AgentView, SessionUi, UI_REQUEST_TIMEOUT_MS};
++
++/// The ref of a `get_git_checkpoint` reply, when the entry has a checkpoint.
++pub(crate) fn checkpoint_ref(data: &Value) -> Option<String> {
++    data.get("checkpoint")?.get("ref")?.as_str().map(str::to_string)
++}
++
++impl SessionUi {
++    pub(super) async fn fork_or_ask_restore(&mut self, entry_id: &str, view: &mut AgentView) -> Result<()> {
++        let reply = self
++            .bounded_request(
++                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
++                DaemonCommand::GetGitCheckpoint {
++                    id: None,
++                    active_session_id: self.active_session_id.clone(),
++                    entry_id: entry_id.to_string(),
++                    rest: Map::default(),
++                },
++            )
++            .await;
++        // A lookup error forks as before.
++        let Some(checkpoint_ref) = reply.ok().as_ref().and_then(checkpoint_ref) else {
++            self.fork(entry_id, None, view).await?;
++            return Ok(());
++        };
++        view.confirm = Some(crate::confirm::ConfirmPanel::yes_no_cancel(
++            "Fork",
++            "Restore code to this point?\nTracked files only; untracked files stay as they are.",
++        ));
++        self.pending_confirm = Some(PendingConfirm::ForkCheckpoint {
++            entry_id: entry_id.to_string(),
++            checkpoint_ref,
++        });
++        self.dirty = true;
++        Ok(())
++    }
++
++    pub(super) async fn answer_fork_checkpoint(
++        &mut self,
++        entry_id: &str,
++        checkpoint_ref: &str,
++        option: &str,
++        view: &mut AgentView,
++    ) -> Result<()> {
++        if option == "Cancel" || !self.fork(entry_id, None, view).await? || option != "Yes" {
++            return Ok(());
++        }
++        match self
++            .bounded_request(
++                Duration::from_millis(UI_REQUEST_TIMEOUT_MS * 3),
++                DaemonCommand::RestoreGitCheckpoint {
++                    id: None,
++                    active_session_id: self.active_session_id.clone(),
++                    checkpoint_ref: checkpoint_ref.to_string(),
++                    rest: Map::default(),
++                },
++            )
++            .await
++        {
++            Ok(_) => self.note("Restored code to the checkpoint", view),
++            Err(error) => self.error_row(&format!("restore failed: {error:#}"), view),
++        }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn checkpoint_ref_reads_the_reply() {
++        let found = json!({ "checkpoint": { "ref": "refs/prime-agent/checkpoints/s/e", "commit": "abc" } });
++        assert_eq!(checkpoint_ref(&found).as_deref(), Some("refs/prime-agent/checkpoints/s/e"));
++        assert_eq!(checkpoint_ref(&json!({ "checkpoint": null })), None);
++        assert_eq!(checkpoint_ref(&json!({})), None);
++    }
++}
+Index: prime-agent-src/crates/pa-tui/src/session_ui/sessions_fork.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/sessions_fork.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/sessions_fork.rs
+@@ -222,7 +222,7 @@ impl SessionUi {
+         match action {
+             UserMessageSelectorAction::Select(entry_id) => {
+                 view.fork_selector = None;
+-                self.fork(&entry_id, None, view).await?;
++                self.fork_or_ask_restore(&entry_id, view).await?;
+             }
+             UserMessageSelectorAction::Cancel => {
+                 view.fork_selector = None;
+@@ -234,12 +234,13 @@ impl SessionUi {
+     }
+ 
+     /// The worker copies the path into a new session and switches to it.
+-    async fn fork(
++    /// Returns whether a new session was forked.
++    pub(super) async fn fork(
+         &mut self,
+         entry_id: &str,
+         position: Option<pa_types::daemon::ForkPosition>,
+         view: &mut AgentView,
+-    ) -> Result<()> {
++    ) -> Result<bool> {
+         let data = match self
+             .bounded_request(
+                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS * 3),
+@@ -256,11 +257,11 @@ impl SessionUi {
+             Ok(data) => data,
+             Err(error) => {
+                 self.note(&format!("fork failed: {error:#}"), view);
+-                return Ok(());
++                return Ok(false);
+             }
+         };
+         if data.get("cancelled").and_then(Value::as_bool) == Some(true) {
+-            return Ok(());
++            return Ok(false);
+         }
+         self.rebuild_transcript(view).await;
+         let selected_text = data.get("selectedText").and_then(Value::as_str);
+@@ -270,7 +271,7 @@ impl SessionUi {
+         }
+         self.note("Forked to new session", view);
+         self.dirty = true;
+-        Ok(())
++        Ok(true)
+     }
+ 
+     /// Fork at the current leaf.
+Index: prime-agent-src/crates/pa-tui/src/session_ui/settings.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/settings.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/settings.rs
+@@ -23,6 +23,8 @@ pub(super) enum PendingConfirm {
+     /// `/update`: `Yes` spawns the out-of-band installer run (the confirm
+     /// guards the binary replacement, not the session).
+     Update,
++    /// Forking from a checkpointed prompt: `Yes` forks and restores the code, `No` only forks.
++    ForkCheckpoint { entry_id: String, checkpoint_ref: String },
+ }
+ 
+ impl SessionUi {
+@@ -82,7 +84,10 @@ impl SessionUi {
+             crate::confirm::ConfirmAction::Select(option) => {
+                 let pending = self.pending_confirm.take();
+                 view.confirm = None;
+-                if option == "Yes" {
++                if let Some(PendingConfirm::ForkCheckpoint { entry_id, checkpoint_ref }) = pending {
++                    self.answer_fork_checkpoint(&entry_id, &checkpoint_ref, &option, view)
++                        .await?;
++                } else if option == "Yes" {
+                     match pending {
+                         Some(PendingConfirm::Import { path }) => {
+                             self.run_import(&path, None, view).await?;
+@@ -93,7 +98,7 @@ impl SessionUi {
+                         Some(PendingConfirm::Update) => {
+                             self.spawn_update(view);
+                         }
+-                        None => {}
++                        Some(PendingConfirm::ForkCheckpoint { .. }) | None => {}
+                     }
+                 }
+             }

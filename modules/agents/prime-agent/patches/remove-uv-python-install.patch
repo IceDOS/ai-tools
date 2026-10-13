@@ -1,12 +1,93 @@
-diff --git a/packages/coding-agent/src/core/kernel/bootstrap.ts b/packages/coding-agent/src/core/kernel/bootstrap.ts
-index dd56934..47e520f 100644
---- a/packages/coding-agent/src/core/kernel/bootstrap.ts
-+++ b/packages/coding-agent/src/core/kernel/bootstrap.ts
-@@ -817,7 +817,6 @@ async function bootstrapVenv(
- 	const runtimeRequirement = sourceDir ?? RUNTIME_REQUIREMENT;
- 	const runtimeIdentity = await resolveRuntimeIdentity();
+Index: prime-agent-src/crates/pa-core/src/kernel/bootstrap/venv.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/kernel/bootstrap/venv.rs
++++ prime-agent-src/crates/pa-core/src/kernel/bootstrap/venv.rs
+@@ -109,6 +109,16 @@ pub(crate) async fn bootstrap_venv(
+ ) -> anyhow::Result<()> {
+     std::fs::create_dir_all(venv.parent().unwrap_or(Path::new("/")))?;
+     let uv = ensure_uv()?;
++    bootstrap_venv_with_uv(&uv, venv, python_skills, options).await
++}
++
++// Split from the discovery above so tests can drive the uv calls with a fake uv.
++async fn bootstrap_venv_with_uv(
++    uv: &str,
++    venv: &Path,
++    python_skills: &[BootstrapPythonSkill],
++    options: &EnsureKernelPythonOptions,
++) -> anyhow::Result<()> {
+     let python = kernel_venv_python(venv);
+     let source_dir = resolve_runtime_source_dir();
+     let runtime_requirement = source_dir.as_ref().map_or_else(
+@@ -132,16 +142,7 @@ pub(crate) async fn bootstrap_venv(
+     }
  
--	await run(uv, ["python", "install", PYTHON_VERSION]);
- 	// Nothing invokes the venv's own pip; every kernel-venv package is installed
- 	// through `uv pip install --python`, so the venv is created unseeded.
- 	await run(uv, ["venv", venv, "--python", PYTHON_VERSION]);
+     run_async(
+-        &uv,
+-        &[
+-            "python".to_string(),
+-            "install".to_string(),
+-            PYTHON_VERSION.to_string(),
+-        ],
+-    )
+-    .await?;
+-    run_async(
+-        &uv,
++        uv,
+         &[
+             "venv".to_string(),
+             venv_str,
+@@ -151,9 +152,9 @@ pub(crate) async fn bootstrap_venv(
+         ],
+     )
+     .await?;
+-    run_async(&uv, &install_args).await?;
++    run_async(uv, &install_args).await?;
+     sync_python_skills(
+-        &uv,
++        uv,
+         venv,
+         &python,
+         &runtime_identity,
+Index: prime-agent-src/crates/pa-core/src/kernel/bootstrap/venv/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/kernel/bootstrap/venv/tests.rs
++++ prime-agent-src/crates/pa-core/src/kernel/bootstrap/venv/tests.rs
+@@ -1065,3 +1065,37 @@ async fn skill_sync_falls_back_to_per_sk
+         .collect::<Vec<_>>();
+     assert_eq!(recorded, vec!["edit"], "only the healthy skill is recorded");
+ }
++
++#[cfg(unix)]
++#[tokio::test]
++async fn venv_bootstrap_never_downloads_a_managed_python() {
++    // The packaged build supplies Python on PATH; `uv python install` would fetch a second one.
++    let dir = tempfile::tempdir().unwrap();
++    let uv = fake_uv(
++        dir.path(),
++        &format!(
++            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
++            dir.path().join("uv.log").display()
++        ),
++    );
++    let venv = dir.path().join("venv");
++    // The fake uv creates nothing; the real `uv venv` makes this directory.
++    std::fs::create_dir_all(&venv).unwrap();
++    bootstrap_venv_with_uv(
++        uv.to_str().unwrap(),
++        &venv,
++        &[],
++        &EnsureKernelPythonOptions::default(),
++    )
++    .await
++    .unwrap();
++    let calls = uv_invocations(dir.path());
++    assert!(
++        calls.iter().all(|call| !call.starts_with("python install")),
++        "no managed Python download: {calls:?}"
++    );
++    assert!(
++        calls[0].starts_with("venv ") && calls[0].contains(&format!("--python {PYTHON_VERSION}")),
++        "the venv is created first, from the requested version: {calls:?}"
++    );
++}

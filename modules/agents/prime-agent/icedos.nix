@@ -18,7 +18,6 @@
       inherit ((importTOML ./config.toml).icedos.ai-tools.prime-agent)
         desktopEntry
         includeInIcedosGc
-        providers
         sessionRetentionDays
         terminal-title
         ;
@@ -37,12 +36,6 @@
       # Install a desktop entry launching the TUI in the user's default
       # terminal (Terminal=true; the desktop environment picks the terminal).
       desktopEntry = mkBoolOption { default = desktopEntry; };
-
-      # Ship the bundled Ollama Cloud provider (24 models + /login API-key flow
-      # with OLLAMA_API_KEY). Disable to keep the built-in catalog Ollama-free.
-      providers = {
-        ollama = mkBoolOption { default = providers.ollama; };
-      };
 
       # Whether `icedos gc` prunes stale prime-agent sessions (unshade-style).
       includeInIcedosGc = mkBoolOption { default = includeInIcedosGc; };
@@ -71,20 +64,20 @@
         # Plain-text rules (name = markdown), each appended to the system prompt every turn.
         rules = mkAttrsOfOption { default = extensions.rules; } types.lines;
 
-        # Install the peon-ping companion extension (session-event bridge to peon.sh).
+        # Fire peon-ping on session start, prompt submit and turn end (settings `hooks`).
         peonPing = mkBoolOption { default = extensions.peonPing; };
 
         context-window-cap = {
           # Install the context-cap extension.
           enable = mkBoolOption { default = extensions.context-window-cap.enable; };
 
-          # Cap every model's contextWindow at this percent of its native context.
+          # Cap every model's contextWindow at this percent of its native context (1-99).
           # Excludes llamacpp and models with a contextWindow override.
           percent = mkIntBetweenOption {
             path = "icedos.ai-tools.prime-agent.extensions.context-window-cap.percent";
             source = ./config.toml;
             default = extensions.context-window-cap.percent;
-          } 1 100;
+          } 1 99;
         };
 
         context-language-models = {
@@ -100,11 +93,12 @@
           oneToolPerTurn = mkBoolOption { default = extensions.context-language-models.oneToolPerTurn; };
           sizeTrailer = mkBoolOption { default = extensions.context-language-models.sizeTrailer; };
           nativeCompaction = mkStrOption { default = extensions.context-language-models.nativeCompaction; };
+          # /clm-compact template path ({{mirror}}, {{current}}, {{budget}}, {{instructions}}); "" uses the built-in prompt.
           compactPrompt = mkStrOption { default = extensions.context-language-models.compactPrompt or ""; };
         };
 
         prompt-suggestions = {
-          # Install the prompt-suggest extension: predicted next prompt as ghost text, Tab accepts.
+          # Show a predicted next prompt as ghost text in the empty editor (settings `promptSuggestions`); Tab accepts, /suggest on|off toggles it for the session.
           enable = mkBoolOption { default = extensions.prompt-suggestions.enable; };
 
           # "provider/model-id" making the prediction; "" uses the session model.
@@ -112,9 +106,11 @@
         };
 
         meters = {
-          # Install the cost-footer extension: live session cost (USD, or € for
-          # metered local models) in the TUI bottom bar, with token totals.
+          # Show session cost and token totals, and opencode free-pool usage, in the footer (settings `statusCommand`); /cost toggles the footer.
           cost = mkBoolOption { default = extensions.meters.cost; };
+
+          # Extra footer commands: each runs with no arguments and every stdout line becomes a footer row.
+          extraRows = mkStrListOption { default = extensions.meters.extraRows; };
 
           power = {
             # Meter GPU electricity for locally-served models inside the cost footer.
@@ -178,6 +174,7 @@
         };
 
         # Provider overrides merged into models.json (modelOverrides is partial merge).
+        # Do not set headers in a modelOverrides entry for a model that is also defined in models[]; upstream clears them.
         providers = mkSubmoduleAttrsOption { default = settings.providers; } {
           apiKey = lib.mkOption {
             type = lib.types.nullOr lib.types.str;
@@ -347,6 +344,36 @@
         # "provider/model-id" serving turns that carry images when the session model is text-only.
         imageModel = mkStrOption { default = settings.imageModel; };
       };
+      hooks = {
+        # settings hooks.rateLimit: commands run when a listed provider rate-limits; exit 0 retries the turn.
+        rateLimit = lib.mkOption {
+          type = lib.types.listOf (
+            lib.types.submodule {
+              options = {
+                command = lib.mkOption {
+                  type = lib.types.listOf lib.types.str;
+                  description = "argv of the hook; it gets a JSON payload on stdin.";
+                };
+
+                providers = lib.mkOption {
+                  type = lib.types.listOf lib.types.str;
+                  description = "Providers whose rate limits trigger the hook.";
+                };
+
+                timeoutMs = lib.mkOption {
+                  type = lib.types.nullOr lib.types.ints.positive;
+                  default = null;
+                  description = "Kill the hook after this many milliseconds; null keeps the prime-agent default.";
+                };
+              };
+            }
+          );
+
+          default = [ ];
+          description = "Rate-limit hooks, e.g. a VPN rotation that changes the egress IP before the retry.";
+        };
+      };
+
       users = mkSubmoduleAttrsOption { default = { }; } { };
     };
 
@@ -385,37 +412,21 @@
           };
 
           cfg = config.icedos.ai-tools.prime-agent;
-
-          # Each rule becomes an extension appending its text to the system prompt.
-          ruleExtension = text: ''
-            import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
-            const RULE = ${builtins.toJSON text};
-
-            export default function rule(pi: ExtensionAPI) {
-              pi.on("before_agent_start", (event) => ({
-                systemPrompt: `''${event.systemPrompt}\n\n''${RULE}`,
-              }));
-            }
-          '';
+          sharedRules = config.icedos.ai-tools.rules;
 
           # Shared icedos.ai-tools entries first, so a same-named prime-agent entry wins.
           prime-agent = cfg // {
             skills = cfg.skills // {
               extra-builtin = config.icedos.ai-tools.skills // cfg.skills.extra-builtin;
             };
-            extensions = cfg.extensions // {
-              inline =
-                lib.mapAttrs' (name: text: lib.nameValuePair "rule-${name}" (ruleExtension text)) (
-                  config.icedos.ai-tools.rules // cfg.extensions.rules
-                )
-                // cfg.extensions.inline;
-            };
           };
           primeAgentUsers = prime-agent.users;
 
           # peon-ping is a standalone module and may not be loaded at all.
           peonPingEnabled = (config.icedos.ai-tools.peon-ping.users or { }) != { };
+
+          # alimit is a standalone module; its rows follow each user's statusLine switch.
+          alimitStatusFor = name: config.icedos.ai-tools.alimit.users.${name}.statusLine or false;
 
           # Prune stale prime-agent session data during `icedos gc`.
           primeAgentGcHook = ''
@@ -436,6 +447,25 @@
               [ -n "$(find "$a" -prune -mtime "+${toString prime-agent.sessionRetentionDays}" -print)" ] && rm -rf -- "$a"
             done
             find "''${D}/logs" -maxdepth 1 -type f -mtime "+${toString prime-agent.sessionRetentionDays}" -delete 2>/dev/null || true
+            # git-checkpoint refs whose session file is gone; an unreadable repo stays listed.
+            R="''${D}/git-checkpoint-repos"
+            if [ -f "$R" ]; then
+              G=${pkgs.git}/bin/git
+              : > "$R.new"
+              while IFS= read -r repo; do
+                [ -d "$repo" ] || continue
+                if ! refs=$("$G" -C "$repo" for-each-ref --format='%(refname)' refs/prime-agent/checkpoints/ 2>/dev/null); then
+                  echo "$repo" >> "$R.new"
+                  continue
+                fi
+                for ref in $refs; do
+                  sid=''${ref#refs/prime-agent/checkpoints/}
+                  [ -f "''${D}/sessions/''${sid%%/*}.jsonl" ] || "$G" -C "$repo" update-ref -d "$ref" || true
+                done
+                [ -n "$("$G" -C "$repo" for-each-ref refs/prime-agent/checkpoints/ 2>/dev/null)" ] && echo "$repo" >> "$R.new"
+              done < "$R"
+              cat "$R.new" > "$R" && rm -f "$R.new"
+            fi
           '';
 
           # ---- skills.extra-builtin validation ----
@@ -525,7 +555,7 @@
             }
           ];
 
-          # Copy of nixpkgs PR #550774 at 0.7.4; drop overlay, package.nix and patch once merged.
+          # Built from source (Rust, 0.10.0+); see package.nix.
           nixpkgs.overlays = [
             (final: _prev: {
               prime-agent = final.callPackage ./package.nix {
@@ -534,7 +564,6 @@
                 defaultAgentDir = shellDataDir;
                 extraBuiltinSkills = prime-agent.skills.extra-builtin;
                 codeReview = prime-agent.skills.code.review;
-                ollamaCloud = prime-agent.providers.ollama;
                 titleIdleGlyph = prime-agent.terminal-title.idleGlyph;
                 titleWorkingGlyphs = prime-agent.terminal-title.workingGlyphs;
               };
@@ -639,50 +668,11 @@
                     else
                       stripped
                   );
-                # power.ts carries build-time constants, so the dir is copied, not symlinked.
-                # The markers sit inside TS string literals; jsStr escapes values for that context, which escapeShellArg (protecting the builder, not the literal) does not.
-                powerWindows =
-                  let
-                    w = prime-agent.extensions.meters.power.windows;
-                  in
-                  if w == [ ] then
-                    [
-                      "1h"
-                      "24h"
-                      "7d"
-                      "30d"
-                    ]
-                  else
-                    w;
-                jsStr =
-                  v: lib.escapeShellArg (lib.replaceStrings [ "\\" "\"" "\n" "\r" ] [ "\\\\" "\\\"" "\\n" "\\r" ] v);
-                costFooterSrc = pkgs.runCommand "prime-agent-cost-footer" { } ''
-                  cp -r ${./extensions/cost-footer} $out
-                  chmod -R +w $out
-                  substituteInPlace $out/power.ts \
-                    --replace-fail "@powerCard@" ${jsStr prime-agent.extensions.meters.power.card} \
-                    --replace-fail "@powerRate@" ${jsStr (builtins.toJSON prime-agent.extensions.meters.power.rateKwh)} \
-                    --replace-fail "@powerIdle@" ${jsStr (builtins.toJSON prime-agent.extensions.meters.power.idleWatts)} \
-                    --replace-fail "@powerCurrency@" ${jsStr prime-agent.extensions.meters.power.currency} \
-                    --replace-fail "@powerWindows@" ${jsStr (lib.concatStringsSep "," powerWindows)} \
-                    --replace-fail "@powerProviders@" ${
-                      jsStr (
-                        lib.concatStringsSep "," (
-                          if prime-agent.extensions.meters.power.enable then
-                            prime-agent.extensions.meters.power.providers
-                          else
-                            [ ]
-                        )
-                      )
-                    }
-
-                  # substituteInPlace only fails on a marker it was told about, so
-                  # a newly added one would ship as a literal and break the load.
-                  if ${pkgs.gnugrep}/bin/grep -rqE '@[a-zA-Z_][0-9A-Za-z_-]*@' $out; then
-                    echo "unsubstituted placeholder left in cost-footer" >&2
-                    exit 1
-                  fi
-                '';
+                rulesText = lib.concatStringsSep "\n\n" (
+                  lib.attrValues (
+                    sharedRules // prime-agent.extensions.rules
+                  )
+                );
                 # home.file keys are $HOME-relative; only in-home dataDirs work (asserted below).
                 relDataDir = lib.removePrefix (config.home.homeDirectory + "/") dataDir;
                 # ---- shared MCP registry ----
@@ -832,6 +822,85 @@
                 isNoAuthRemote =
                   s: s.command == null && (s.bearerTokenEnvVar or null) == null && !(s.oauth or false);
 
+                clm = prime-agent.extensions.context-language-models;
+                clmDeriv = pkgs.callPackage ./extensions/pi-clm.nix { };
+                clmSrc = clmDeriv;
+                clmSteering =
+                  if
+                    lib.elem (lib.toLower clm.steering) [
+                      "none"
+                      "off"
+                    ]
+                  then
+                    null
+                  else if
+                    lib.elem clm.steering [
+                      ""
+                      "house"
+                      "house-brief.md"
+                    ]
+                  then
+                    "${clmSrc}/steering/house-brief.md"
+                  else
+                    clm.steering;
+
+                meters = prime-agent.extensions.meters;
+
+                statusHelper = pkgs.writers.writePython3Bin "prime-agent-status" {
+                  flakeIgnore = [ "E501" ];
+                } (builtins.readFile ./status/prime_agent_status.py);
+
+                alimitStatus = alimitStatusFor config.home.username;
+
+                statusConfig = pkgs.writeText "prime-agent-status.json" (
+                  builtins.toJSON {
+                    showCost = meters.cost;
+                    inherit (meters) extraRows;
+                    alimit = alimitStatus;
+                    alimitProviders = {
+                      anthropic = "claude";
+                      google-antigravity = "antigravity";
+                      opencode-go = "opencode-go";
+                      openrouter = "openrouter";
+                    };
+                    sessionsDir = "${dataDir}/sessions";
+                    # Measured 2026-08-31: each list shares one ~1000 req / 5h bucket per egress IP.
+                    freePools = {
+                      shared = [
+                        "big-pickle"
+                        "deepseek-v4-flash-free"
+                        "mimo-v2.5-free"
+                        "ling-3.0-flash-fin-free"
+                        "muse-spark-1.2-contributor-free"
+                      ];
+                      nemotron = [
+                        "nemotron-3-ultra-free"
+                        "nemotron-3.5-lightning-free"
+                      ];
+                    };
+                    freeCaps = {
+                      shared = 1000;
+                      nemotron = 1000;
+                      "laguna-s-2.1-free" = 30;
+                    };
+                    freeCapDefault = 1000;
+                    power =
+                      if meters.power.enable then
+                        {
+                          inherit (meters.power)
+                            card
+                            rateKwh
+                            idleWatts
+                            currency
+                            providers
+                            windows
+                            ;
+                        }
+                      else
+                        null;
+                  }
+                );
+
                 # Seed-wins merge, so empty values would reset TUI choices; mcpServers always rides along.
                 seedSettings =
                   (lib.optionalAttrs (prime-agent.default.provider != "") {
@@ -856,6 +925,88 @@
                     # Upstream defaults this to true; expose it so a user can flip it on.
                     telemetry.enabled = prime-agent.settings.telemetry;
                     terminal.speed = prime-agent.settings.speed;
+                  }
+                  // {
+                    # peon.sh reads Claude-style hook payloads on stdin.
+                    hooks =
+                      let
+                        peon = [ "${config.home.homeDirectory}/.openpeon/peon.sh" ];
+                        merged =
+                          lib.optionalAttrs (prime-agent.extensions.peonPing && peonPingEnabled) {
+                            sessionStart = peon;
+                            agentStart = peon;
+                            agentEnd = peon;
+                            agentError = peon;
+                          }
+                          // lib.optionalAttrs (prime-agent.hooks.rateLimit != [ ]) {
+                            rateLimit = map (lib.filterAttrs (_: v: v != null)) prime-agent.hooks.rateLimit;
+                          };
+                      in
+                      if merged == { } then null else merged;
+                  }
+                  // {
+                    contextWindowPercent =
+                      if prime-agent.extensions.context-window-cap.enable then
+                        prime-agent.extensions.context-window-cap.percent
+                      else
+                        null;
+                  }
+                  // {
+                    contextLanguageModels =
+                      let
+                        orNull = f: v: if v == "" then null else f v;
+                      in
+                      if !clm.enable then
+                        null
+                      else
+                        {
+                          enabled = true;
+                          overflow = clm.overflow;
+                          oneToolPerTurn = clm.oneToolPerTurn;
+                          sizeTrailer = clm.sizeTrailer;
+                          nativeCompaction = clm.nativeCompaction;
+                          compactPrompt = orNull (v: v) clm.compactPrompt;
+                          steering = clmSteering;
+                          budget = orNull lib.toInt clm.budget;
+                          reserve = orNull lib.toInt clm.reserve;
+                          observationCap = orNull lib.toInt clm.observationCap;
+                          estimateFactor = orNull builtins.fromJSON clm.estimateFactor;
+                          # Same comma list format as pi-clm, e.g. "0.5,0.75,0.9".
+                          remindAt = orNull (v: builtins.fromJSON "[${v}]") clm.remindAt;
+                        };
+                  }
+                  // {
+                    promptSuggestions =
+                      if prime-agent.extensions.prompt-suggestions.enable then
+                        {
+                          enabled = true;
+                          # null falls back to the session model.
+                          model =
+                            if prime-agent.extensions.prompt-suggestions.model == "" then
+                              null
+                            else
+                              prime-agent.extensions.prompt-suggestions.model;
+                        }
+                      else
+                        null;
+                  }
+                  // {
+                    statusCommand =
+                      if meters.cost || alimitStatus || meters.extraRows != [ ] then
+                        {
+                          command = [
+                            "${statusHelper}/bin/prime-agent-status"
+                            "--config"
+                            "${statusConfig}"
+                          ];
+                          intervalMs = 30000;
+                          # The wattmeter service drops a lease older than 5 s.
+                          busyIntervalMs = 2000;
+                          timeoutMs = 5000;
+                          visible = true;
+                        }
+                      else
+                        null;
                   };
 
                 # ---- per-server skill files ----
@@ -1088,26 +1239,13 @@
                     };
                   };
 
-                # opencode 429s unless identified as a client; zen also wants a session
-                # header, which is per-run, so zen-session.ts registers both at load.
+                # opencode 429s unless identified as a client.
                 opencodeVersion = config.programs.opencode.package.version or pkgs.opencode.version;
-                # zen/v1 and zen/go/v1 are separate providers upstream; both 429 unidentified.
-                providerDefaults.opencode.headers."User-Agent" = "opencode/${opencodeVersion}";
-                providerDefaults.opencode-go.headers."User-Agent" = "opencode/${opencodeVersion}";
-
-                zenSessionSrc = pkgs.replaceVars ./extensions/zen-session.ts {
-                  inherit opencodeVersion;
+                providerDefaults = {
+                  opencode.headers."User-Agent" = "opencode/${opencodeVersion}";
+                  opencode-go.headers."User-Agent" = "opencode/${opencodeVersion}";
                 };
 
-                # Caps model context windows at extensions.context-window-cap.percent of native;
-                # llamacpp + explicitly-overridden models are left untouched.
-                contextCapSrc = pkgs.replaceVars ./extensions/context-cap.ts {
-                  contextWindowPercent = prime-agent.extensions.context-window-cap.percent;
-                };
-
-                # Context Language Models (pi-clm) extension.
-                clmDeriv = pkgs.callPackage ./extensions/pi-clm.nix { };
-                clmSrc = clmDeriv;
                 # modelOverrides stays as-is for partial merge; models[] merges in
                 # custom models (adds unknown ids, replaces known ones).
                 userProvidersConverted = lib.mapAttrs (
@@ -1190,111 +1328,11 @@
                   "$JQ" -n --slurpfile a "$AUTH" --slurpfile k "${remoteCredKeysFile}" 'reduce $k[0][] as $key ($a[0]; if .[$key] == {"type":"api_key","key":"dummy"} then del(.[$key]) else . end)' > "$AUTH.tmp" && commit_json "$AUTH.tmp" "$AUTH" 0600 || { rm -f "$AUTH.tmp"; echo "prime-agent: failed to retract seeded MCP credentials from $AUTH" >&2; }
                 '';
 
-                primeEnv = lib.mkMerge [
-                  {
-                    PRIME_AGENT_CODING_AGENT_DIR = dataDir;
-                    PRIME_AGENT_KERNEL_VENV = "${dataDir}/kernel-venv";
-                    RLM_MAX_DEPTH = toString prime-agent.settings.rlmMaxDepth;
-                  }
-                  (lib.mkIf prime-agent.extensions.context-language-models.enable {
-                    PI_CLM_NATIVE_COMPACTION =
-                      prime-agent.extensions.context-language-models.nativeCompaction or "auto";
-                    PI_CLM_OVERFLOW = prime-agent.extensions.context-language-models.overflow or "withhold";
-                    PI_CLM_ONE_TOOL_PER_TURN =
-                      if prime-agent.extensions.context-language-models.oneToolPerTurn then "1" else "0";
-                    PI_CLM_SIZE_TRAILER =
-                      if prime-agent.extensions.context-language-models.sizeTrailer then "1" else "0";
-                    # Bundled brief by default, so it tracks the pi-clm version.
-                    PI_CLM_STEERING =
-                      if prime-agent.extensions.context-language-models.steering != "" then
-                        prime-agent.extensions.context-language-models.steering
-                      else
-                        "${clmSrc}/steering/house-brief.md";
-                  })
-                  (lib.mkIf
-                    (
-                      prime-agent.extensions.context-language-models.enable
-                      && prime-agent.extensions.context-language-models.budget != ""
-                    )
-                    {
-                      PI_CLM_BUDGET = prime-agent.extensions.context-language-models.budget;
-                    }
-                  )
-                  (lib.mkIf
-                    (
-                      prime-agent.extensions.context-language-models.enable
-                      && prime-agent.extensions.context-language-models.reserve != ""
-                    )
-                    {
-                      PI_CLM_RESERVE = prime-agent.extensions.context-language-models.reserve;
-                    }
-                  )
-                  (lib.mkIf
-                    (
-                      prime-agent.extensions.context-language-models.enable
-                      && prime-agent.extensions.context-language-models.remindAt != ""
-                    )
-                    {
-                      PI_CLM_REMIND_AT = prime-agent.extensions.context-language-models.remindAt;
-                    }
-                  )
-                  (lib.mkIf
-                    (
-                      prime-agent.extensions.context-language-models.enable
-                      && prime-agent.extensions.context-language-models.observationCap != ""
-                    )
-                    {
-                      PI_CLM_OBSERVATION_CAP = prime-agent.extensions.context-language-models.observationCap;
-                    }
-                  )
-                  (lib.mkIf
-                    (
-                      prime-agent.extensions.context-language-models.enable
-                      && prime-agent.extensions.context-language-models.estimateFactor != ""
-                    )
-                    {
-                      PI_CLM_ESTIMATE_FACTOR = prime-agent.extensions.context-language-models.estimateFactor;
-                    }
-                  )
-                  (lib.mkIf
-                    (
-                      prime-agent.extensions.context-language-models.enable
-                      && prime-agent.extensions.context-language-models.compactPrompt != ""
-                    )
-                    {
-                      PI_CLM_COMPACT_PROMPT = prime-agent.extensions.context-language-models.compactPrompt;
-                    }
-                  )
-                ];
-
-                # Mirror requested built-in examples into the auto-load dir.
-                upstreamExtDir = "${pkgs.prime-agent}/lib/prime-agent/examples/extensions";
-
-                # Resolve each name to its file (.ts) or folder (index.ts) source; null if absent.
-                builtinExtSrc =
-                  name:
-                  if builtins.pathExists "${upstreamExtDir}/${name}/index.ts" then
-                    {
-                      src = "${upstreamExtDir}/${name}";
-                      target = "${relDataDir}/extensions/${name}";
-                    }
-                  else if builtins.pathExists "${upstreamExtDir}/${name}.ts" then
-                    {
-                      src = "${upstreamExtDir}/${name}.ts";
-                      target = "${relDataDir}/extensions/${name}.ts";
-                    }
-                  else
-                    null;
-
-                extensionHomeFiles = map (name: {
-                  "${(builtinExtSrc name).target}".source = (builtinExtSrc name).src;
-                }) prime-agent.extensions.builtin;
-
-                missingExtensions = lib.filter (n: builtinExtSrc n == null) prime-agent.extensions.builtin;
-
-                extensionLocalHomeFiles = lib.mapAttrsToList (name: src: {
-                  "${relDataDir}/extensions/${name}.ts".text = src;
-                }) prime-agent.extensions.inline;
+                primeEnv = {
+                  PRIME_AGENT_CODING_AGENT_DIR = dataDir;
+                  PRIME_AGENT_KERNEL_VENV = "${dataDir}/kernel-venv";
+                  RLM_MAX_DEPTH = toString prime-agent.settings.rlmMaxDepth;
+                };
               in
               {
                 options.icedos.managed-settings.prime-agent = icedosLib.mkAttrsOption {
@@ -1339,16 +1377,6 @@
                           builtins.concatStringsSep ", " (map (e: "${e.name} -> ${toString e.p}") duplicatePorts)
                         }. ports.overrides pins are honored verbatim, so two
                         servers resolving to one port must be re-pinned.
-                      '';
-                    }
-                    {
-                      assertion = missingExtensions == [ ];
-                      message = ''
-                        icedos.ai-tools.prime-agent.extensions.builtin references upstream
-                        prime-agent example extensions that do not exist:
-                        ${builtins.concatStringsSep ", " missingExtensions}
-                        Each name is a folder/file under
-                        <prime-agent>/lib/prime-agent/examples/extensions/.
                       '';
                     }
                     {
@@ -1410,43 +1438,15 @@
                       '';
                     }
                     {
-                      # Both load a "cost-footer" extension and would double-render.
-                      assertion = !prime-agent.extensions.meters.cost || !(prime-agent.extensions.inline ? "cost-footer");
-                      message = ''
-                        icedos.ai-tools.prime-agent.extensions.inline already declares
-                        "cost-footer"; the built-in cost footer ships the same
-                        extension. Remove the inline declaration or set
-                        meters.cost = false.
-                      '';
+                      assertion = lib.all (hook: hook.command != [ ] && hook.providers != [ ]) prime-agent.hooks.rateLimit;
+                      message = "Every icedos.ai-tools.prime-agent.hooks.rateLimit entry needs a non-empty command and providers.";
                     }
                     {
-                      # registerProvider replaces the whole stored request config, so
-                      # zen-session.ts drops any apiKey or headers models.json set for opencode.
-                      assertion =
-                        let
-                          oc = prime-agent.settings.providers.opencode or { };
-                        in
-                        (oc.apiKey or null) == null && (oc.headers or { }) == { };
+                      assertion = prime-agent.extensions.builtin == [ ] && cfg.extensions.inline == { };
                       message = ''
-                        icedos.ai-tools.prime-agent.settings.providers.opencode sets apiKey or
-                        headers, which the zen-session extension drops when it refreshes the
-                        session header. Keep the key in prime-agent's auth store, and set
-                        extra opencode headers from an extension instead.
-                      '';
-                    }
-                    {
-                      assertion = lib.all (n: builtins.match "[A-Za-z0-9._-]+" n != null) (
-                        lib.attrNames prime-agent.extensions.inline
-                      );
-                      message = ''
-                        icedos.ai-tools.prime-agent.extensions.inline names must be
-                        simple: ${
-                          builtins.concatStringsSep ", " (
-                            lib.filter (n: builtins.match "[A-Za-z0-9._-]+" n == null) (
-                              lib.attrNames prime-agent.extensions.inline
-                            )
-                          )
-                        }
+                        icedos.ai-tools.prime-agent.extensions.builtin and .inline need the TypeScript
+                        extension loader, which prime-agent 0.10.0 removed. Use extensions.rules for
+                        prompt text, or a skill under skills.extra-builtin.
                       '';
                     }
                   ];
@@ -1457,44 +1457,9 @@
 
                   home.file = mkMerge (
                     (lib.mapAttrsToList skillFiles enabled)
-                    ++ extensionHomeFiles
-                    ++ extensionLocalHomeFiles
                     ++ [
-                      # No shell hooks; extensions auto-load from <agentDir>/extensions/*.ts.
-                      (mkIf (peonPingEnabled && prime-agent.extensions.peonPing) {
-                        "${relDataDir}/extensions/peon-ping.ts".source = pkgs.replaceVars ./extensions/peon-ping.ts {
-                          # Installed by peon-ping's hm module; bin/peon carries its own PATH.
-                          peonSh = "${config.home.homeDirectory}/.openpeon/peon.sh";
-                        };
-                      })
-
-                      # Live session cost (USD, or € for metered local models) in the TUI bottom bar.
-                      (mkIf prime-agent.extensions.meters.cost {
-                        "${relDataDir}/extensions/cost-footer".source = costFooterSrc;
-                      })
-
-                      # Mints a fresh zen session id per pi session; models.json cannot.
-                      {
-                        "${relDataDir}/extensions/zen-session.ts".source = zenSessionSrc;
-                      }
-
-                      # Caps model context windows at extensions.context-window-cap.percent of native.
-                      (mkIf prime-agent.extensions.context-window-cap.enable {
-                        "${relDataDir}/extensions/context-cap.ts".source = contextCapSrc;
-                      })
-
-                      # The model curates its own context in a mirrored file (pi-clm).
-                      (mkIf prime-agent.extensions.context-language-models.enable {
-                        "${relDataDir}/extensions/pi-clm".source = clmSrc;
-                      })
-
-                      # Predicted next prompt as ghost text in the empty editor; Tab accepts.
-                      (mkIf prime-agent.extensions.prompt-suggestions.enable {
-                        "${relDataDir}/extensions/prompt-suggest.ts".source =
-                          pkgs.replaceVars ./extensions/prompt-suggest.ts
-                            {
-                              suggestModel = prime-agent.extensions.prompt-suggestions.model;
-                            };
+                      (mkIf (rulesText != "") {
+                        "${relDataDir}/APPEND_SYSTEM.md".text = rulesText;
                       })
                     ]
                   );
@@ -1524,9 +1489,6 @@
             ]
             ++ lib.optionals prime-agent.includeInIcedosGc [
               "icedos gc also clears out old prime-agent sessions and logs."
-            ]
-            ++ lib.optionals prime-agent.providers.ollama [
-              "prime-agent supports Ollama Cloud; type /login in its tui and pick Ollama to connect using an API key."
             ];
         }
       )

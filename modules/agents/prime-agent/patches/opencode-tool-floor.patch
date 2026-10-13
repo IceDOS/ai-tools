@@ -1,0 +1,341 @@
+Index: prime-agent-src/crates/pa-ai/src/providers/anthropic/params.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/providers/anthropic/params.rs
++++ prime-agent-src/crates/pa-ai/src/providers/anthropic/params.rs
+@@ -144,5 +144,9 @@ pub(crate) fn build_params(
+         params.insert("tool_choice".into(), tool_choice.to_json());
+     }
+ 
++    if crate::providers::opencode_tools::is_opencode_provider(&model.provider) {
++        crate::providers::opencode_tools::apply_anthropic_tool_floor(&mut params);
++    }
++
+     Value::Object(params)
+ }
+Index: prime-agent-src/crates/pa-ai/src/providers/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/providers/mod.rs
++++ prime-agent-src/crates/pa-ai/src/providers/mod.rs
+@@ -15,5 +15,6 @@ pub mod openai_responses;
+ pub mod openai_responses_hooks;
+ pub mod openai_responses_shared;
+ pub mod openai_responses_stream;
++pub mod opencode_tools;
+ pub mod simple_options;
+ pub mod transform_messages;
+Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/params.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/params.rs
++++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/params.rs
+@@ -90,6 +90,10 @@ pub(crate) fn build_params(
+         params.insert("tool_choice".into(), tool_choice.to_json());
+     }
+ 
++    if crate::providers::opencode_tools::is_opencode_provider(&model.provider) {
++        crate::providers::opencode_tools::apply_completions_tool_floor(&mut params);
++    }
++
+     if supports_thinking(model) {
+         match compat.thinking_format {
+             crate::types::ThinkingFormat::Zai | crate::types::ThinkingFormat::Qwen => {
+Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/stream.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/stream.rs
++++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/stream.rs
+@@ -701,6 +701,17 @@ async fn run_stream(
+                 .unwrap_or_else(|| "Provider returned an error stop reason".to_string()),
+         ));
+     }
++    if crate::providers::opencode_tools::is_opencode_provider(&model.provider)
++        && context.tools.as_ref().is_none_or(Vec::is_empty)
++        && output.content.iter().any(|block| {
++            matches!(block, AssistantContent::Text(text)
++                if crate::providers::opencode_tools::has_leaked_tool_call_markup(&text.text))
++        })
++    {
++        return Err(ProviderError::StreamFailure(
++            crate::providers::opencode_tools::leaked_tool_call_failure(),
++        ));
++    }
+     // The drop: the provider ended the stream without its terminal marker —
+     // no stop signal (`finish_reason`), no `[DONE]`, no error frame. A
+     // healthy completion always carries one; an end without one means the
+@@ -928,4 +939,41 @@ mod tests {
+         assert!((message.usage.cost.input.as_f64() - 0.1015).abs() < 1e-9);
+         assert!((message.usage.cost.output.as_f64() - 0.1015).abs() < 1e-9);
+     }
++
++    /// A tool-less opencode request whose reply leaks DSML tool-call markup fails as a
++    /// retryable malformed response instead of settling the markup as the answer.
++    #[tokio::test]
++    async fn opencode_toolless_reply_with_leaked_markup_fails_malformed() {
++        let leaked = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"<｜DSML｜function_calls>\"},\"finish_reason\":\"stop\"}]}\n\n";
++        let addr = serve_sse(format!("{leaked}{DONE}")).await;
++        let mut model = completions_model("big-pickle", "opencode", 0.0, 0.0);
++        model["baseUrl"] = json!(format!("http://{addr}"));
++        let model: Model = serde_json::from_value(model).unwrap();
++        let options = OpenAICompletionsOptions::from_base(crate::types::StreamOptions {
++            api_key: Some("test".into()),
++            ..Default::default()
++        });
++        let context = Context {
++            system_prompt: None,
++            messages: vec![],
++            tools: None,
++        };
++        let mut reader = stream_openai_completions(&model, &context, Some(&options));
++        let error = loop {
++            match reader.next_event().await.unwrap() {
++                AssistantMessageEvent::Error { error, .. } => break error,
++                AssistantMessageEvent::Done { .. } => panic!("the leaked markup must not settle"),
++                _ => {}
++            }
++        };
++        assert_eq!(error.stop_reason, StopReason::Error);
++        assert!(
++            error
++                .error_message
++                .as_deref()
++                .is_some_and(|message| message.contains("tool-less request")),
++            "{:?}",
++            error.error_message
++        );
++    }
+ }
+Index: prime-agent-src/crates/pa-ai/src/providers/opencode_tools.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-ai/src/providers/opencode_tools.rs
+@@ -0,0 +1,232 @@
++//! `OpenCode` Zen request shims shared by the Anthropic and `OpenAI` Completions providers.
++
++use serde_json::{json, Map, Value};
++
++use crate::utils_inner::stream_failure::{
++    stream_failure_message, StreamFailureError, StreamFailureInfo, StreamFailureKind,
++};
++
++#[must_use]
++pub fn is_opencode_provider(provider: &str) -> bool {
++    provider == "opencode" || provider == "opencode-go"
++}
++
++// zen rejects a free-tier request whose tools omit opencode's own, so stubs for the
++// missing names are appended. The model is told not to call them.
++pub const OPENCODE_REQUIRED_TOOLS: [&str; 4] = ["bash", "grep", "glob", "read"];
++
++pub const OPENCODE_STUB_TOOL_DESCRIPTION: &str =
++    "Unavailable in this environment. Use the ipython tool instead.";
++
++// Stubs on a tool-less request exist only to pass zen's check; the model must answer in text.
++pub const OPENCODE_TOOLLESS_STUB_DESCRIPTION: &str =
++    "Unavailable. Never call this tool; reply with plain text only.";
++
++pub const OPENCODE_TOOLLESS_SYSTEM_NOTE: &str =
++    "No tools are available for this request. Reply with plain text only and never emit tool calls.";
++
++/// The required opencode tool names absent from `present`, in table order.
++#[must_use]
++pub fn missing_opencode_tools<'a>(present: impl IntoIterator<Item = &'a str>) -> Vec<&'static str> {
++    let have: std::collections::HashSet<&str> = present.into_iter().collect();
++    OPENCODE_REQUIRED_TOOLS
++        .into_iter()
++        .filter(|name| !have.contains(name))
++        .collect()
++}
++
++// DeepSeek-based zen models (big-pickle) can ignore tool_choice "none" and leak DSML tool-call markup as text.
++#[must_use]
++pub fn has_leaked_tool_call_markup(text: &str) -> bool {
++    text.contains("｜DSML｜")
++}
++
++/// The retryable failure for a tool-less request whose reply leaked tool-call markup.
++#[must_use]
++pub fn leaked_tool_call_failure() -> StreamFailureError {
++    let info = StreamFailureInfo {
++        kind: StreamFailureKind::MalformedResponse,
++        ..StreamFailureInfo::unknown()
++    };
++    StreamFailureError {
++        message: stream_failure_message(
++            &info,
++            Some("Model emitted a tool call on a tool-less request"),
++        ),
++        info,
++    }
++}
++
++/// Anthropic Messages: append stub tools to `params`; a request that had none gets
++/// `tool_choice: none`.
++pub fn apply_anthropic_tool_floor(params: &mut Map<String, Value>) {
++    let mut tools = params
++        .get("tools")
++        .and_then(Value::as_array)
++        .cloned()
++        .unwrap_or_default();
++    let missing = missing_opencode_tools(
++        tools
++            .iter()
++            .filter_map(|tool| tool.get("name").and_then(Value::as_str)),
++    );
++    if missing.is_empty() {
++        return;
++    }
++    let had_tools = !tools.is_empty();
++    tools.extend(missing.into_iter().map(|name| {
++        json!({
++            "name": name,
++            "description": OPENCODE_STUB_TOOL_DESCRIPTION,
++            "input_schema": { "type": "object", "properties": {} },
++        })
++    }));
++    params.insert("tools".into(), Value::Array(tools));
++    if !had_tools {
++        params.insert("tool_choice".into(), json!({ "type": "none" }));
++    }
++}
++
++/// `OpenAI` Completions: append stub function tools; a tool-less request also gets
++/// `tool_choice: "none"` and a system note forbidding tool calls.
++pub fn apply_completions_tool_floor(params: &mut Map<String, Value>) {
++    let mut tools = params
++        .get("tools")
++        .and_then(Value::as_array)
++        .cloned()
++        .unwrap_or_default();
++    let missing = missing_opencode_tools(tools.iter().filter_map(|tool| {
++        (tool.get("type").and_then(Value::as_str) == Some("function"))
++            .then(|| tool.pointer("/function/name").and_then(Value::as_str))
++            .flatten()
++    }));
++    if missing.is_empty() {
++        return;
++    }
++    let had_tools = !tools.is_empty();
++    let description = if had_tools {
++        OPENCODE_STUB_TOOL_DESCRIPTION
++    } else {
++        OPENCODE_TOOLLESS_STUB_DESCRIPTION
++    };
++    tools.extend(missing.into_iter().map(|name| {
++        json!({
++            "type": "function",
++            "function": {
++                "name": name,
++                "description": description,
++                "parameters": { "type": "object", "properties": {} },
++            },
++        })
++    }));
++    params.insert("tools".into(), Value::Array(tools));
++    if had_tools {
++        return;
++    }
++    params.insert("tool_choice".into(), json!("none"));
++    let Some(messages) = params.get_mut("messages").and_then(Value::as_array_mut) else {
++        return;
++    };
++    let system = messages.iter_mut().find(|message| {
++        matches!(
++            message.get("role").and_then(Value::as_str),
++            Some("system" | "developer")
++        )
++    });
++    match system.and_then(|message| message.get_mut("content")) {
++        Some(Value::String(content)) => {
++            content.push_str("\n\n");
++            content.push_str(OPENCODE_TOOLLESS_SYSTEM_NOTE);
++        }
++        _ => messages.insert(
++            0,
++            json!({ "role": "system", "content": OPENCODE_TOOLLESS_SYSTEM_NOTE }),
++        ),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn names(params: &Map<String, Value>, pointer: &str) -> Vec<String> {
++        params["tools"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .map(|tool| tool.pointer(pointer).unwrap().as_str().unwrap().to_string())
++            .collect()
++    }
++
++    #[test]
++    fn anthropic_floor_appends_only_the_missing_tools() {
++        let mut params = Map::new();
++        params.insert(
++            "tools".into(),
++            json!([{ "name": "ipython" }, { "name": "read" }]),
++        );
++        apply_anthropic_tool_floor(&mut params);
++        assert_eq!(
++            names(&params, "/name"),
++            ["ipython", "read", "bash", "grep", "glob"]
++        );
++        assert!(
++            params.get("tool_choice").is_none(),
++            "a tool-using request keeps its choice"
++        );
++
++        let mut toolless = Map::new();
++        apply_anthropic_tool_floor(&mut toolless);
++        assert_eq!(names(&toolless, "/name"), OPENCODE_REQUIRED_TOOLS);
++        assert_eq!(toolless["tool_choice"], json!({ "type": "none" }));
++    }
++
++    #[test]
++    fn completions_floor_guards_toolless_requests() {
++        let mut params = Map::new();
++        params.insert(
++            "messages".into(),
++            json!([{ "role": "system", "content": "Be brief." }, { "role": "user", "content": "hi" }]),
++        );
++        apply_completions_tool_floor(&mut params);
++        assert_eq!(names(&params, "/function/name"), OPENCODE_REQUIRED_TOOLS);
++        assert_eq!(params["tool_choice"], json!("none"));
++        assert_eq!(
++            params["tools"][0]["function"]["description"],
++            OPENCODE_TOOLLESS_STUB_DESCRIPTION
++        );
++        assert_eq!(
++            params["messages"][0]["content"],
++            format!("Be brief.\n\n{OPENCODE_TOOLLESS_SYSTEM_NOTE}")
++        );
++
++        // No system message: the note is prepended as one.
++        let mut bare = Map::new();
++        bare.insert(
++            "messages".into(),
++            json!([{ "role": "user", "content": "hi" }]),
++        );
++        apply_completions_tool_floor(&mut bare);
++        assert_eq!(bare["messages"][0]["role"], "system");
++        assert_eq!(bare["messages"].as_array().unwrap().len(), 2);
++    }
++
++    #[test]
++    fn completions_floor_leaves_complete_tool_sets_alone() {
++        let tools: Vec<Value> = OPENCODE_REQUIRED_TOOLS
++            .iter()
++            .map(|name| json!({ "type": "function", "function": { "name": name } }))
++            .collect();
++        let mut params = Map::new();
++        params.insert("tools".into(), Value::Array(tools.clone()));
++        apply_completions_tool_floor(&mut params);
++        assert_eq!(params["tools"], Value::Array(tools));
++        assert!(params.get("tool_choice").is_none());
++    }
++
++    #[test]
++    fn leaked_dsml_markup_is_detected() {
++        assert!(has_leaked_tool_call_markup("<｜DSML｜function_calls>"));
++        assert!(!has_leaked_tool_call_markup("plain answer"));
++    }
++}

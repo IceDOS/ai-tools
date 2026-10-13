@@ -1,37 +1,104 @@
---- a/packages/coding-agent/src/core/settings-manager.ts
-+++ b/packages/coding-agent/src/core/settings-manager.ts
-@@ -60,6 +60,7 @@
- 	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
- 	fullscreen?: boolean; // default: true (alternate-screen rendering with scrollable transcript)
- 	fullscreenMouse?: boolean; // default: true
-+	speed?: boolean; // default: false (footer tok/s readout; toggled at runtime with /speed)
+Index: prime-agent-src/crates/pa-cli/src/client_settings.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-cli/src/client_settings.rs
++++ prime-agent-src/crates/pa-cli/src/client_settings.rs
+@@ -112,6 +112,10 @@ impl ClientSettings for CliClientSetting
+     fn image_model(&self) -> Option<String> {
+         self.manager().get_image_model()
+     }
++
++    fn speed_display(&self) -> bool {
++        self.manager().get_speed()
++    }
+     setting!(
+         enable_skill_commands,
+         set_enable_skill_commands,
+@@ -331,4 +335,23 @@ mod tests {
+         let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
+         assert_eq!(value["factory"]["enabled"], false);
+     }
++
++    /// `terminal.speed` seeds the session's `/speed` state; unset reads as off.
++    #[test]
++    fn speed_display_reads_the_terminal_setting() {
++        let dir = tempfile::TempDir::new().expect("temp dir");
++        let agent_dir = dir.path().join("agent");
++        std::fs::create_dir_all(&agent_dir).expect("agent dir");
++        let settings = CliClientSettings::new(dir.path().to_path_buf(), agent_dir.clone());
++        assert!(!settings.speed_display());
++
++        std::fs::write(
++            agent_dir.join("settings.json"),
++            r#"{ "terminal": { "speed": true, "fullscreenMouse": false } }"#,
++        )
++        .expect("settings file");
++        assert!(settings.speed_display());
++        // The sibling key in the same block still reads.
++        assert!(!settings.manager().get_fullscreen_mouse());
++    }
+ }
+Index: prime-agent-src/crates/pa-core/src/settings/interactive_settings.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/interactive_settings.rs
++++ prime-agent-src/crates/pa-core/src/settings/interactive_settings.rs
+@@ -49,6 +49,16 @@ impl SettingsManager {
+             .unwrap_or(false)
+     }
+ 
++    /// `terminal.speed`: start sessions with the footer tok/s readout on.
++    #[must_use]
++    pub fn get_speed(&self) -> bool {
++        self.settings()
++            .terminal
++            .as_ref()
++            .and_then(|terminal| terminal.speed)
++            .unwrap_or(false)
++    }
++
+     /// # Errors
+     ///
+     /// Returns an error when the global settings scope cannot be saved.
+Index: prime-agent-src/crates/pa-core/src/settings/types.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/types.rs
++++ prime-agent-src/crates/pa-core/src/settings/types.rs
+@@ -170,6 +170,8 @@ pub struct TerminalSettings {
+     pub clear_on_shrink: Option<bool>,
+     pub show_terminal_progress: Option<bool>,
+     pub fullscreen_mouse: Option<bool>,
++    /// Footer tok/s readout at startup; `/speed` still toggles it (default false).
++    pub speed: Option<bool>,
  }
  
- export interface ImageSettings {
-@@ -1339,6 +1340,10 @@
- 		return this.settings.terminal?.fullscreenMouse ?? true;
- 	}
- 
-+	getSpeed(): boolean {
-+		return this.settings.terminal?.speed ?? false;
-+	}
-+
- 	setFullscreenMouse(enabled: boolean): void {
- 		if (!this.globalSettings.terminal) {
- 			this.globalSettings.terminal = {};
-
---- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-+++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-@@ -1861,6 +1861,11 @@
- 		if (this.fullscreenEnabled) {
- 			this.applyFullscreen(true);
- 		}
-+		// /speed default from settings (terminal.speed); the runtime command still toggles it.
-+		if (this.settingsManager.getSpeed()) {
-+			this.speedDisplayEnabled = true;
-+			this.footer.setSpeedEnabled(true);
-+		}
- 		this.isInitialized = true;
- 
- 		await this.rebindCurrentSession();
-
+ #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+Index: prime-agent-src/crates/pa-tui/src/client_settings.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/client_settings.rs
++++ prime-agent-src/crates/pa-tui/src/client_settings.rs
+@@ -38,6 +38,10 @@ pub trait ClientSettings: Send + Sync {
+     ///
+     /// Returns `Err` when the settings store fails.
+     fn set_show_terminal_progress(&self, enabled: bool) -> Result<()>;
++    /// `terminal.speed`: the `/speed` state a session starts with (default false).
++    fn speed_display(&self) -> bool {
++        false
++    }
+     /// `images.autoResize` (TS default true).
+     fn image_auto_resize(&self) -> bool;
+     /// Persists `images.autoResize` to the global scope.
+Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-tui/src/session_ui/lifecycle.rs
++++ prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
+@@ -81,7 +81,10 @@ impl SessionUi {
+             show_images: options.show_images,
+             fullscreen_mouse: options.fullscreen_mouse,
+             service_tier: None,
+-            speed_display_enabled: false,
++            speed_display_enabled: options
++                .client_settings
++                .as_ref()
++                .is_some_and(|settings| settings.speed_display()),
+             speed_stats: None,
+             client_settings: options.client_settings.clone(),
+             anthropic_subscription_warning_shown: false,

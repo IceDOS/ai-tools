@@ -1,0 +1,637 @@
+Index: prime-agent-src/crates/pa-core/src/clm/host.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/clm/host.rs
++++ prime-agent-src/crates/pa-core/src/clm/host.rs
+@@ -27,7 +27,7 @@ fn entry_message(entry: &FileEntry) -> O
+ 
+ fn branch_annotations(session: &SessionManager) -> Vec<Annotation> {
+     let data: Vec<Value> = session
+-        .get_branch(None)
++        .active_branch_entries()
+         .into_iter()
+         .filter_map(|entry| match entry {
+             FileEntry::Custom { payload, .. } if payload.custom_type == ANNOTATION_CUSTOM_TYPE => {
+@@ -41,14 +41,20 @@ fn branch_annotations(session: &SessionM
+ 
+ fn verified_source(session: &SessionManager, annotation: &Annotation) -> Result<Value, String> {
+     let id = &annotation.source.entry_id;
+-    let message = session
+-        .get_entry_by_id(id)
+-        .and_then(entry_message)
+-        .ok_or_else(|| format!("Source entry {id} is unavailable."))?;
+-    if annotations::content_hash(&message) != annotation.source.content_hash {
+-        return Err(format!("Source entry {id} failed its content-hash check."));
++    let branch = session.active_branch_entries();
++    if let Some(entry) = branch.iter().find(|entry| entry.id() == Some(id.as_str())) {
++        let message = entry_message(entry).ok_or_else(|| format!("Source entry {id} is unavailable."))?;
++        if annotations::content_hash(&message) != annotation.source.content_hash {
++            return Err(format!("Source entry {id} failed its content-hash check."));
++        }
++        return Ok(message);
+     }
+-    Ok(message)
++    // Daemon sessions persist under file ids, so a resumed branch matches by hash.
++    branch
++        .into_iter()
++        .filter_map(entry_message)
++        .find(|message| annotations::content_hash(message) == annotation.source.content_hash)
++        .ok_or_else(|| format!("Source entry {id} is unavailable."))
+ }
+ 
+ /// Push the branch's active annotations, with pin texts, into the runtime.
+@@ -68,6 +74,35 @@ pub fn refresh(clm: &SharedClm, session:
+         .set_annotations(active);
+ }
+ 
++/// Rebuild checkpoints, settings overrides and annotations from the session's active branch.
++pub fn restore(clm: &SharedClm, session: &SessionManager) {
++    let mut history: Vec<super::projection::Checkpoint> = Vec::new();
++    let mut overrides = super::control::Overrides::default();
++    for entry in session.active_branch_entries() {
++        let FileEntry::Custom { payload, .. } = entry else { continue };
++        match payload.custom_type.as_str() {
++            super::projection::CHECKPOINT_CUSTOM_TYPE => {
++                history.extend(payload.data.clone().and_then(|v| serde_json::from_value(v).ok()));
++            }
++            super::control::RESET_CUSTOM_TYPE => history.clear(),
++            super::control::SETTINGS_CUSTOM_TYPE => {
++                if let Some(saved) = payload.data.clone().and_then(|v| serde_json::from_value(v).ok()) {
++                    overrides = saved;
++                }
++            }
++            _ => {}
++        }
++    }
++    {
++        let mut runtime = clm.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++        if let Err(error) = runtime.apply_overrides(overrides) {
++            tracing::warn!("clm settings overrides ignored: {error}");
++        }
++        runtime.restore(history);
++    }
++    refresh(clm, session);
++}
++
+ fn text<'a>(payload: &'a Value, key: &str) -> anyhow::Result<&'a str> {
+     payload[key]
+         .as_str()
+@@ -83,7 +118,7 @@ fn resolve_source(
+     clm: &SharedClm,
+     session: &SessionManager,
+ ) -> anyhow::Result<(String, Value)> {
+-    let branch = session.get_branch(None);
++    let branch = session.active_branch_entries();
+     if let Some(found) = branch
+         .iter()
+         .find(|entry| entry.id() == Some(source))
+@@ -356,4 +391,71 @@ mod tests {
+         let err = handle("clm.recall", &json!({ "id": id }), Some(&clm), &mut session).unwrap_err();
+         assert!(err.to_string().contains("content-hash"), "error was: {err}");
+     }
++
++    fn checkpoint(revision: u64) -> crate::clm::projection::Checkpoint {
++        let source = vec![json!({ "role": "user", "content": "hi", "timestamp": 1 })];
++        crate::clm::projection::Checkpoint::new(revision, &source, source.clone(), 10, 5)
++    }
++
++    #[test]
++    fn restore_reads_checkpoints_settings_and_resets_from_the_branch() {
++        let clm = runtime();
++        let (mut session, _) = session_with_user("hi");
++        let mut custom = |kind: &str, data: Value| {
++            session.append_custom_entry(kind, Some(data)).unwrap();
++        };
++        custom(crate::clm::projection::CHECKPOINT_CUSTOM_TYPE, serde_json::to_value(checkpoint(1)).unwrap());
++        custom(crate::clm::control::RESET_CUSTOM_TYPE, json!({ "revision": 1 }));
++        custom(crate::clm::projection::CHECKPOINT_CUSTOM_TYPE, serde_json::to_value(checkpoint(2)).unwrap());
++        custom(crate::clm::control::SETTINGS_CUSTOM_TYPE, json!({ "values": { "budget": 32000 } }));
++
++        restore(&clm, &session);
++
++        let runtime = clm.lock().unwrap();
++        assert_eq!(runtime.history.iter().map(|c| c.revision).collect::<Vec<_>>(), vec![2]);
++        assert_eq!(runtime.revision, 2);
++        assert_eq!(runtime.overrides.values.get("budget"), Some(&json!(32000)));
++    }
++
++    #[test]
++    fn restore_without_settings_clears_old_overrides() {
++        let clm = runtime();
++        clm.lock()
++            .unwrap()
++            .apply_overrides(crate::clm::control::Overrides {
++                enabled: Some(false),
++                values: serde_json::Map::new(),
++            })
++            .unwrap();
++        let (session, _) = session_with_user("hi");
++
++        restore(&clm, &session);
++
++        let runtime = clm.lock().unwrap();
++        assert_eq!(runtime.overrides, crate::clm::control::Overrides::default());
++        assert!(!runtime.paused);
++        assert!(runtime.history.is_empty());
++    }
++
++    #[test]
++    fn a_resumed_annotation_finds_its_source_by_content_hash() {
++        let clm = runtime();
++        let (mut session, entry) = session_with_user("never push to main");
++        handle(
++            "clm.annotate",
++            &json!({ "source": entry, "title": "rule", "reason": "user rule", "futureAction": "use a branch", "retention": "continuity" }),
++            Some(&clm),
++            &mut session,
++        )
++        .unwrap();
++        let mut annotation = branch_annotations(&session).remove(0);
++        annotation.source.entry_id = "id-from-the-engine".into();
++        assert!(verified_source(&session, &annotation).is_ok());
++        annotation.source.content_hash = "wrong".into();
++        assert_eq!(
++            verified_source(&session, &annotation).unwrap_err(),
++            "Source entry id-from-the-engine is unavailable."
++        );
++    }
+ }
++
+Index: prime-agent-src/crates/pa-core/src/session/manager.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session/manager.rs
++++ prime-agent-src/crates/pa-core/src/session/manager.rs
+@@ -46,6 +46,9 @@ pub use repair::{load_entries_from_file,
+ /// A persist observer; must not break session writes (panics are contained).
+ pub type SessionPersistListener = Box<dyn Fn(&Path) + Send + Sync>;
+ 
++/// Called after every custom-entry append; the daemon mirrors engine entries through it.
++pub type CustomEntryObserver = Box<dyn Fn(&str, Option<&serde_json::Value>) + Send + Sync>;
++
+ #[derive(Default)]
+ pub struct NewSessionOptions {
+     pub id: Option<String>,
+@@ -76,6 +79,7 @@ pub struct SessionManager {
+     label_timestamps_by_id: HashMap<String, String>,
+     leaf_id: Option<String>,
+     persist_listeners: Vec<SessionPersistListener>,
++    custom_entry_observer: Option<CustomEntryObserver>,
+ }
+ 
+ /// The refine transcript's consumed artifacts: the conversation message
+Index: prime-agent-src/crates/pa-core/src/session/manager/append.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session/manager/append.rs
++++ prime-agent-src/crates/pa-core/src/session/manager/append.rs
+@@ -159,9 +159,20 @@ impl SessionManager {
+         Ok(id)
+     }
+ 
++    pub fn set_custom_entry_observer(&mut self, observer: Option<super::CustomEntryObserver>) {
++        self.custom_entry_observer = observer;
++    }
++
++    fn observe_custom_entry(&self, custom_type: &str, data: Option<&serde_json::Value>) {
++        if let Some(observer) = &self.custom_entry_observer {
++            observer(custom_type, data);
++        }
++    }
++
+     /// # Errors
+     ///
+     /// Returns the underlying I/O error when the durable append fails.
++    #[allow(clippy::needless_pass_by_value)]
+     pub fn append_custom_entry(
+         &mut self,
+         custom_type: &str,
+@@ -172,17 +183,19 @@ impl SessionManager {
+         self.append_entry(FileEntry::Custom {
+             payload: pa_types::session::CustomEntry {
+                 custom_type: custom_type.to_string(),
+-                data,
++                data: data.clone(),
+                 rest: serde_json::Map::default(),
+             },
+             base,
+         })?;
++        self.observe_custom_entry(custom_type, data.as_ref());
+         Ok(id)
+     }
+ 
+     /// Append a custom entry with the TS `_appendEntry` retained-write
+     /// contract: a failed disk write keeps the entry in the live index and
+     /// surfaces the error for the caller to log (the refine audit arm).
++    #[allow(clippy::needless_pass_by_value)]
+     pub fn append_custom_entry_retained(
+         &mut self,
+         custom_type: &str,
+@@ -193,7 +206,7 @@ impl SessionManager {
+         self.file_entries.push(FileEntry::Custom {
+             payload: pa_types::session::CustomEntry {
+                 custom_type: custom_type.to_string(),
+-                data,
++                data: data.clone(),
+                 rest: serde_json::Map::default(),
+             },
+             base,
+@@ -208,6 +221,7 @@ impl SessionManager {
+             self.by_id.insert(id.clone(), index);
+             self.leaf_id = Some(id);
+         }
++        self.observe_custom_entry(custom_type, data.as_ref());
+         (id, write_error)
+     }
+ 
+Index: prime-agent-src/crates/pa-core/src/session/manager/lifecycle.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session/manager/lifecycle.rs
++++ prime-agent-src/crates/pa-core/src/session/manager/lifecycle.rs
+@@ -127,6 +127,7 @@ impl SessionManager {
+             label_timestamps_by_id: HashMap::new(),
+             leaf_id: None,
+             persist_listeners: Vec::new(),
++            custom_entry_observer: None,
+         };
+         match session_file {
+             Some(file) => manager.set_session_file(file, None),
+Index: prime-agent-src/crates/pa-core/src/session/manager/queries.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session/manager/queries.rs
++++ prime-agent-src/crates/pa-core/src/session/manager/queries.rs
+@@ -154,7 +154,9 @@ impl SessionManager {
+                 .any(|entry| matches!(entry, FileEntry::ServiceTierChange { .. }))
+     }
+ 
+-    fn active_branch_entries(&self) -> Vec<&FileEntry> {
++    /// The active branch, root first; safe on a windowed manager.
++    #[must_use]
++    pub fn active_branch_entries(&self) -> Vec<&FileEntry> {
+         let mut branch = Vec::new();
+         let mut visited = std::collections::HashSet::new();
+         let mut id = self.leaf_id.as_deref();
+Index: prime-agent-src/crates/pa-core/src/session/manager/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session/manager/tests.rs
++++ prime-agent-src/crates/pa-core/src/session/manager/tests.rs
+@@ -397,3 +397,26 @@ fn open_treats_a_path_shaped_header_id_a
+         );
+     }
+ }
++
++#[test]
++fn custom_entry_observer_sees_plain_and_retained_appends() {
++    type ObservedEntry = (String, Option<serde_json::Value>);
++    let seen: std::sync::Arc<std::sync::Mutex<Vec<ObservedEntry>>> = std::sync::Arc::default();
++    let sink = std::sync::Arc::clone(&seen);
++    let mut manager = SessionManager::in_memory(std::path::Path::new("/tmp"));
++    manager.set_custom_entry_observer(Some(Box::new(move |custom_type, data| {
++        sink.lock().unwrap().push((custom_type.to_string(), data.cloned()));
++    })));
++    manager
++        .append_custom_entry("clm-settings", Some(serde_json::json!({ "values": {} })))
++        .unwrap();
++    let _ = manager.append_custom_entry_retained("clm-reset", None);
++    assert_eq!(
++        *seen.lock().unwrap(),
++        vec![
++            ("clm-settings".to_string(), Some(serde_json::json!({ "values": {} }))),
++            ("clm-reset".to_string(), None),
++        ]
++    );
++}
++
+Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+@@ -304,34 +304,8 @@ pub async fn create_session(mut config:
+         _ => None,
+     };
+     if let Some(clm) = &clm {
+-        let entries = wiring.session.lock().await.get_entries();
+-        let mut history: Vec<crate::clm::projection::Checkpoint> = Vec::new();
+-        let mut overrides = None;
+-        for entry in entries {
+-            let pa_types::session::FileEntry::Custom { payload, .. } = entry else { continue };
+-            match payload.custom_type.as_str() {
+-                crate::clm::projection::CHECKPOINT_CUSTOM_TYPE => {
+-                    history.extend(payload.data.and_then(|v| serde_json::from_value(v).ok()));
+-                }
+-                crate::clm::control::RESET_CUSTOM_TYPE => history.clear(),
+-                crate::clm::control::SETTINGS_CUSTOM_TYPE => {
+-                    overrides = payload.data.and_then(|v| serde_json::from_value(v).ok());
+-                }
+-                _ => {}
+-            }
+-        }
+-        {
+-            let mut runtime = clm.lock().unwrap();
+-            runtime.set_seed(clm_seed.clone().unwrap_or_default());
+-            if let Some(overrides) = overrides {
+-                if let Err(error) = runtime.apply_overrides(overrides) {
+-                    tracing::warn!("clm settings overrides ignored: {error}");
+-                }
+-            }
+-            runtime.restore(history);
+-        }
+-        // The std guard above must be gone before this await.
+-        crate::clm::host::refresh(clm, &*wiring.session.lock().await);
++        clm.lock().unwrap().set_seed(clm_seed.clone().unwrap_or_default());
++        crate::clm::host::restore(clm, &*wiring.session.lock().await);
+     }
+     let mut handlers = wiring.handlers.clone();
+     if let Some(extra) = config.extra_host_handlers.clone() {
+Index: prime-agent-src/crates/pa-core/src/session_engine/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/mod.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/mod.rs
+@@ -269,6 +269,13 @@ impl AgentSession {
+         self.clm = clm;
+     }
+ 
++    /// Re-read CLM state after the daemon seeds or moves the branch.
++    pub async fn reload_clm(&self) {
++        if let Some(clm) = &self.clm {
++            crate::clm::host::restore(clm, &*self.session.lock().await);
++        }
++    }
++
+     /// The kernel host handlers and the command executor reach the same
+     /// session state as the loop.
+     pub(crate) fn session_handle(&self) -> &Arc<tokio::sync::Mutex<SessionManager>> {
+Index: prime-agent-src/crates/pa-daemon/src/agent_engine.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/agent_engine.rs
++++ prime-agent-src/crates/pa-daemon/src/agent_engine.rs
+@@ -99,6 +99,10 @@ pub(crate) const QUOTA_WAKE_MAX_RETRIES:
+ pub(crate) type SettledKernelRelease =
+     std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+ 
++/// Engine custom-entry types the worker mirrors into the session file.
++pub(crate) const DURABLE_CUSTOM_TYPES: &[&str] =
++    &["clm-state", "clm-annotation", "clm-settings", "clm-reset"];
++
+ /// A [`SessionEngine`] running real agent turns.
+ pub struct AgentSessionEngine {
+     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
+@@ -199,6 +203,7 @@ pub struct AgentSessionEngine {
+     /// A branch move that landed before the first turn: consumed at build so
+     /// the session starts on the moved branch.
+     pending_branch: std::sync::Mutex<Option<Vec<pa_types::session::FileEntry>>>,
++    durable_custom_outbox: std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+     /// The `goal_update` payload a branch rebuild's goal reload stashed,
+     /// taken by the worker that announces it. `None` when it changed nothing.
+     reloaded_goal_update: std::sync::Mutex<Option<Value>>,
+Index: prime-agent-src/crates/pa-daemon/src/agent_engine/lifecycle.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/agent_engine/lifecycle.rs
++++ prime-agent-src/crates/pa-daemon/src/agent_engine/lifecycle.rs
+@@ -156,6 +156,7 @@ impl AgentSessionEngine {
+             session: tokio::sync::Mutex::new(None),
+             session_build: tokio::sync::Mutex::new(()),
+             pending_branch: std::sync::Mutex::new(None),
++            durable_custom_outbox: std::sync::Arc::default(),
+             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
+             image_route: std::sync::Mutex::new(None),
+             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
+@@ -305,6 +306,22 @@ impl AgentSessionEngine {
+     }
+ 
+     async fn adopt_built_session(&self, built: &CoreSessionEngine) -> anyhow::Result<()> {
++        {
++            let outbox = std::sync::Arc::clone(&self.durable_custom_outbox);
++            built
++                .session
++                .shared_persistence()
++                .lock()
++                .await
++                .set_custom_entry_observer(Some(Box::new(move |custom_type, data| {
++                    if crate::agent_engine::DURABLE_CUSTOM_TYPES.contains(&custom_type) {
++                        outbox
++                            .lock()
++                            .unwrap_or_else(std::sync::PoisonError::into_inner)
++                            .push((custom_type.to_string(), data.cloned().unwrap_or(serde_json::Value::Null)));
++                    }
++                })));
++        }
+         self.mirror_goal_runtime(built).await;
+         if let Some(sink) = self
+             .compaction_summary_sink
+@@ -493,6 +510,7 @@ impl AgentSessionEngine {
+         }
+         if let Some(entries) = pending_branch {
+             built.session.rebuild_branch_context(entries).await?;
++            built.session.reload_clm().await;
+             // A moved branch restores its own park (the early return would leave the previous
+             // branch's park armed).
+             self.restore_quota_park(built).await;
+@@ -516,6 +534,7 @@ impl AgentSessionEngine {
+             built.session.rebuild_branch_context(entries).await?;
+             self.flush_pending_stale_goal_terminal().await;
+         }
++        built.session.reload_clm().await;
+         self.restore_quota_park(built).await;
+         // The walk and replay allocated transient trees several times the
+         // retained size: release the freed heap.
+Index: prime-agent-src/crates/pa-daemon/src/agent_engine/session_engine_impl.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/agent_engine/session_engine_impl.rs
++++ prime-agent-src/crates/pa-daemon/src/agent_engine/session_engine_impl.rs
+@@ -23,6 +23,15 @@ impl SessionEngine for AgentSessionEngin
+         }
+     }
+ 
++    fn take_durable_custom_entries(&self) -> Vec<(String, Value)> {
++        std::mem::take(
++            &mut *self
++                .durable_custom_outbox
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner),
++        )
++    }
++
+     /// The whole-worker idle passivation gate: the settled gates plus an empty RLM
+     /// child registry (rationale on the trait method). The kernel release does NOT
+     /// carry the registry rule: releasing a kernel keeps the worker (and its registry)
+@@ -750,6 +759,7 @@ impl SessionEngine for AgentSessionEngin
+                 .session
+                 .rebuild_branch_context(branch_entries)
+                 .await?;
++            engine.session.reload_clm().await;
+             // The rebuilt context reads the moved branch's own latest goal
+             // entry; the announcement publishes while the driver lock is held.
+             let mut driver = engine.goal_driver.lock().await;
+Index: prime-agent-src/crates/pa-daemon/src/clm_commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/clm_commands.rs
++++ prime-agent-src/crates/pa-daemon/src/clm_commands.rs
+@@ -121,4 +121,76 @@ mod tests {
+             Some("unknown clm_configure action \"bogus\"")
+         );
+     }
++
++    fn clm_worker(dir: &std::path::Path, agent: &str) -> Worker {
++        let agent_dir = dir.join(agent);
++        std::fs::create_dir_all(&agent_dir).unwrap();
++        std::fs::write(
++            agent_dir.join("settings.json"),
++            r#"{ "contextLanguageModels": { "enabled": true } }"#,
++        )
++        .unwrap();
++        Worker::new(
++            WorkerConfig {
++                socket_path: dir.join(format!("{agent}.sock")),
++                supervisor_socket_path: PathBuf::new(),
++                token: "test-token".into(),
++                worker_instance_id: String::new(),
++                active_session_id: "clm-durable".into(),
++                agent_dir,
++                recovery_journal_path: dir.join(format!("{agent}-recovery.jsonl")),
++                telemetry_disabled: Some(true),
++                script: Some(json!({ "engine": "faux", "responses": [] })),
++            },
++            None,
++        )
++    }
++
++    async fn build_session(worker: &Worker, path: &std::path::Path) {
++        let created = worker
++            .dispatch("create", &json!({ "sessionPath": path, "cwd": "/tmp" }))
++            .await;
++        assert!(created.success, "create failed: {created:?}");
++        let engine = worker.agent_engine.as_ref().expect("agent engine");
++        let model = engine.resolve_model().expect("model");
++        engine.ensure_core_session_async(&model).await.expect("session built");
++    }
++
++    #[tokio::test]
++    async fn clm_settings_survive_a_second_worker_on_the_same_file() {
++        let _faux = crate::agent_engine::FAUX_TEST_LOCK
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("durable.jsonl");
++        let mut file = crate::session_store::SessionFile::create("/tmp", None, 0);
++        file.set_path(path.clone());
++        file.rewrite().unwrap();
++
++        let first = clm_worker(dir.path(), "agent-a");
++        build_session(&first, &path).await;
++        let set = first
++            .dispatch(
++                "clm_configure",
++                &json!({ "action": "set", "key": "budget", "value": "32000" }),
++            )
++            .await;
++        assert!(set.success, "{set:?}");
++        let text = std::fs::read_to_string(&path).unwrap();
++        assert!(text.contains(r#""customType":"clm-settings""#), "{text}");
++        drop(first);
++
++        let second = clm_worker(dir.path(), "agent-b");
++        build_session(&second, &path).await;
++        let view = second.dispatch("get_clm_view", &json!({})).await;
++        assert!(view.success, "{view:?}");
++        let budget = view.data.as_ref().unwrap()["settings"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|row| row["key"] == "budget")
++            .unwrap()["value"]
++            .clone();
++        assert_eq!(budget, json!("32000"));
++    }
+ }
+Index: prime-agent-src/crates/pa-daemon/src/engine.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/engine.rs
++++ prime-agent-src/crates/pa-daemon/src/engine.rs
+@@ -47,6 +47,11 @@ pub trait SessionEngine: Send + Sync {
+     /// waiting to run; engines without a queue do nothing.
+     fn purge_queued_goal_contexts(&self) {}
+ 
++    /// Engine-side custom entries the worker must persist, oldest first.
++    fn take_durable_custom_entries(&self) -> Vec<(String, Value)> {
++        Vec::new()
++    }
++
+     /// Release the session's kernel at a parent-owned child's idle settle: a
+     /// snapshot-flushing stop; engines that cannot release (scripted harness, no
+     /// kernel, failed settled gates) no-op.
+Index: prime-agent-src/crates/pa-daemon/src/worker/commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/commands.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/commands.rs
+@@ -12,6 +12,15 @@ use crate::protocol::DaemonResponse;
+ 
+ impl Worker {
+     pub(crate) async fn dispatch(&self, command_type: &str, payload: &Value) -> DaemonResponse {
++        let response = self.dispatch_command(command_type, payload).await;
++        let entries = self.engine.take_durable_custom_entries();
++        if !entries.is_empty() {
++            super::session_core::persist_durable_custom_entries(&mut self.core.lock().unwrap(), entries);
++        }
++        response
++    }
++
++    async fn dispatch_command(&self, command_type: &str, payload: &Value) -> DaemonResponse {
+         // Only operations that inspect or change historical branches need hydration.
+         // Cancellation is deliberately excluded: it must reach the live turn immediately.
+         if matches!(
+Index: prime-agent-src/crates/pa-daemon/src/worker/session_core.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/session_core.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/session_core.rs
+@@ -151,3 +151,19 @@ impl SessionCore {
+         }
+     }
+ }
++
++/// Persist engine custom entries as durable `custom` rows, in order.
++pub(crate) fn persist_durable_custom_entries(
++    core: &mut SessionCore,
++    entries: Vec<(String, serde_json::Value)>,
++) {
++    let Some(store) = core.store.as_mut() else { return };
++    for (custom_type, data) in entries {
++        if let Err(error) = store.persist_entry(
++            "custom",
++            serde_json::json!({ "customType": custom_type, "data": data }),
++        ) {
++            eprintln!("pa-daemon: failed to persist {custom_type}: {error:#}");
++        }
++    }
++}
+Index: prime-agent-src/crates/pa-daemon/src/worker/turn.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/worker/turn.rs
++++ prime-agent-src/crates/pa-daemon/src/worker/turn.rs
+@@ -433,6 +433,7 @@ impl TurnRunner {
+             // success too: one row replaces TS's per-attempt error rows
+             // (operator ruling 2026-09-23).
+             let mut last_retry_error: Option<String> = None;
++            let durable_engine = std::sync::Arc::clone(&engine);
+             let mut emit = |mut event: EngineEvent| -> bool {
+                 // A cancelled turn stops consuming its own events, except the frames
+                 // TS still broadcasts for an interrupted turn: aborted row/tool settle
+@@ -476,6 +477,10 @@ impl TurnRunner {
+                         | EngineEvent::DoneAborted
+                 );
+                 let mut core = core.lock().unwrap();
++                super::session_core::persist_durable_custom_entries(
++                    &mut core,
++                    durable_engine.take_durable_custom_entries(),
++                );
+                 if core.abort_requested {
+                     // The sighting arms the fallback's silence only when
+                     // load-bearing: a sighting on a run that completed on its own
+@@ -1001,6 +1006,10 @@ impl TurnRunner {
+             }
+             emitting_prefix_rows.set(false);
+             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
++            super::session_core::persist_durable_custom_entries(
++                &mut core.lock().unwrap(),
++                engine.take_durable_custom_entries(),
++            );
+         });
+         let _ = turn.await;
+         // The emit path is joined: a stale parked partial must not

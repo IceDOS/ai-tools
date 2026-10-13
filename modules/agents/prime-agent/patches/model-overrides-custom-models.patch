@@ -1,0 +1,80 @@
+Index: prime-agent-src/crates/pa-core/src/models/registry.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/models/registry.rs
++++ prime-agent-src/crates/pa-core/src/models/registry.rs
+@@ -406,7 +406,8 @@ impl ModelRegistry {
+         let credentials = self.prime_credentials();
+         let mut built_in = self.load_built_in_models(&result, credentials.as_ref());
+         built_in.extend(private_models.into_values());
+-        self.models = Self::merge_custom_models(built_in, result.models);
++        let custom = Self::apply_custom_model_overrides(&result);
++        self.models = Self::merge_custom_models(built_in, custom);
+         self.apply_subscription_model_adaptations();
+     }
+ 
+@@ -574,6 +575,22 @@ impl ModelRegistry {
+             })
+             .collect()
+     }
++
++    /// `modelOverrides` also apply to models defined in `models[]`, so a cap such as
++    /// `contextWindow` holds for custom providers too.
++    fn apply_custom_model_overrides(custom: &CustomModelsResult) -> Vec<Model> {
++        custom
++            .models
++            .iter()
++            .map(|model| {
++                custom
++                    .model_overrides
++                    .get(&model.provider)
++                    .and_then(|overrides| overrides.get(&model.id))
++                    .map_or_else(|| model.clone(), |over| apply_model_override(model, over))
++            })
++            .collect()
++    }
+ 
+     /// Custom models win on provider+id conflicts.
+     fn merge_custom_models(mut built_in: Vec<Model>, custom: Vec<Model>) -> Vec<Model> {
+Index: prime-agent-src/crates/pa-core/src/models/registry/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/models/registry/tests.rs
++++ prime-agent-src/crates/pa-core/src/models/registry/tests.rs
+@@ -130,6 +130,38 @@ fn models_json_custom_models_and_auth_he
+ }
+ 
+ #[test]
++fn models_json_model_overrides_apply_to_custom_models() {
++    let dir = tempfile::tempdir().unwrap();
++    let models_path = dir.path().join("models.json");
++    std::fs::write(
++        &models_path,
++        r#"{ "providers": { "custom": {
++            "baseUrl": "https://custom.example", "apiKey": "custom-key",
++            "api": "openai-completions",
++            "models": [ { "id": "big", "contextWindow": 1000000 }, { "id": "other" } ],
++            "modelOverrides": { "big": { "contextWindow": 200000, "maxTokens": 8000 } }
++        } } }"#,
++    )
++    .unwrap();
++    let registry = ModelRegistry::create(auth_with(&serde_json::json!({})), &models_path);
++    assert!(registry.get_error().is_none());
++    let find = |id: &str| {
++        registry
++            .get_all()
++            .iter()
++            .find(|m| m.provider == "custom" && m.id == id)
++            .unwrap_or_else(|| panic!("custom model {id} merged"))
++            .clone()
++    };
++    let big = find("big");
++    assert_eq!(big.context_window, 200_000);
++    assert_eq!(big.max_tokens, 8_000);
++    assert!(big.max_tokens_explicit);
++    // A model without an override keeps its definition defaults.
++    assert_eq!(find("other").context_window, 128_000);
++}
++
++#[test]
+ fn models_json_error_keeps_built_ins() {
+     let dir = tempfile::tempdir().unwrap();
+     let models_path = dir.path().join("models.json");

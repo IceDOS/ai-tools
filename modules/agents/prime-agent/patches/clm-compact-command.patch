@@ -1,0 +1,415 @@
+Index: prime-agent-src/crates/pa-core/src/clm/compact.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/compact.rs
+@@ -0,0 +1,190 @@
++//! `/clm-compact [instructions]` (pi-clm `compact.ts`): ask the model to compact its own
++//! live context now. The model edits the mirror; the edit commits at turn end like any other.
++
++use std::path::Path;
++
++pub const COMMAND: &str = "clm-compact";
++
++pub const DEFAULT_COMPACT_PROMPT: &str = "Compact your live context now.
++
++Your next request is about {{current}} tokens{{budget}}. Your context is mirrored at `{{mirror}}`; edit that file, following the Editable context protocol, to remove what you no longer need.
++
++Keep what you still need: the task and the user's latest requests, decisions and their reasons, open items, and exact values (ids, paths, numbers) you will use again. Drop what you no longer need: tool output you have already used, superseded drafts and intermediate steps. Prefer one scripted edit of the whole file over many small ones.
++
++{{instructions}}
++
++When the edit is saved, reply in one line: what you kept, and the new approximate size.";
++
++const EMPTY_SLOT: char = '\u{0}';
++
++/// The arguments of a `/clm-compact` prompt, or `None` for any other text.
++#[must_use]
++pub fn parse_command(text: &str) -> Option<String> {
++    let (name, args) = pa_types::slash_commands::parse_slash_command(text)?;
++    (name == COMMAND).then_some(args)
++}
++
++/// pi-clm `formatTokens`: `850`, `85.4k`, `1.25m`.
++#[must_use]
++pub fn format_tokens(value: u64) -> String {
++    let scaled = |divisor: f64, digits: usize| {
++        let text = format!("{:.digits$}", value as f64 / divisor);
++        text.trim_end_matches('0').trim_end_matches('.').to_string()
++    };
++    if value >= 1_000_000 {
++        format!("{}m", scaled(1_000_000.0, 2))
++    } else if value >= 1_000 {
++        format!("{}k", scaled(1_000.0, 1))
++    } else {
++        value.to_string()
++    }
++}
++
++/// Fill `{{mirror}}`, `{{current}}`, `{{budget}}` and `{{instructions}}`; unknown
++/// placeholders stay as written.
++#[must_use]
++pub fn build_prompt(
++    template: &str,
++    mirror: &Path,
++    current: u64,
++    budget: Option<u64>,
++    instructions: &str,
++) -> String {
++    let instructions = match instructions.trim() {
++        "" => String::new(),
++        text => format!("Also: {text}"),
++    };
++    // Typed instructions are never dropped: a template without the slot gets them at the end.
++    let template = if !instructions.is_empty() && !template.contains("{{instructions}}") {
++        format!("{template}\n\n{{{{instructions}}}}")
++    } else {
++        template.to_string()
++    };
++    let value = |name: &str| match name {
++        "mirror" => Some(mirror.display().to_string()),
++        "current" => Some(format_tokens(current)),
++        "budget" => Some(budget.map_or_else(String::new, |b| format!(" (budget {})", format_tokens(b)))),
++        "instructions" if instructions.is_empty() => Some(EMPTY_SLOT.to_string()),
++        "instructions" => Some(instructions.clone()),
++        _ => None,
++    };
++    let mut filled = String::new();
++    let mut rest = template.as_str();
++    while let Some(start) = rest.find("{{") {
++        filled.push_str(&rest[..start]);
++        let after = &rest[start + 2..];
++        let name_len = after.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(after.len());
++        let replacement = (name_len > 0 && after[name_len..].starts_with("}}"))
++            .then(|| value(&after[..name_len]))
++            .flatten();
++        match replacement {
++            Some(text) => {
++                filled.push_str(&text);
++                rest = &after[name_len + 2..];
++            }
++            None => {
++                filled.push_str("{{");
++                rest = after;
++            }
++        }
++    }
++    filled.push_str(rest);
++    collapse_empty_slot(&filled).trim().to_string()
++}
++
++// An empty instructions slot takes its own blank lines with it.
++fn collapse_empty_slot(text: &str) -> String {
++    let Some(slot) = text.find(EMPTY_SLOT) else {
++        return text.to_string();
++    };
++    let head = text[..slot].trim_end_matches('\n');
++    let tail = text[slot + 1..].trim_start_matches('\n');
++    let had_newline = head.len() < slot || tail.len() < text.len() - slot - 1;
++    let joined = format!("{head}{}{tail}", if had_newline { "\n\n" } else { "" });
++    collapse_empty_slot(&joined)
++}
++
++/// The built-in prompt, or the template at `path` (read on every use, so edits apply at once).
++///
++/// # Errors
++/// The template cannot be read or is empty.
++pub fn load_template(path: Option<&Path>) -> Result<String, String> {
++    let Some(path) = path else {
++        return Ok(DEFAULT_COMPACT_PROMPT.to_string());
++    };
++    let text = std::fs::read_to_string(path)
++        .map_err(|error| format!("compact prompt not loaded: {error}"))?;
++    let text = text.trim();
++    if text.is_empty() {
++        return Err(format!("compact prompt is empty: {}", path.display()));
++    }
++    Ok(text.to_string())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const MIRROR: &str = "/run/clm/LIVE_CONTEXT.md";
++
++    fn build(template: &str, budget: Option<u64>, instructions: &str) -> String {
++        build_prompt(template, Path::new(MIRROR), 85_432, budget, instructions)
++    }
++
++    #[test]
++    fn parses_only_the_compact_command() {
++        assert_eq!(parse_command("/clm-compact").as_deref(), Some(""));
++        assert_eq!(parse_command("/clm-compact keep the logs").as_deref(), Some("keep the logs"));
++        assert_eq!(parse_command("/clm status"), None);
++        assert_eq!(parse_command("compact please"), None);
++    }
++
++    #[test]
++    fn formats_tokens_like_pi_clm() {
++        assert_eq!(format_tokens(850), "850");
++        assert_eq!(format_tokens(85_432), "85.4k");
++        assert_eq!(format_tokens(120_000), "120k");
++        assert_eq!(format_tokens(1_250_000), "1.25m");
++        assert_eq!(format_tokens(2_000_000), "2m");
++    }
++
++    #[test]
++    fn default_prompt_names_the_mirror_and_size() {
++        let prompt = build(DEFAULT_COMPACT_PROMPT, Some(120_000), "");
++        assert!(prompt.contains("about 85.4k tokens (budget 120k)."));
++        assert!(prompt.contains(&format!("mirrored at `{MIRROR}`")));
++        assert!(!prompt.contains("{{"));
++        // The empty slot leaves one blank line between the paragraphs around it.
++        assert!(prompt.contains("small ones.\n\nWhen the edit is saved"));
++    }
++
++    #[test]
++    fn instructions_fill_the_slot() {
++        let prompt = build(DEFAULT_COMPACT_PROMPT, None, "  keep the build errors ");
++        assert!(prompt.contains("about 85.4k tokens. Your"));
++        assert!(prompt.contains("small ones.\n\nAlso: keep the build errors\n\nWhen the edit"));
++    }
++
++    #[test]
++    fn custom_template_keeps_unknown_placeholders_and_gets_instructions_appended() {
++        let prompt = build("Shrink {{mirror}} from {{current}}; {{other}} stays.", None, "be brief");
++        assert_eq!(prompt, format!("Shrink {MIRROR} from 85.4k; {{{{other}}}} stays.\n\nAlso: be brief"));
++    }
++
++    #[test]
++    fn inline_empty_slot_disappears() {
++        assert_eq!(build("Compact.{{instructions}} Done.", None, ""), "Compact. Done.");
++    }
++
++    #[test]
++    fn loads_the_default_or_a_template_file() {
++        assert_eq!(load_template(None).unwrap(), DEFAULT_COMPACT_PROMPT);
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("compact.md");
++        std::fs::write(&path, "\n  Compact {{mirror}}.\n").unwrap();
++        assert_eq!(load_template(Some(&path)).unwrap(), "Compact {{mirror}}.");
++        std::fs::write(&path, "  \n").unwrap();
++        assert!(load_template(Some(&path)).unwrap_err().contains("empty"));
++        assert!(load_template(Some(&dir.path().join("missing.md"))).unwrap_err().contains("not loaded"));
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/clm/mod.rs
++++ prime-agent-src/crates/pa-core/src/clm/mod.rs
+@@ -5,6 +5,7 @@
+ 
+ pub mod annotations;
+ pub mod budget;
++pub mod compact;
+ pub mod control;
+ pub mod document;
+ pub mod edits;
+@@ -51,6 +52,7 @@ pub struct ClmConfig {
+     pub size_trailer: bool,
+     pub native_compaction: NativeCompaction,
+     pub steering: Option<PathBuf>,
++    pub compact_prompt: Option<PathBuf>,
+ }
+ 
+ impl ClmConfig {
+@@ -126,6 +128,12 @@ impl ClmConfig {
+                 .as_deref()
+                 .filter(|path| !matches!(*path, "" | "none" | "off"))
+                 .map(PathBuf::from),
++            compact_prompt: settings
++                .compact_prompt
++                .as_deref()
++                .map(str::trim)
++                .filter(|path| !matches!(path.to_lowercase().as_str(), "" | "default" | "none" | "off"))
++                .map(PathBuf::from),
+         })
+     }
+ }
+@@ -297,6 +305,27 @@ impl ClmRuntime {
+         self.mirror_dir.path().join(MIRROR_FILE)
+     }
+ 
++    /// The `/clm-compact` prompt for the current size and budget.
++    ///
++    /// # Errors
++    /// CLM is paused, nothing has been measured yet, or the template cannot be read.
++    pub fn compact_prompt(&self, instructions: &str) -> Result<String, String> {
++        if self.paused {
++            return Err("CLM is off, so there is no live context to compact. Turn it on with /clm on.".into());
++        }
++        let current = Some(self.last_estimate)
++            .filter(|tokens| *tokens > 0)
++            .or(self.last_observed)
++            .ok_or("Nothing to compact yet: the context has not been measured. Send a message first.")?;
++        let template = compact::load_template(self.config.compact_prompt.as_deref())?;
++        let budget = self
++            .config
++            .budget
++            .resolve(self.last_context_window)
++            .map(|resolved| resolved.budget);
++        Ok(compact::build_prompt(&template, &self.mirror_path(), current, budget, instructions))
++    }
++
+     #[must_use]
+     pub fn config(&self) -> &ClmConfig {
+         &self.config
+@@ -764,6 +793,32 @@ mod tests {
+     }
+ 
+     #[test]
++    fn compact_prompt_setting_keeps_pi_clm_default_words() {
++        for word in ["", "default", "None", "OFF"] {
++            let config = ClmConfig::from_settings(&settings(json!({ "compactPrompt": word }))).unwrap();
++            assert_eq!(config.compact_prompt, None, "{word:?}");
++        }
++        let custom = ClmConfig::from_settings(&settings(json!({ "compactPrompt": "/x.md" }))).unwrap();
++        assert_eq!(custom.compact_prompt, Some(PathBuf::from("/x.md")));
++    }
++
++    #[test]
++    fn compact_prompt_uses_the_measured_size_and_refuses_when_paused_or_unmeasured() {
++        let config = ClmConfig::from_settings(&settings(json!({ "budget": 120_000 }))).unwrap();
++        let mut runtime = ClmRuntime::new(config, "s").unwrap();
++        assert!(runtime.compact_prompt("").unwrap_err().contains("Nothing to compact"));
++        runtime.last_observed = Some(90_000);
++        assert!(runtime.compact_prompt("").unwrap().contains("about 90k tokens (budget 120k)"));
++        runtime.last_estimate = 85_432;
++        let prompt = runtime.compact_prompt("keep the logs").unwrap();
++        assert!(prompt.contains("about 85.4k tokens"));
++        assert!(prompt.contains(&runtime.mirror_path().display().to_string()));
++        assert!(prompt.contains("Also: keep the logs"));
++        runtime.paused = true;
++        assert!(runtime.compact_prompt("").unwrap_err().contains("CLM is off"));
++    }
++
++    #[test]
+     fn transform_writes_the_mirror_and_an_edit_becomes_the_next_context() {
+         let config = ClmConfig::from_settings(&settings(json!({ "budget": 1_000_000 }))).unwrap();
+         let mut runtime = ClmRuntime::new(config, "0199-session").unwrap();
+Index: prime-agent-src/crates/pa-core/src/session_engine/admission.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/admission.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/admission.rs
+@@ -65,6 +65,18 @@ impl AgentSession {
+         parse_session_command(&self.slash_commands, &normalized)
+     }
+ 
++    /// `/clm-compact [instructions]` becomes the CLM compaction prompt; other text is `None`.
++    fn clm_compact_prompt(&self, text: &str) -> anyhow::Result<Option<String>> {
++        let Some(instructions) = crate::clm::compact::parse_command(text) else {
++            return Ok(None);
++        };
++        let Some(clm) = &self.clm else {
++            anyhow::bail!("/clm-compact needs context language models (settings contextLanguageModels.enabled).");
++        };
++        let runtime = clm.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++        runtime.compact_prompt(&instructions).map(Some).map_err(anyhow::Error::msg)
++    }
++
+     /// Prompt with images attached (the ACP prompt-capability path). Busy
+     /// sessions queue the text and images together as one follow-up batch,
+     /// so an admitted prompt never loses its images to a queue race.
+@@ -80,6 +92,8 @@ impl AgentSession {
+         options: PromptOptions,
+     ) -> anyhow::Result<PromptOutcome> {
+         let expand = options.expand_prompt_templates.unwrap_or(true);
++        let compact_prompt = if expand { self.clm_compact_prompt(text)? } else { None };
++        let text = compact_prompt.as_deref().unwrap_or(text);
+         // TS `_finishSubmissionNormalization` order: skill commands expand first, prompt templates
+         // second; both are gated by the same policy flag.
+         let (normalized, used_skill) = if expand {
+Index: prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/engine/tests.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
+@@ -833,3 +833,64 @@ async fn clm_restore_handles_settings_an
+ 
+ 
+ 
++
++#[tokio::test]
++async fn clm_compact_command_sends_the_filled_prompt_and_needs_clm() {
++    let model = pa_agent::types::Model {
++        id: "m".into(),
++        name: "m".into(),
++        api: "test".into(),
++        provider: "test".into(),
++        base_url: "http://localhost".into(),
++        reasoning: false,
++        cost: pa_agent::types::UsageCost::default(),
++        context_window: 100_000,
++        max_tokens: 1_000,
++        max_tokens_explicit: false,
++    };
++    let tmp = tempfile::tempdir().unwrap();
++    let mut engines = Vec::new();
++    for (name, settings) in [
++        ("clm", r#"{ "contextLanguageModels": { "enabled": true } }"#),
++        ("plain", "{}"),
++    ] {
++        let provider = Arc::new(ScriptedProvider::new(model.clone()));
++        provider.push_text_turn("first answer");
++        provider.push_text_turn("compacted");
++        let cwd = tmp.path().join(name).join("project");
++        let agent_dir = tmp.path().join(name).join("agent");
++        std::fs::create_dir_all(&cwd).unwrap();
++        std::fs::create_dir_all(&agent_dir).unwrap();
++        std::fs::write(agent_dir.join("settings.json"), settings).unwrap();
++        let engine = create_session(SessionEngineConfig {
++            cwd,
++            agent_dir,
++            model: Some(model.clone()),
++            stream_fn: Some(provider.stream_fn()),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++        engines.push((engine, provider));
++    }
++
++    let (engine, provider) = &engines[0];
++    engine.prompt("first turn", PromptOptions::default()).await.unwrap();
++    engine.session.agent().wait_for_idle().await;
++    let outcome = engine
++        .prompt("/clm-compact keep the build errors", PromptOptions::default())
++        .await
++        .unwrap();
++    assert_eq!(outcome, PromptOutcome::Prompt);
++    engine.session.agent().wait_for_idle().await;
++    let mirror = engine.session.clm.as_ref().unwrap().lock().unwrap().mirror_path();
++    let sent = format!("{:?}", provider.calls()[1].messages);
++    assert!(sent.contains("Compact your live context now."), "{sent}");
++    assert!(sent.contains(&mirror.display().to_string()), "{sent}");
++    assert!(sent.contains("Also: keep the build errors"), "{sent}");
++    assert!(!sent.contains("/clm-compact"), "{sent}");
++
++    let (plain, _) = &engines[1];
++    let error = plain.prompt("/clm-compact", PromptOptions::default()).await.unwrap_err();
++    assert!(error.to_string().contains("needs context language models"), "{error}");
++}
+Index: prime-agent-src/crates/pa-core/src/settings/types.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/types.rs
++++ prime-agent-src/crates/pa-core/src/settings/types.rs
+@@ -298,6 +298,8 @@ pub struct ContextLanguageModelsSettings
+     pub size_trailer: Option<bool>,
+     // "auto" (default), "off" or "on".
+     pub native_compaction: Option<String>,
++    // /clm-compact template path; unset, "default", "none" or "off" use the built-in prompt.
++    pub compact_prompt: Option<String>,
+ }
+ 
+ #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+Index: prime-agent-src/crates/pa-types/src/slash_commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/slash_commands.rs
++++ prime-agent-src/crates/pa-types/src/slash_commands.rs
+@@ -78,6 +78,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS:
+     BuiltinSlashCommand { name: "heartbeats", description: "View and manage all user and agent heartbeats", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+     BuiltinSlashCommand { name: "factory", description: "Show or set the agent factory opt-in gate (off by default)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off|status]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "clm", description: "Context Language Models: edits, settings and status for this session", execution: SlashCommandExecution::Client, argument_hint: Some("[edits|settings|status|config <key> <value>|config reset|on|off|reset]"), aliases: &[], takes_argument: true },
++    BuiltinSlashCommand { name: "clm-compact", description: "Ask the model to compact its own live context now; text after the command is passed along as instructions", execution: SlashCommandExecution::Session, argument_hint: Some("[instructions]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "todos", description: "Show the session todo list, or clear it", execution: SlashCommandExecution::Client, argument_hint: Some("[clear]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },

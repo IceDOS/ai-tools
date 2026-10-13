@@ -65,7 +65,7 @@ def build_env(cfg, agent, acct, launch, environ) -> dict:
     env.setdefault("ALIMIT_DB", str(config.alimit_db()))
     env.update(launch.env)
     tags = {p: tag(agent, acct.name) for p in PROVIDERS[agent]}
-    if agent in ("prime-agent", "opencode") and cfg.accounts.get("ollama"):
+    if agent == "opencode" and cfg.accounts.get("ollama"):
         ollama = choose(cfg, "ollama", environ=environ)
         if not adapters.logged_in(ollama) and sys.stdin.isatty():
             _prompt_key(ollama, cfg)  # prepare raises NotLoggedIn without a key
@@ -91,7 +91,7 @@ def cmd_exec(args) -> int:
     if not argv:
         return _fail(EXIT_UNKNOWN, "missing command after --")
     has_own = bool(cfg.accounts.get(args.agent))
-    has_ollama = args.agent in ("prime-agent", "opencode") and bool(cfg.accounts.get("ollama"))
+    has_ollama = args.agent == "opencode" and bool(cfg.accounts.get("ollama"))
     if not (has_own or has_ollama):
         os.execvp(argv[0], argv)
         return 0

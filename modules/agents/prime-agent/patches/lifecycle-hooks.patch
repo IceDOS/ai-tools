@@ -1,0 +1,525 @@
+Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+@@ -229,6 +229,10 @@ pub async fn create_session(mut config:
+     // factory host bridge's preflight facts (the daemon `allowedModels`
+     // pin), like the request-timing snapshot above.
+     let factory_allowed_models = settings.get_allowed_models();
++    // Lifecycle hooks read the global scope only; a cloned repo never runs commands.
++    let lifecycle_hooks = settings
++        .get_lifecycle_hooks()
++        .map(|hooks| super::lifecycle_hooks::LifecycleHooks::from_settings(&hooks));
+     let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
+         mcp_gating(&settings, config.agent_dir.clone()).await?;
+     let mcp_manager = config
+@@ -707,6 +711,15 @@ pub async fn create_session(mut config:
+             })
+             .await;
+     }
++    if let Some(hooks) = lifecycle_hooks {
++        super::lifecycle_hooks::install(
++            hooks,
++            &agent,
++            wiring.session.clone(),
++            config.rlm_depth.unwrap_or(0),
++        )
++        .await;
++    }
+     // Rows parked by a boot that settled mid-build merge in; later boots
+     // push straight into the live session's queue.
+     session.adopt_next_turn_rows(boot_notice_rows);
+Index: prime-agent-src/crates/pa-core/src/session_engine/lifecycle_hooks.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/session_engine/lifecycle_hooks.rs
+@@ -0,0 +1,341 @@
++//! Lifecycle hooks (settings `hooks`): detached commands fed a JSON payload on
++//! stdin at session start, run start and run end. A hook never blocks or fails
++//! a turn: spawn errors are logged and dropped, and a reaper thread waits on
++//! the child so the long-lived daemon collects no zombies.
++
++use std::io::Write;
++use std::process::{Command, Stdio};
++use std::sync::Arc;
++
++use pa_agent::types::{AgentEvent, AgentMessage, Message, StopReason};
++
++use crate::session::manager::SessionManager;
++use crate::settings::{LifecycleHookEntry, LifecycleHooksSettings};
++
++pub const SESSION_START: &str = "SessionStart";
++pub const AGENT_START: &str = "UserPromptSubmit";
++pub const AGENT_END: &str = "Stop";
++pub const AGENT_ERROR: &str = "StopFailure";
++
++/// One resolved command: argv plus the `hook_event_name` it reports.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct HookCommand {
++    pub argv: Vec<String>,
++    pub event_name: String,
++}
++
++/// The settings resolved into per-boundary command lists.
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++pub struct LifecycleHooks {
++    pub session_start: Vec<HookCommand>,
++    pub agent_start: Vec<HookCommand>,
++    pub agent_end: Vec<HookCommand>,
++    /// `None` when unset: failed runs then use `agent_end`.
++    pub agent_error: Option<Vec<HookCommand>>,
++    pub include_subagents: bool,
++}
++
++fn resolve(entries: Option<&Vec<LifecycleHookEntry>>, default_event: &str) -> Vec<HookCommand> {
++    entries
++        .into_iter()
++        .flatten()
++        .filter_map(|entry| {
++            let (argv, event_name) = match entry {
++                LifecycleHookEntry::Program(program) => (vec![program.clone()], None),
++                LifecycleHookEntry::Detailed {
++                    command,
++                    event_name,
++                } => (command.clone(), event_name.clone()),
++            };
++            let program = argv.first()?;
++            (!program.trim().is_empty()).then(|| HookCommand {
++                argv,
++                event_name: event_name.unwrap_or_else(|| default_event.to_string()),
++            })
++        })
++        .collect()
++}
++
++impl LifecycleHooks {
++    #[must_use]
++    pub fn from_settings(settings: &LifecycleHooksSettings) -> Self {
++        Self {
++            session_start: resolve(settings.session_start.as_ref(), SESSION_START),
++            agent_start: resolve(settings.agent_start.as_ref(), AGENT_START),
++            agent_end: resolve(settings.agent_end.as_ref(), AGENT_END),
++            agent_error: settings
++                .agent_error
++                .as_ref()
++                .map(|entries| resolve(Some(entries), AGENT_ERROR)),
++            include_subagents: settings.include_subagents.unwrap_or(false),
++        }
++    }
++
++    #[must_use]
++    pub fn is_empty(&self) -> bool {
++        self.session_start.is_empty()
++            && self.agent_start.is_empty()
++            && self.agent_end.is_empty()
++            && self.agent_error.as_ref().is_none_or(Vec::is_empty)
++    }
++
++    /// The commands for a settled run: `agentError` for a failed run when set.
++    #[must_use]
++    pub fn for_run_end(&self, failed: bool) -> &[HookCommand] {
++        match (&self.agent_error, failed) {
++            (Some(error_hooks), true) => error_hooks,
++            _ => &self.agent_end,
++        }
++    }
++}
++
++/// The payload shape Claude-Code-style hook scripts (peon-ping) read.
++#[must_use]
++pub fn hook_payload(
++    event_name: &str,
++    cwd: &str,
++    session_id: &str,
++    stop_reason: Option<&str>,
++) -> serde_json::Value {
++    let mut payload = serde_json::json!({
++        "hook_event_name": event_name,
++        "notification_type": "",
++        "cwd": cwd,
++        "session_id": session_id,
++        "permission_mode": "",
++        "source": "prime-agent",
++    });
++    if let Some(reason) = stop_reason {
++        payload["stop_reason"] = serde_json::json!(reason);
++    }
++    payload
++}
++
++/// Spawn `command` detached with `payload` on stdin; never blocks the caller.
++pub fn spawn_detached(command: &HookCommand, payload: &serde_json::Value) {
++    let argv = command.argv.clone();
++    let body = payload.to_string();
++    let spawned = std::thread::Builder::new()
++        .name("lifecycle-hook".into())
++        .spawn(move || {
++            let mut process = Command::new(&argv[0]);
++            process
++                .args(&argv[1..])
++                .stdin(Stdio::piped())
++                .stdout(Stdio::null())
++                .stderr(Stdio::null());
++            // Own process group: a terminal Ctrl-C aimed at the TUI never reaches the hook.
++            #[cfg(unix)]
++            std::os::unix::process::CommandExt::process_group(&mut process, 0);
++            let mut child = match process.spawn() {
++                Ok(child) => child,
++                Err(error) => {
++                    tracing::debug!("lifecycle hook {:?} not started: {error}", argv[0]);
++                    return;
++                }
++            };
++            if let Some(mut stdin) = child.stdin.take() {
++                let _ = stdin.write_all(body.as_bytes());
++            }
++            let _ = child.wait();
++        });
++    if let Err(error) = spawned {
++        tracing::debug!("lifecycle hook thread not started: {error}");
++    }
++}
++
++/// The settled run's last assistant stop reason, when it failed or aborted.
++#[must_use]
++pub fn failed_stop_reason(messages: &[AgentMessage]) -> Option<&'static str> {
++    messages.iter().rev().find_map(|message| match message {
++        AgentMessage::Standard(Message::Assistant(assistant)) => {
++            Some(match assistant.stop_reason {
++                StopReason::Error => Some("error"),
++                StopReason::Aborted => Some("aborted"),
++                _ => None,
++            })
++        }
++        _ => None,
++    })?
++}
++
++fn fire_all(commands: &[HookCommand], cwd: &str, session_id: &str, stop_reason: Option<&str>) {
++    for command in commands {
++        spawn_detached(
++            command,
++            &hook_payload(&command.event_name, cwd, session_id, stop_reason),
++        );
++    }
++}
++
++/// Fire `sessionStart` now and subscribe the run-boundary hooks on `agent`.
++/// The session id and cwd are read per event: a session switch inside one
++/// engine changes them.
++pub async fn install(
++    hooks: LifecycleHooks,
++    agent: &Arc<pa_agent::agent::Agent>,
++    session: Arc<tokio::sync::Mutex<SessionManager>>,
++    rlm_depth: u32,
++) {
++    if hooks.is_empty() || (rlm_depth > 0 && !hooks.include_subagents) {
++        return;
++    }
++    {
++        let manager = session.lock().await;
++        let cwd = manager.get_cwd().display().to_string();
++        fire_all(&hooks.session_start, &cwd, manager.get_session_id(), None);
++    }
++    let hooks = Arc::new(hooks);
++    let _subscription = agent
++        .subscribe(move |event, _signal| {
++            let hooks = Arc::clone(&hooks);
++            let session = Arc::clone(&session);
++            Box::pin(async move {
++                let (commands, stop_reason) = match &event {
++                    AgentEvent::AgentStart if !hooks.agent_start.is_empty() => {
++                        (hooks.agent_start.clone(), None)
++                    }
++                    AgentEvent::AgentEnd { messages } => {
++                        let stop_reason = failed_stop_reason(messages);
++                        (
++                            hooks.for_run_end(stop_reason.is_some()).to_vec(),
++                            stop_reason,
++                        )
++                    }
++                    _ => return Ok(()),
++                };
++                if commands.is_empty() {
++                    return Ok(());
++                }
++                let (cwd, session_id) = {
++                    let manager = session.lock().await;
++                    (
++                        manager.get_cwd().display().to_string(),
++                        manager.get_session_id().to_string(),
++                    )
++                };
++                fire_all(&commands, &cwd, &session_id, stop_reason);
++                Ok(())
++            })
++        })
++        .await;
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn settings(value: serde_json::Value) -> LifecycleHooksSettings {
++        serde_json::from_value(value).unwrap()
++    }
++
++    #[test]
++    fn entries_resolve_with_default_and_overridden_event_names() {
++        let hooks = LifecycleHooks::from_settings(&settings(serde_json::json!({
++            "sessionStart": ["/bin/peon.sh"],
++            "agentStart": [{ "command": ["/bin/peon.sh", "--quiet"], "eventName": "Prompt" }],
++            "agentEnd": ["", { "command": [] }]
++        })));
++        assert_eq!(
++            hooks.session_start,
++            vec![HookCommand {
++                argv: vec!["/bin/peon.sh".into()],
++                event_name: SESSION_START.into(),
++            }]
++        );
++        assert_eq!(hooks.agent_start[0].argv, vec!["/bin/peon.sh", "--quiet"]);
++        assert_eq!(hooks.agent_start[0].event_name, "Prompt");
++        assert!(hooks.agent_end.is_empty(), "empty programs drop out");
++        assert!(!hooks.is_empty());
++    }
++
++    #[test]
++    fn failed_runs_use_agent_error_only_when_configured() {
++        let without = LifecycleHooks::from_settings(&settings(serde_json::json!({
++            "agentEnd": ["/bin/end"]
++        })));
++        assert_eq!(without.for_run_end(true)[0].argv, vec!["/bin/end"]);
++        let with = LifecycleHooks::from_settings(&settings(serde_json::json!({
++            "agentEnd": ["/bin/end"], "agentError": ["/bin/error"]
++        })));
++        assert_eq!(with.for_run_end(true)[0].argv, vec!["/bin/error"]);
++        assert_eq!(with.for_run_end(true)[0].event_name, AGENT_ERROR);
++        assert_eq!(with.for_run_end(false)[0].argv, vec!["/bin/end"]);
++    }
++
++    #[test]
++    fn payload_carries_the_peon_fields() {
++        let payload = hook_payload("Stop", "/work", "0199-abc", Some("error"));
++        assert_eq!(payload["hook_event_name"], "Stop");
++        assert_eq!(payload["cwd"], "/work");
++        assert_eq!(payload["session_id"], "0199-abc");
++        assert_eq!(payload["source"], "prime-agent");
++        assert_eq!(payload["stop_reason"], "error");
++        assert!(hook_payload("Stop", "/", "s", None)
++            .get("stop_reason")
++            .is_none());
++    }
++
++    #[test]
++    fn failed_stop_reason_reads_the_last_assistant() {
++        let assistant = |stop: StopReason| {
++            serde_json::from_value::<AgentMessage>(serde_json::json!({
++                "role": "assistant", "content": [], "usage": {},
++                "stopReason": match stop {
++                    StopReason::Error => "error",
++                    StopReason::Aborted => "aborted",
++                    _ => "stop",
++                },
++            }))
++            .unwrap()
++        };
++        assert_eq!(
++            failed_stop_reason(&[assistant(StopReason::Error)]),
++            Some("error")
++        );
++        assert_eq!(
++            failed_stop_reason(&[assistant(StopReason::Error), assistant(StopReason::Stop)]),
++            None
++        );
++        assert_eq!(failed_stop_reason(&[]), None);
++    }
++
++    /// The hook gets the payload on stdin and the caller never waits on it.
++    #[test]
++    fn spawn_detached_writes_the_payload_to_stdin() {
++        let dir = tempfile::tempdir().unwrap();
++        let out = dir.path().join("payload.json");
++        let script = dir.path().join("hook.sh");
++        std::fs::write(&script, format!("#!/bin/sh\ncat > {}\n", out.display())).unwrap();
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::PermissionsExt;
++            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
++        }
++        let command = HookCommand {
++            argv: vec![script.display().to_string()],
++            event_name: AGENT_END.into(),
++        };
++        spawn_detached(&command, &hook_payload(AGENT_END, "/w", "s-1", None));
++        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++        let written = loop {
++            if let Ok(text) = std::fs::read_to_string(&out) {
++                if text.ends_with('}') {
++                    break text;
++                }
++            }
++            assert!(std::time::Instant::now() < deadline, "hook never ran");
++            std::thread::sleep(std::time::Duration::from_millis(20));
++        };
++        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
++        assert_eq!(parsed["session_id"], "s-1");
++        // A missing program is swallowed, never a panic or an error.
++        spawn_detached(
++            &HookCommand {
++                argv: vec!["/nonexistent/hook".into()],
++                event_name: AGENT_END.into(),
++            },
++            &hook_payload(AGENT_END, "/w", "s-1", None),
++        );
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/session_engine/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/mod.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/mod.rs
+@@ -22,6 +22,7 @@ pub mod headless;
+ pub mod host_requests;
+ pub mod image_model_routing;
+ pub mod ipython_state;
++pub mod lifecycle_hooks;
+ pub mod messages;
+ pub mod provider_adapter;
+ pub mod provider_failover;
+Index: prime-agent-src/crates/pa-core/src/settings/load.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/load.rs
++++ prime-agent-src/crates/pa-core/src/settings/load.rs
+@@ -60,6 +60,7 @@ const KNOWN_FIELDS: &[&str] = &[
+     "warnings",
+     "sessionDir",
+     "requestTiming",
++    "hooks",
+ ];
+ 
+ /// Extract each known field independently; ignore fields whose JSON type does not match the Rust
+Index: prime-agent-src/crates/pa-core/src/settings/manager.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/manager.rs
++++ prime-agent-src/crates/pa-core/src/settings/manager.rs
+@@ -875,6 +875,12 @@ impl SettingsManager {
+         self.merged.request_timing.unwrap_or(false)
+     }
+ 
++    /// `hooks` from the global scope only: a project settings file never runs commands.
++    #[must_use]
++    pub fn get_lifecycle_hooks(&self) -> Option<super::types::LifecycleHooksSettings> {
++        self.global.hooks.clone()
++    }
++
+     #[must_use]
+     pub fn get_session_dir(&self) -> Option<std::path::PathBuf> {
+         let session_dir = self.merged.session_dir.as_ref()?;
+@@ -979,6 +985,45 @@ mod tests {
+     use super::*;
+     use crate::settings::types::MarkdownSettings;
+ 
++    /// A project `.prime/settings.json` can never add hook commands.
++    #[test]
++    fn lifecycle_hooks_read_the_global_scope_only() {
++        let dir = tempfile::tempdir().unwrap();
++        let cwd = dir.path().join("cwd");
++        let agent_dir = dir.path().join("agent");
++        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
++        std::fs::create_dir_all(&agent_dir).unwrap();
++        std::fs::write(
++            cwd.join(".prime/agent/settings.json"),
++            r#"{ "hooks": { "agentEnd": ["/tmp/evil.sh"] } }"#,
++        )
++        .unwrap();
++        let manager = SettingsManager::create(&cwd, &agent_dir);
++        assert!(manager.get_lifecycle_hooks().is_none());
++
++        std::fs::write(
++            agent_dir.join("settings.json"),
++            r#"{ "hooks": { "sessionStart": ["/bin/peon.sh"],
++                "agentEnd": [{ "command": ["/bin/peon.sh"], "eventName": "Stop" }] } }"#,
++        )
++        .unwrap();
++        let manager = SettingsManager::create(&cwd, &agent_dir);
++        let hooks = manager.get_lifecycle_hooks().expect("global hooks");
++        assert_eq!(
++            hooks.session_start,
++            Some(vec![crate::settings::LifecycleHookEntry::Program(
++                "/bin/peon.sh".into()
++            )])
++        );
++        assert_eq!(
++            hooks.agent_end,
++            Some(vec![crate::settings::LifecycleHookEntry::Detailed {
++                command: vec!["/bin/peon.sh".into()],
++                event_name: Some("Stop".into()),
++            }])
++        );
++    }
++
+     #[test]
+     fn in_memory_loads_merges_and_saves() {
+         let mut manager = SettingsManager::in_memory(&Settings::default());
+Index: prime-agent-src/crates/pa-core/src/settings/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/mod.rs
++++ prime-agent-src/crates/pa-core/src/settings/mod.rs
+@@ -17,6 +17,7 @@ pub use storage::{
+     FileSettingsStorage, InMemorySettingsStorage, SettingsScope, SettingsStorage, CONFIG_DIR_NAME,
+ };
+ pub use types::{
+-    AutoRefineSettings, AutonomousSettings, CompactionSettings, McpServerConfig, QueueModeSetting,
+-    Settings, ThinkingLevelSetting, TransportSetting, UpdateChannel,
++    AutoRefineSettings, AutonomousSettings, CompactionSettings, LifecycleHookEntry,
++    LifecycleHooksSettings, McpServerConfig, QueueModeSetting, Settings, ThinkingLevelSetting,
++    TransportSetting, UpdateChannel,
+ };
+Index: prime-agent-src/crates/pa-core/src/settings/types.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/types.rs
++++ prime-agent-src/crates/pa-core/src/settings/types.rs
+@@ -234,6 +234,33 @@ pub struct FactorySettings {
+     pub enabled: Option<bool>,
+ }
+ 
++/// One lifecycle hook command: a bare program path, or an argv with an
++/// optional `eventName` override for the payload's `hook_event_name`.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(untagged)]
++pub enum LifecycleHookEntry {
++    Program(String),
++    Detailed {
++        command: Vec<String>,
++        #[serde(rename = "eventName", default, skip_serializing_if = "Option::is_none")]
++        event_name: Option<String>,
++    },
++}
++
++/// `hooks`: detached commands fed a JSON payload on stdin at session and run
++/// boundaries. Read from the global scope only, so a project file never runs commands.
++#[derive(Debug, Clone, Default, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct LifecycleHooksSettings {
++    pub session_start: Option<Vec<LifecycleHookEntry>>,
++    pub agent_start: Option<Vec<LifecycleHookEntry>>,
++    pub agent_end: Option<Vec<LifecycleHookEntry>>,
++    /// Failed or aborted runs; when unset, `agentEnd` fires for them too.
++    pub agent_error: Option<Vec<LifecycleHookEntry>>,
++    /// Also fire inside RLM child sessions (default false).
++    pub include_subagents: Option<bool>,
++}
++
+ #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct TelemetrySettings {
+@@ -364,6 +391,8 @@ pub struct Settings {
+     /// Log per-request provider timing phases to the diagnostic log
+     /// (unset means OFF, exactly the TS default).
+     pub request_timing: Option<bool>,
++    /// Lifecycle hook commands (global scope only).
++    pub hooks: Option<LifecycleHooksSettings>,
+     /// Unknown keys survive load/save round-trips (forward compatibility).
+     #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+     pub extra: serde_json::Map<String, serde_json::Value>,

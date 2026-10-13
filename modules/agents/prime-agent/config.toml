@@ -23,24 +23,23 @@ model = ""
 provider = ""
 
 [icedos.ai-tools.prime-agent.extensions]
-# Built-in prime-agent example extensions to load (names under examples/extensions/).
+# Unsupported since 0.10.0 (no extension loader). Must stay empty.
 builtin = []
 
-# Inline .ts sources for auto-loaded local extensions (like Claude skills).
+# Unsupported since 0.10.0 (no extension loader). Must stay empty.
 inline = {}
 
-# Plain-text rules, name = markdown, each appended to the system prompt every turn
-# (generated as an inline extension named rule-<name>). Shared icedos.ai-tools.rules land here too.
+# Plain-text rules, name = markdown, written together to <dataDir>/APPEND_SYSTEM.md and appended to every session's system prompt.
 rules = {}
 
-# Install the peon-ping companion extension (session-event bridge to peon.sh).
+# Fire peon-ping on session start, prompt submit and turn end (settings `hooks`).
 peonPing = true
 
 [icedos.ai-tools.prime-agent.extensions.context-window-cap]
 enable = false
-# Cap every model's contextWindow at this percentage of its native context
-# (context-cap extension). llamacpp models are excluded; the local server owns
-# context. Models with an explicit contextWindow override in models.json keep it.
+# Cap every model's contextWindow at this percentage of its native context (1-99).
+# llamacpp models are excluded; the local server owns context. Models with an
+# explicit contextWindow override in models.json keep it.
 percent = 30
 
 [icedos.ai-tools.prime-agent.extensions.context-language-models]
@@ -49,11 +48,11 @@ overflow = "withhold"
 oneToolPerTurn = false
 sizeTrailer = false
 nativeCompaction = "auto"
+# Template path for /clm-compact ({{mirror}}, {{current}}, {{budget}}, {{instructions}}); "", "default", "none" or "off" use the built-in prompt.
+compactPrompt = ""
 
 [icedos.ai-tools.prime-agent.extensions.prompt-suggestions]
-# Install the prompt-suggest extension: after each reply, one extra model call
-# predicts your next message and shows it as dim text in the empty prompt; Tab
-# accepts it. /suggest on|off toggles it at runtime.
+# Show a predicted next prompt as ghost text in the empty editor (settings `promptSuggestions`); Tab accepts, /suggest on|off toggles it for the session.
 enable = false
 
 # "provider/model-id" making the prediction; "" uses the session model. A cheap
@@ -61,10 +60,11 @@ enable = false
 model = ""
 
 [icedos.ai-tools.prime-agent.extensions.meters]
-# Install the cost-footer extension: live session cost (USD or € for metered
-# local models) in the TUI bottom bar, with token totals and the active model;
-# /cost toggles it at runtime. The tok/s readout is native (/speed).
+# Show session cost and token totals, and opencode free-pool usage, in the footer (settings `statusCommand`); /cost toggles the footer.
 cost = true
+
+# Extra footer commands (executable paths): each runs with no arguments, and every stdout line becomes a footer row.
+extraRows = []
 
 [icedos.ai-tools.prime-agent.extensions.meters.power]
 # Meter GPU electricity for locally-served models; the footer shows measured
@@ -97,9 +97,6 @@ providers = []
 # plus a unit: s, m (minutes), h, d, w or M (calendar months), e.g. "1s", "15m",
 # "24h", "1M". Empty uses ["1h", "24h", "7d", "30d"].
 windows = []
-
-[icedos.ai-tools.prime-agent.providers]
-ollama = true
 
 [icedos.ai-tools.prime-agent.settings]
 # "" means $XDG_CONFIG_HOME/prime-agent; $XDG_CONFIG_HOME / $XDG_DATA_HOME / $HOME / ~ expand per user.

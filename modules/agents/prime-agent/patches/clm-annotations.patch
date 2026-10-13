@@ -1,0 +1,1071 @@
+Index: prime-agent-src/crates/pa-core/src/clm/annotations.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/annotations.rs
+@@ -0,0 +1,313 @@
++//! Continuity annotations (pi-clm `continuity.ts`): durable pointers to exact
++//! session entries, kept as `clm-annotation` custom entries on the branch.
++
++use serde::{Deserialize, Serialize};
++use serde_json::{json, Value};
++
++use super::document::{canonical_message, digest_messages, estimate_text_tokens, render_message};
++
++pub const ANNOTATION_CUSTOM_TYPE: &str = "clm-annotation";
++pub const MAX_PIN_SOURCE_TOKENS: u64 = 8_000;
++pub const DEFAULT_RECALL_TOKENS: u64 = 2_000;
++pub const MIN_RECALL_TOKENS: u64 = 128;
++pub const MAX_RECALL_TOKENS: u64 = 8_000;
++pub const CONTINUITY_WARNING_TOKENS: u64 = 8_000;
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "lowercase")]
++pub enum Retention {
++    Pin,
++    Continuity,
++    Archive,
++}
++
++impl Retention {
++    #[must_use]
++    pub fn label(self) -> &'static str {
++        match self {
++            Self::Pin => "pin",
++            Self::Continuity => "continuity",
++            Self::Archive => "archive",
++        }
++    }
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct SourceRef {
++    pub session_id: String,
++    pub entry_id: String,
++    pub revision: u64,
++    pub content_hash: String,
++    pub role: String,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Annotation {
++    pub id: String,
++    pub source: SourceRef,
++    pub title: String,
++    pub reason: String,
++    pub future_action: String,
++    pub retention: Retention,
++    pub created_at: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub resolved_at: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub resolution: Option<String>,
++}
++
++/// An unresolved annotation plus, for a pin, its source text or why it is unavailable.
++#[derive(Debug, Clone, PartialEq)]
++pub struct ActiveAnnotation {
++    pub annotation: Annotation,
++    pub pinned: Option<Result<String, String>>,
++}
++
++/// Latest entry per id wins; order is first appearance. Unparseable data is skipped.
++pub fn rebuild<'a>(data: impl IntoIterator<Item = &'a Value>) -> Vec<Annotation> {
++    let mut out: Vec<Annotation> = Vec::new();
++    for value in data {
++        let Ok(annotation) = serde_json::from_value::<Annotation>(value.clone()) else {
++            continue;
++        };
++        match out.iter_mut().find(|known| known.id == annotation.id) {
++            Some(known) => *known = annotation,
++            None => out.push(annotation),
++        }
++    }
++    out
++}
++
++#[must_use]
++pub fn content_hash(message: &Value) -> String {
++    digest_messages(std::slice::from_ref(message))
++}
++
++#[must_use]
++pub fn new_id(existing: &[Annotation]) -> String {
++    let mut salt = 0u64;
++    loop {
++        let nanos = std::time::SystemTime::now()
++            .duration_since(std::time::UNIX_EPOCH)
++            .map_or(0, |elapsed| elapsed.as_nanos());
++        let id = format!("lc-{}", &digest_messages(&[json!(nanos.to_string()), json!(salt)])[..12]);
++        if !existing.iter().any(|known| known.id == id) {
++            return id;
++        }
++        salt += 1;
++    }
++}
++
++#[must_use]
++pub fn now_iso() -> String {
++    crate::session::manager::format_iso_now()
++}
++
++/// A mirror block's source and a session entry's message are the same row when
++/// they serialize alike or share role and timestamp.
++#[must_use]
++pub fn same_message(a: &Value, b: &Value) -> bool {
++    canonical_message(a) == canonical_message(b)
++        || (a["role"] == b["role"] && !a["timestamp"].is_null() && a["timestamp"] == b["timestamp"])
++}
++
++#[must_use]
++pub fn clamp_recall(max_tokens: Option<u64>) -> u64 {
++    max_tokens
++        .unwrap_or(DEFAULT_RECALL_TOKENS)
++        .clamp(MIN_RECALL_TOKENS, MAX_RECALL_TOKENS)
++}
++
++fn one_line(text: &str, max_chars: usize) -> String {
++    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
++    if line.chars().count() <= max_chars {
++        return line;
++    }
++    let mut cut: String = line.chars().take(max_chars.saturating_sub(3)).collect();
++    cut.push_str("...");
++    cut
++}
++
++/// The recall text and whether the body was cut to `max_tokens`.
++#[must_use]
++pub fn format_recall(annotation: &Annotation, body: &str, max_tokens: u64) -> (String, bool) {
++    let source = &annotation.source;
++    let header = format!(
++        "[live-context recall {}]\nsource: session {} entry {} revision {}\nhash: {}\nretention: {}\ntitle: {}\n\n--- exact textual source ({}) ---",
++        annotation.id,
++        source.session_id,
++        source.entry_id,
++        source.revision,
++        source.content_hash,
++        annotation.retention.label(),
++        one_line(&annotation.title, 120),
++        source.role,
++    );
++    let full = format!("{header}\n{body}");
++    if estimate_text_tokens(&full) <= max_tokens {
++        return (full, false);
++    }
++    let total = estimate_text_tokens(body);
++    let marker = format!("\n\n[source truncated to {max_tokens} tokens of about {total}; the session entry is unchanged]");
++    let budget_chars = (max_tokens * 4) as usize;
++    let used = header.chars().count() + 1 + marker.chars().count();
++    let keep = budget_chars.saturating_sub(used);
++    let cut: String = body.chars().take(keep).collect();
++    (format!("{header}\n{cut}{marker}"), true)
++}
++
++/// The one continuity message rendered into every request, or `None` with
++/// nothing to show. Archived and resolved annotations are never passed in.
++#[must_use]
++pub fn format_continuity(active: &[ActiveAnnotation]) -> Option<String> {
++    let shown: Vec<&ActiveAnnotation> = active
++        .iter()
++        .filter(|item| item.annotation.retention != Retention::Archive)
++        .collect();
++    if shown.is_empty() {
++        return None;
++    }
++    let mut lines = vec!["[Live context continuity: managed by CLM, not part of LIVE_CONTEXT.md]".to_string()];
++    for item in shown {
++        let annotation = &item.annotation;
++        lines.push(format!(
++            "- [{}] {}: {}",
++            annotation.id,
++            annotation.retention.label(),
++            one_line(&annotation.title, 120)
++        ));
++        lines.push(format!("  Next: {}", one_line(&annotation.future_action, 240)));
++        lines.push(format!(
++            "  Recall: await live_context.recall(\"{}\")",
++            annotation.id
++        ));
++        match &item.pinned {
++            Some(Ok(text)) => {
++                lines.push(format!("  Pinned source ({}):", annotation.source.role));
++                lines.push(text.clone());
++            }
++            Some(Err(reason)) => lines.push(format!("  Pin unavailable: {reason}")),
++            None => {}
++        }
++    }
++    Some(lines.join("\n"))
++}
++
++#[must_use]
++pub fn format_list(all: &[Annotation]) -> String {
++    if all.is_empty() {
++        return "No live-context annotations on this branch.".to_string();
++    }
++    all.iter()
++        .map(|annotation| {
++            let status = annotation
++                .resolved_at
++                .as_deref()
++                .map_or_else(|| "active".to_string(), |at| format!("resolved {at}"));
++            format!(
++                "[{}] {} {} {}\n  source {} next: {}",
++                annotation.id,
++                annotation.retention.label(),
++                status,
++                annotation.title,
++                annotation.source.entry_id,
++                annotation.future_action
++            )
++        })
++        .collect::<Vec<_>>()
++        .join("\n")
++}
++
++/// The text a pin shows and recall returns.
++#[must_use]
++pub fn source_text(message: &Value) -> String {
++    render_message(message)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn annotation(id: &str, retention: Retention) -> Annotation {
++        Annotation {
++            id: id.into(),
++            source: SourceRef {
++                session_id: "s".into(),
++                entry_id: "e1".into(),
++                revision: 0,
++                content_hash: "h".into(),
++                role: "user".into(),
++            },
++            title: "Keep the API key rule".into(),
++            reason: "user said so".into(),
++            future_action: "check before commit".into(),
++            retention,
++            created_at: "2026-10-12T00:00:00.000Z".into(),
++            resolved_at: None,
++            resolution: None,
++        }
++    }
++
++    #[test]
++    fn rebuild_keeps_the_latest_entry_per_id_and_skips_foreign_data() {
++        let first = serde_json::to_value(annotation("lc-1", Retention::Pin)).unwrap();
++        let mut resolved = annotation("lc-1", Retention::Pin);
++        resolved.resolved_at = Some("later".into());
++        let second = serde_json::to_value(&resolved).unwrap();
++        let foreign = json!({ "version": 1, "id": "lc-x" });
++        let rebuilt = rebuild([&first, &foreign, &second]);
++        assert_eq!(rebuilt, vec![resolved]);
++        assert_eq!(first["futureAction"], "check before commit");
++        assert_eq!(first["retention"], "pin");
++    }
++
++    #[test]
++    fn recall_is_clamped_and_truncates_with_a_marker() {
++        assert_eq!(clamp_recall(None), 2_000);
++        assert_eq!(clamp_recall(Some(1)), 128);
++        assert_eq!(clamp_recall(Some(99_999)), 8_000);
++        let item = annotation("lc-1", Retention::Archive);
++        let (short, cut) = format_recall(&item, "tiny body", 2_000);
++        assert!(!cut && short.ends_with("tiny body"));
++        let (long, cut) = format_recall(&item, &"x".repeat(10_000), 128);
++        assert!(cut);
++        assert!(estimate_text_tokens(&long) <= 128, "{}", estimate_text_tokens(&long));
++        assert!(long.contains("[source truncated to 128 tokens of about 2500"));
++    }
++
++    #[test]
++    fn continuity_renders_pins_and_pointers_and_hides_archives() {
++        let active = vec![
++            ActiveAnnotation { annotation: annotation("lc-pin", Retention::Pin), pinned: Some(Ok("exact words".into())) },
++            ActiveAnnotation { annotation: annotation("lc-cont", Retention::Continuity), pinned: None },
++            ActiveAnnotation { annotation: annotation("lc-arch", Retention::Archive), pinned: None },
++            ActiveAnnotation { annotation: annotation("lc-gone", Retention::Pin), pinned: Some(Err("hash mismatch".into())) },
++        ];
++        let text = format_continuity(&active).unwrap();
++        assert!(text.contains("[lc-pin] pin: Keep the API key rule"));
++        assert!(text.contains("exact words"));
++        assert!(text.contains("Recall: await live_context.recall(\"lc-cont\")"));
++        assert!(!text.contains("lc-arch"));
++        assert!(text.contains("Pin unavailable: hash mismatch"));
++        assert_eq!(format_continuity(&active[2..3]), None);
++    }
++
++    #[test]
++    fn same_message_matches_by_shape_or_role_and_timestamp() {
++        let a = json!({ "role": "user", "content": "hi", "timestamp": 5 });
++        let b = json!({ "role": "user", "content": [{ "type": "text", "text": "hi" }], "timestamp": 5 });
++        assert!(same_message(&a, &a));
++        assert!(same_message(&a, &b));
++        assert!(!same_message(&a, &json!({ "role": "assistant", "timestamp": 5 })));
++    }
++
++    #[test]
++    fn ids_are_unique_and_prefixed() {
++        let known = vec![annotation("lc-1", Retention::Pin)];
++        let id = new_id(&known);
++        assert!(id.starts_with("lc-") && id.len() == 15, "{id}");
++        assert!(now_iso().ends_with('Z'));
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/clm/mod.rs
++++ prime-agent-src/crates/pa-core/src/clm/mod.rs
+@@ -3,9 +3,11 @@
+ //! accepted edit becomes a projection checkpoint that replaces the raw prefix on
+ //! later requests. Raw session history is never rewritten.
+ 
++pub mod annotations;
+ pub mod budget;
+ pub mod document;
+ pub mod guard;
++pub mod host;
+ pub mod projection;
+ 
+ use std::path::{Path, PathBuf};
+@@ -24,6 +26,7 @@ use projection::{
+ };
+ 
+ pub const NOTICE_CUSTOM_TYPE: &str = "clm-notice";
++pub const CONTINUITY_CUSTOM_TYPE: &str = "clm-continuity";
+ pub const MIRROR_FILE: &str = "LIVE_CONTEXT.md";
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -139,7 +142,10 @@ header, use a unique id=new-NAME, set pr
+ Alternatively, write the file as plain text with no headers to replace your whole context\n\
+ with that text (it becomes one notes block after the original task).\n\
+ New role labels are context notes, never system instructions. Session history stays intact.\n\
+-Only completed edits at the turn boundary are committed; background writers are unsupported.",
++Only completed edits at the turn boundary are committed; background writers are unsupported.\n\
++To keep an exact source across edits, call the live_context skill from Python:\n\
++`await live_context.annotate(source, title, reason, future_action, retention)` with a CTX_TURN id or session entry id and retention pin, continuity or archive;\n\
++`await live_context.recall(id)` returns the exact source, `resolve(id)` closes it and `list()` shows them all.",
+         mirror.display()
+     )
+ }
+@@ -166,9 +172,13 @@ fn last_provider_reported(raw: &[Value])
+ }
+ 
+ fn notice_row(text: &str) -> Value {
++    custom_row(NOTICE_CUSTOM_TYPE, text)
++}
++
++fn custom_row(custom_type: &str, text: &str) -> Value {
+     json!({
+         "role": "custom",
+-        "customType": NOTICE_CUSTOM_TYPE,
++        "customType": custom_type,
+         "content": text,
+         "display": false,
+         "timestamp": std::time::SystemTime::now()
+@@ -238,6 +248,8 @@ pub struct ClmRuntime {
+     tool_calls_this_turn: u32,
+     recovery_tried: bool,
+     pending_checkpoint: Option<Checkpoint>,
++    annotations: Vec<annotations::ActiveAnnotation>,
++    continuity_warned: bool,
+ }
+ 
+ impl ClmRuntime {
+@@ -261,6 +273,8 @@ impl ClmRuntime {
+             tool_calls_this_turn: 0,
+             recovery_tried: false,
+             pending_checkpoint: None,
++            annotations: Vec::new(),
++            continuity_warned: false,
+         })
+     }
+ 
+@@ -343,6 +357,27 @@ impl ClmRuntime {
+         self.pending_checkpoint.take()
+     }
+ 
++    pub fn set_annotations(&mut self, active: Vec<annotations::ActiveAnnotation>) {
++        self.annotations = active;
++    }
++
++    #[must_use]
++    pub fn revision(&self) -> u64 {
++        self.revision
++    }
++
++    /// Source message of a block in the mirror the model last saw.
++    #[must_use]
++    pub fn block_source(&self, block_id: &str) -> Option<Value> {
++        let baseline = self.baseline.as_ref()?;
++        baseline
++            .snapshot
++            .blocks
++            .iter()
++            .find(|block| block.id == block_id)
++            .map(|block| block.source.clone())
++    }
++
+     /// The `transform_context` body: projection, observation cap, overflow guard,
+     /// mirror refresh and notices, in pi-clm's order.
+     pub fn transform(
+@@ -388,7 +423,19 @@ impl ClmRuntime {
+         self.calibrator.observe(observed);
+         let resolved = self.config.budget.resolve(context_window);
+ 
++        let continuity = annotations::format_continuity(&self.annotations);
++        let continuity_tokens = continuity.as_deref().map_or(0, estimate_text_tokens);
+         let mut notices: Vec<String> = std::mem::take(&mut self.pending_notices);
++        if continuity_tokens > annotations::CONTINUITY_WARNING_TOKENS {
++            if !self.continuity_warned {
++                self.continuity_warned = true;
++                notices.push(format!(
++                    "Continuity annotations use about {continuity_tokens} tokens; resolve or archive the ones you no longer need."
++                ));
++            }
++        } else {
++            self.continuity_warned = false;
++        }
+         if let (true, Some(resolved)) = (self.config.overflow_withhold, resolved) {
+             let limit =
+                 guard::overflow_guard_limit(resolved.budget, resolved.reserve, context_window);
+@@ -396,7 +443,8 @@ impl ClmRuntime {
+             let notice_tokens: u64 = notices
+                 .iter()
+                 .map(|notice| estimate_text_tokens(notice))
+-                .sum();
++                .sum::<u64>()
++                + continuity_tokens;
+             let result = guard::apply_overflow_guard(
+                 &mut effective,
+                 limit,
+@@ -440,7 +488,8 @@ impl ClmRuntime {
+             let notice_tokens: u64 = notices
+                 .iter()
+                 .map(|notice| estimate_text_tokens(notice))
+-                .sum();
++                .sum::<u64>()
++                + continuity_tokens;
+             let reading = BudgetReading {
+                 budget: resolved,
+                 estimated: self
+@@ -462,6 +511,9 @@ impl ClmRuntime {
+         }
+ 
+         let mut output = effective;
++        if let Some(text) = &continuity {
++            output.push(custom_row(CONTINUITY_CUSTOM_TYPE, text));
++        }
+         output.extend(notices.iter().map(|notice| notice_row(notice)));
+         self.calibrator
+             .record(system_prompt_tokens + estimate_tokens(&output), raw.len());
+@@ -811,4 +863,60 @@ mod tests {
+             "a note reaches the provider as a user turn"
+         );
+     }
++
++    #[test]
++    fn continuity_row_round_trips_through_the_agent_message_type() {
++        let row = custom_row(CONTINUITY_CUSTOM_TYPE, "live context info");
++        let message: pa_agent::types::AgentMessage = serde_json::from_value(row).unwrap();
++        assert_eq!(message.role(), "custom");
++        let converted = crate::session_engine::messages::loop_convert_to_llm(vec![message]);
++        assert_eq!(
++            converted.len(),
++            1,
++            "a continuity row reaches the provider as a user turn"
++        );
++    }
++
++    #[test]
++    fn continuity_message_precedes_notices_and_counts_toward_the_budget() {
++        use annotations::{ActiveAnnotation, Annotation, Retention, SourceRef};
++        let config = ClmConfig::from_settings(&settings(json!({}))).unwrap();
++        let mut runtime = ClmRuntime::new(config, "s").unwrap();
++        let raw = conversation(10);
++        runtime.transform(&raw, 0, 100_000);
++        let block = runtime.baseline.as_ref().unwrap().snapshot.blocks[0].clone();
++        assert_eq!(runtime.block_source(&block.id), Some(block.source));
++        assert_eq!(runtime.block_source("nope"), None);
++
++        let pin = Annotation {
++            id: "lc-1".into(),
++            source: SourceRef {
++                session_id: "s".into(),
++                entry_id: "e".into(),
++                revision: 0,
++                content_hash: "h".into(),
++                role: "user".into(),
++            },
++            title: "rule".into(),
++            reason: "r".into(),
++            future_action: "n".into(),
++            retention: Retention::Pin,
++            created_at: "t".into(),
++            resolved_at: None,
++            resolution: None,
++        };
++        runtime.set_annotations(vec![ActiveAnnotation {
++            annotation: pin,
++            pinned: Some(Ok("y".repeat(40_000))),
++        }]);
++        let output = runtime.transform(&raw, 0, 100_000);
++        let continuity = &output[raw.len()];
++        assert_eq!(continuity["customType"], CONTINUITY_CUSTOM_TYPE);
++        assert!(output[raw.len() + 1]["content"]
++            .as_str()
++            .unwrap()
++            .starts_with("Continuity annotations use about 10"));
++        let again = runtime.transform(&raw, 0, 100_000);
++        assert_eq!(again.len(), raw.len() + 1, "the size warning is shown once");
++    }
+ }
+Index: prime-agent-src/crates/pa-core/src/clm/host.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/host.rs
+@@ -0,0 +1,359 @@
++//! `clm.*` kernel host requests behind the `live-context` skill.
++
++use std::sync::Arc;
++
++use anyhow::{anyhow, bail};
++use serde_json::{json, Value};
++
++use super::annotations::{
++    self, ActiveAnnotation, Annotation, Retention, SourceRef, ANNOTATION_CUSTOM_TYPE,
++    MAX_PIN_SOURCE_TOKENS,
++};
++use super::document::estimate_tokens;
++use super::SharedClm;
++use crate::kernel::shared::{host_handler, HostRequestHandlers};
++use crate::session::manager::SessionManager;
++use pa_types::session::FileEntry;
++
++pub const CLM_OFF: &str = "Context Language Models are off in this session";
++const CALLS: [&str; 4] = ["clm.annotate", "clm.resolve", "clm.list", "clm.recall"];
++
++fn entry_message(entry: &FileEntry) -> Option<Value> {
++    match entry {
++        FileEntry::Message { message, .. } => serde_json::to_value(message).ok(),
++        _ => None,
++    }
++}
++
++fn branch_annotations(session: &SessionManager) -> Vec<Annotation> {
++    let data: Vec<Value> = session
++        .get_branch(None)
++        .into_iter()
++        .filter_map(|entry| match entry {
++            FileEntry::Custom { payload, .. } if payload.custom_type == ANNOTATION_CUSTOM_TYPE => {
++                payload.data.clone()
++            }
++            _ => None,
++        })
++        .collect();
++    annotations::rebuild(&data)
++}
++
++fn verified_source(session: &SessionManager, annotation: &Annotation) -> Result<Value, String> {
++    let id = &annotation.source.entry_id;
++    let message = session
++        .get_entry_by_id(id)
++        .and_then(entry_message)
++        .ok_or_else(|| format!("Source entry {id} is unavailable."))?;
++    if annotations::content_hash(&message) != annotation.source.content_hash {
++        return Err(format!("Source entry {id} failed its content-hash check."));
++    }
++    Ok(message)
++}
++
++/// Push the branch's active annotations, with pin texts, into the runtime.
++pub fn refresh(clm: &SharedClm, session: &SessionManager) {
++    let active: Vec<ActiveAnnotation> = branch_annotations(session)
++        .into_iter()
++        .filter(|annotation| annotation.resolved_at.is_none())
++        .map(|annotation| {
++            let pinned = (annotation.retention == Retention::Pin).then(|| {
++                verified_source(session, &annotation).map(|message| annotations::source_text(&message))
++            });
++            ActiveAnnotation { annotation, pinned }
++        })
++        .collect();
++    clm.lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
++        .set_annotations(active);
++}
++
++fn text<'a>(payload: &'a Value, key: &str) -> anyhow::Result<&'a str> {
++    payload[key]
++        .as_str()
++        .map(str::trim)
++        .filter(|value| !value.is_empty())
++        .ok_or_else(|| anyhow!("{key} is required and must be a non-empty string"))
++}
++
++/// Resolve `source` to (entry id, message): a session entry id on the active
++/// branch, or a `CTX_TURN` block id from the current mirror.
++fn resolve_source(
++    source: &str,
++    clm: &SharedClm,
++    session: &SessionManager,
++) -> anyhow::Result<(String, Value)> {
++    let branch = session.get_branch(None);
++    if let Some(found) = branch
++        .iter()
++        .find(|entry| entry.id() == Some(source))
++        .and_then(|entry| entry_message(entry))
++    {
++        return Ok((source.to_string(), found));
++    }
++    let block = clm
++        .lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
++        .block_source(source)
++        .ok_or_else(|| anyhow!("Source {source} is neither a message entry on the active branch nor a block in the current live-context mirror."))?;
++    branch
++        .iter()
++        .find_map(|entry| {
++            let message = entry_message(entry)?;
++            let id = entry.id()?;
++            annotations::same_message(&message, &block)
++                .then(|| (id.to_string(), message))
++        })
++        .ok_or_else(|| anyhow!("Block {source} has no session entry (it is a model-written note). Annotate the original message by its entry id."))
++}
++
++/// One `clm.*` request. Errors reach Python as `RuntimeError`.
++///
++/// # Errors
++///
++/// Returns an error if CLM is off or the request payload is invalid.
++pub fn handle(
++    request_type: &str,
++    payload: &Value,
++    clm: Option<&SharedClm>,
++    session: &mut SessionManager,
++) -> anyhow::Result<Value> {
++    let Some(clm) = clm else { bail!(CLM_OFF) };
++    let mut all = branch_annotations(session);
++    match request_type {
++        "clm.list" => Ok(json!({ "text": annotations::format_list(&all), "annotations": all })),
++        "clm.recall" => {
++            let id = text(payload, "id")?;
++            let annotation = all
++                .iter()
++                .find(|known| known.id == id)
++                .ok_or_else(|| anyhow!("Annotation {id} is not on the active branch."))?;
++            let message = verified_source(session, annotation).map_err(|reason| anyhow!(reason))?;
++            let max_tokens = annotations::clamp_recall(payload["maxTokens"].as_u64());
++            let (text, truncated) = annotations::format_recall(
++                annotation,
++                &annotations::source_text(&message),
++                max_tokens,
++            );
++            Ok(json!({ "text": text, "truncated": truncated }))
++        }
++        "clm.resolve" => {
++            let id = text(payload, "id")?;
++            let annotation = all
++                .iter_mut()
++                .find(|known| known.id == id)
++                .ok_or_else(|| anyhow!("Annotation {id} is not on the active branch."))?;
++            if annotation.resolved_at.is_some() {
++                bail!("Annotation {id} is already resolved.");
++            }
++            annotation.resolved_at = Some(annotations::now_iso());
++            annotation.resolution = payload["resolution"]
++                .as_str()
++                .map(|note| note.split_whitespace().collect::<Vec<_>>().join(" "))
++                .filter(|note| !note.is_empty());
++            let resolved = annotation.clone();
++            session.append_custom_entry(ANNOTATION_CUSTOM_TYPE, Some(serde_json::to_value(&resolved)?))?;
++            refresh(clm, session);
++            Ok(json!({ "text": format!("Resolved {}: {}", resolved.id, resolved.title), "annotation": resolved }))
++        }
++        "clm.annotate" => {
++            let source = text(payload, "source")?;
++            let retention: Retention = serde_json::from_value(payload["retention"].clone())
++                .map_err(|_| anyhow!("retention must be pin, continuity or archive"))?;
++            let (title, reason, future_action) = (
++                text(payload, "title")?.to_string(),
++                text(payload, "reason")?.to_string(),
++                text(payload, "futureAction")?.to_string(),
++            );
++            let (entry_id, message) = resolve_source(source, clm, session)?;
++            if retention == Retention::Pin {
++                let tokens = estimate_tokens(std::slice::from_ref(&message));
++                if tokens > MAX_PIN_SOURCE_TOKENS {
++                    bail!("The source is about {tokens} tokens; pin is limited to {MAX_PIN_SOURCE_TOKENS}. Use continuity or archive instead.");
++                }
++            }
++            let revision = clm
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .revision();
++            let annotation = Annotation {
++                id: annotations::new_id(&all),
++                source: SourceRef {
++                    session_id: session.get_session_id().to_string(),
++                    entry_id,
++                    revision,
++                    content_hash: annotations::content_hash(&message),
++                    role: message["role"].as_str().unwrap_or("").to_string(),
++                },
++                title,
++                reason,
++                future_action,
++                retention,
++                created_at: annotations::now_iso(),
++                resolved_at: None,
++                resolution: None,
++            };
++            session.append_custom_entry(ANNOTATION_CUSTOM_TYPE, Some(serde_json::to_value(&annotation)?))?;
++            refresh(clm, session);
++            Ok(json!({
++                "id": annotation.id,
++                "text": format!(
++                    "Created {} annotation {} for {} entry {}.",
++                    annotation.retention.label(), annotation.id, annotation.source.role, annotation.source.entry_id
++                ),
++            }))
++        }
++        other => bail!("unknown clm request type \"{other}\""),
++    }
++}
++
++/// Register every `clm.*` call; with CLM off each one answers [`CLM_OFF`].
++#[allow(clippy::needless_pass_by_value)]
++pub fn register(
++    handlers: &mut HostRequestHandlers,
++    clm: Option<SharedClm>,
++    session: Arc<tokio::sync::Mutex<SessionManager>>,
++) {
++    for name in CALLS {
++        let clm = clm.clone();
++        let session = session.clone();
++        handlers.register(
++            name,
++            host_handler(move |payload| {
++                let clm = clm.clone();
++                let session = session.clone();
++                Box::pin(async move {
++                    let mut session = session.lock().await;
++                    handle(name, &payload.data, clm.as_ref(), &mut session)
++                })
++            }),
++        );
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::clm::{ClmConfig, ClmRuntime};
++
++    fn runtime() -> SharedClm {
++        let config = ClmConfig::from_settings(&serde_json::from_value(json!({})).unwrap()).unwrap();
++        Arc::new(std::sync::Mutex::new(ClmRuntime::new(config, "s").unwrap()))
++    }
++
++    fn session_with_user(text: &str) -> (SessionManager, String) {
++        let mut session = SessionManager::in_memory(std::path::Path::new("/tmp"));
++        let message: pa_types::session::AgentMessage =
++            serde_json::from_value(json!({ "role": "user", "content": text, "timestamp": 7 })).unwrap();
++        let id = session.append_message(message).unwrap();
++        (session, id)
++    }
++
++    #[test]
++    fn every_call_reports_clm_off() {
++        let (mut session, _) = session_with_user("hi");
++        for name in CALLS {
++            let error = handle(name, &json!({}), None, &mut session).unwrap_err();
++            assert_eq!(error.to_string(), CLM_OFF);
++        }
++    }
++
++    #[test]
++    fn annotate_list_recall_resolve_round_trip() {
++        let clm = runtime();
++        let (mut session, entry) = session_with_user("never push to main");
++        let created = handle(
++            "clm.annotate",
++            &json!({ "source": entry, "title": "branch rule", "reason": "user rule", "futureAction": "use a branch", "retention": "pin" }),
++            Some(&clm),
++            &mut session,
++        )
++        .unwrap();
++        let id = created["id"].as_str().unwrap().to_string();
++        let output = clm.lock().unwrap().transform(&[], 0, 100_000);
++        assert!(output[0]["content"].as_str().unwrap().contains("never push to main"));
++
++        let listed = handle("clm.list", &json!({}), Some(&clm), &mut session).unwrap();
++        assert!(listed["text"].as_str().unwrap().contains(&id));
++        let recalled = handle("clm.recall", &json!({ "id": id }), Some(&clm), &mut session).unwrap();
++        assert!(recalled["text"].as_str().unwrap().ends_with("never push to main"));
++
++        handle("clm.resolve", &json!({ "id": id, "resolution": "done" }), Some(&clm), &mut session).unwrap();
++        let output = clm.lock().unwrap().transform(&[], 0, 100_000);
++        assert!(output.is_empty(), "resolved annotations are not rendered");
++        let again = handle("clm.resolve", &json!({ "id": id }), Some(&clm), &mut session).unwrap_err();
++        assert!(again.to_string().contains("already resolved"));
++    }
++
++    #[test]
++    fn annotate_rejects_bad_sources_retentions_and_big_pins() {
++        let clm = runtime();
++        let (mut session, entry) = session_with_user(&"z".repeat(40_000));
++        let base = json!({ "title": "t", "reason": "r", "futureAction": "f" });
++        let with = |extra: Value| {
++            let mut payload = base.clone();
++            payload.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
++            payload
++        };
++        let missing = handle("clm.annotate", &with(json!({ "source": "nope", "retention": "pin" })), Some(&clm), &mut session);
++        assert!(missing.unwrap_err().to_string().contains("neither a message entry"));
++        let bad = handle("clm.annotate", &with(json!({ "source": entry, "retention": "forever" })), Some(&clm), &mut session);
++        assert!(bad.unwrap_err().to_string().contains("pin, continuity or archive"));
++        let big = handle("clm.annotate", &with(json!({ "source": entry, "retention": "pin" })), Some(&clm), &mut session);
++        assert!(big.unwrap_err().to_string().contains("pin is limited to 8000"));
++        handle("clm.annotate", &with(json!({ "source": entry, "retention": "archive" })), Some(&clm), &mut session).unwrap();
++    }
++
++    #[test]
++    fn a_mirror_block_id_maps_to_its_session_entry() {
++        let clm = runtime();
++        let (mut session, entry) = session_with_user("from the mirror");
++        let raw: Vec<Value> = vec![entry_message(session.get_entry_by_id(&entry).unwrap()).unwrap()];
++        clm.lock().unwrap().transform(&raw, 0, 100_000);
++        let mirror = std::fs::read_to_string(clm.lock().unwrap().mirror_path()).unwrap();
++        let block_id = mirror
++            .split("id=")
++            .nth(1)
++            .and_then(|rest| rest.split_whitespace().next())
++            .unwrap()
++            .to_string();
++        let created = handle(
++            "clm.annotate",
++            &json!({ "source": block_id, "title": "t", "reason": "r", "futureAction": "f", "retention": "continuity" }),
++            Some(&clm),
++            &mut session,
++        )
++        .unwrap();
++        assert!(created["text"].as_str().unwrap().ends_with(&format!("user entry {entry}.")));
++    }
++
++    #[test]
++    fn recall_checks_content_hash() {
++        let clm = runtime();
++        let (mut session, entry) = session_with_user("hello world");
++        let created = handle(
++            "clm.annotate",
++            &json!({ "source": entry, "title": "t", "reason": "r", "futureAction": "f", "retention": "continuity" }),
++            Some(&clm),
++            &mut session,
++        )
++        .unwrap();
++        let id = created["id"].as_str().unwrap().to_string();
++
++        let branch = session.get_branch(None);
++        let mut custom_val = branch
++            .into_iter()
++            .find_map(|e| match e {
++                FileEntry::Custom { payload, .. } if payload.custom_type == ANNOTATION_CUSTOM_TYPE => payload.data.clone(),
++                _ => None,
++            })
++            .unwrap();
++        custom_val["source"]["contentHash"] = json!("corrupted-hash");
++        session
++            .append_custom_entry(ANNOTATION_CUSTOM_TYPE, Some(custom_val))
++            .unwrap();
++
++        let err = handle("clm.recall", &json!({ "id": id }), Some(&clm), &mut session).unwrap_err();
++        assert!(err.to_string().contains("content-hash"), "error was: {err}");
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs
++++ prime-agent-src/crates/pa-core/src/session_engine/engine.rs
+@@ -321,11 +321,13 @@ pub async fn create_session(mut config:
+             })
+             .collect();
+         clm.lock().unwrap().restore(history);
++        crate::clm::host::refresh(clm, &*wiring.session.lock().await);
+     }
+     let mut handlers = wiring.handlers.clone();
+     if let Some(extra) = config.extra_host_handlers.clone() {
+         handlers.merge(extra);
+     }
++    crate::clm::host::register(&mut handlers, clm.clone(), wiring.session.clone());
+     // Per-session counters (MCP connector use, kernel boots, skills, RLM
+     // child usage, feature outcomes) ride `agent session ended`; the seams
+     // below count into them instead of emitting their own events.
+Index: prime-agent-src/crates/pa-core/tests/prompt_guards.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/tests/prompt_guards.rs
++++ prime-agent-src/crates/pa-core/tests/prompt_guards.rs
+@@ -338,10 +338,12 @@ fn python_skill_functions(package_path:
+ /// user is not logged into the integration, so the prompt documents them only through the dynamic
+ /// skills inventory (and its generic "additional skills may exist" note), not as API surface.
+ fn auth_gated_bundled_skills() -> BTreeSet<String> {
+-    pa_core::mcp::BUILTIN_MCP_CATALOG
++    let mut gated: BTreeSet<String> = pa_core::mcp::BUILTIN_MCP_CATALOG
+         .iter()
+         .map(|(server, _, _)| server.to_string())
+-        .collect()
++        .collect();
++    gated.insert("live_context".to_string());
++    gated
+ }
+ 
+ /// (import name, public functions) for every bundled Python skill that is
+@@ -494,6 +496,7 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &
+     "compact",
+     "edit",
+     "goal",
++    "live-context",
+     "mcp",
+     "prime-intellect",
+     "refine",
+Index: prime-agent-src/skills/live-context/SKILL.md
+===================================================================
+--- /dev/null
++++ prime-agent-src/skills/live-context/SKILL.md
+@@ -0,0 +1,23 @@
++---
++name: live-context
++description: Pin, track and recall exact context sources while Context Language Models (the editable LIVE_CONTEXT.md mirror) is on in this session. Use before cutting a source from the mirror that later work must keep or find again. Every call fails with "Context Language Models are off in this session" otherwise.
++---
++
++# live-context
++
++```python
++import live_context
++
++# source: a CTX_TURN id from LIVE_CONTEXT.md or a session entry id
++r = await live_context.annotate("3-1a2b3c4d5e6f", "Deploy rule", "the user set it", "check before deploy", "pin")
++await live_context.list()                 # {"text": ..., "annotations": [...]}
++await live_context.recall(r["id"])        # {"text": exact source, "truncated": bool}
++await live_context.resolve(r["id"], "deployed")
++```
++
++Retention:
++- `pin` keeps the exact text visible in every request. Sources over 8000 tokens are refused.
++- `continuity` keeps a title, next action and recall id visible.
++- `archive` shows nothing; use `recall` to read it.
++
++`recall(id, max_tokens=2000)` returns at most `max_tokens` (128 to 8000) and fails if the source entry changed.
+Index: prime-agent-src/skills/live-context/pyproject.toml
+===================================================================
+--- /dev/null
++++ prime-agent-src/skills/live-context/pyproject.toml
+@@ -0,0 +1,14 @@
++# rlm is provided by the kernel and deliberately not a dependency.
++[project]
++name = "live-context"
++version = "0.1.0"
++description = "Prime Agent live-context skill: pin, track and recall exact context sources while Context Language Models is on"
++requires-python = ">=3.10"
++dependencies = []
++
++[build-system]
++requires = ["hatchling"]
++build-backend = "hatchling.build"
++
++[tool.hatch.build.targets.wheel]
++packages = ["src/live_context"]
+Index: prime-agent-src/skills/live-context/src/live_context/__init__.py
+===================================================================
+--- /dev/null
++++ prime-agent-src/skills/live-context/src/live_context/__init__.py
+@@ -0,0 +1,33 @@
++"""Live-context annotations over the kernel host bridge (clm.* requests)."""
++
++from __future__ import annotations
++
++from typing import Any
++
++from rlm import host_request
++
++RETENTIONS = ("pin", "continuity", "archive")
++
++
++async def annotate(source: str, title: str, reason: str, future_action: str, retention: str) -> dict[str, Any]:
++    if retention not in RETENTIONS:
++        raise ValueError(f"retention must be one of {', '.join(RETENTIONS)}")
++    return await host_request(
++        "clm.annotate",
++        {"source": source, "title": title, "reason": reason, "futureAction": future_action, "retention": retention},
++    )
++
++
++async def resolve(id: str, resolution: str | None = None) -> dict[str, Any]:
++    payload: dict[str, Any] = {"id": id}
++    if resolution is not None:
++        payload["resolution"] = resolution
++    return await host_request("clm.resolve", payload)
++
++
++async def list() -> dict[str, Any]:  # noqa: A001 - the skill's public name
++    return await host_request("clm.list")
++
++
++async def recall(id: str, max_tokens: int = 2000) -> dict[str, Any]:
++    return await host_request("clm.recall", {"id": id, "maxTokens": max(128, min(8000, int(max_tokens)))})
+Index: prime-agent-src/skills/live-context/tests/test_live_context.py
+===================================================================
+--- /dev/null
++++ prime-agent-src/skills/live-context/tests/test_live_context.py
+@@ -0,0 +1,46 @@
++import asyncio
++import importlib.util
++import sys
++import types
++from pathlib import Path
++from unittest.mock import AsyncMock
++
++import pytest
++
++SRC = Path(__file__).resolve().parents[1] / "src" / "live_context" / "__init__.py"
++
++
++def load(host):
++    sys.modules["rlm"] = types.SimpleNamespace(host_request=host)
++    spec = importlib.util.spec_from_file_location("live_context", SRC)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++def test_calls_map_to_clm_requests():
++    host = AsyncMock(return_value={"ok": True})
++    lc = load(host)
++    asyncio.run(lc.annotate("e1", "t", "r", "f", "pin"))
++    asyncio.run(lc.resolve("lc-1"))
++    asyncio.run(lc.resolve("lc-1", "done"))
++    asyncio.run(lc.list())
++    asyncio.run(lc.recall("lc-1"))
++    calls = [call.args for call in host.await_args_list]
++    assert calls == [
++        ("clm.annotate", {"source": "e1", "title": "t", "reason": "r", "futureAction": "f", "retention": "pin"}),
++        ("clm.resolve", {"id": "lc-1"}),
++        ("clm.resolve", {"id": "lc-1", "resolution": "done"}),
++        ("clm.list",),
++        ("clm.recall", {"id": "lc-1", "maxTokens": 2000}),
++    ]
++
++
++def test_recall_clamps_and_annotate_checks_retention():
++    host = AsyncMock(return_value={})
++    lc = load(host)
++    asyncio.run(lc.recall("a", 5))
++    asyncio.run(lc.recall("a", 99999))
++    assert [call.args[1]["maxTokens"] for call in host.await_args_list] == [128, 8000]
++    with pytest.raises(ValueError):
++        asyncio.run(lc.annotate("e1", "t", "r", "f", "forever"))
