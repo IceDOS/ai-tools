@@ -1,5 +1,5 @@
-[icedos.ai-tools.opencode.extraSettings]
-[icedos.ai-tools.opencode.peonPingOverrides]
+[icedos.ai-tools.opencode.extra-settings]
+[icedos.ai-tools.opencode.peon-ping-overrides]
 [icedos.ai-tools.opencode.skills]
 
 # Whether `icedos gc` prunes stale opencode runtime data (logs + SQLite

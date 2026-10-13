@@ -13,7 +13,7 @@ sessionRetentionDays = 30
 # Status glyph ahead of the terminal title (Zed terminal threads show it as a
 # status marker). Working frames cycle per pulse tick; repeat one to hold it
 # longer. Use glyphs of one width in the title font, or the title text shifts.
-[icedos.ai-tools.prime-agent.terminalTitle]
+[icedos.ai-tools.prime-agent.terminal-title]
 idleGlyph = "❄"
 workingGlyphs = ["❅", "❅", "❆", "❆"]
 
@@ -143,7 +143,7 @@ overrides = {}
 [icedos.ai-tools.prime-agent.skills]
 # Extra built-in skills: name -> full SKILL.md content, shipped into dist/skills so
 # they autoload on start; each needs frontmatter `description` (loader skips without).
-extraBuiltin = {}
+extra-builtin = {}
 
 # Extra skill directories, seeded as `skills` in settings.json.
 dirs = []

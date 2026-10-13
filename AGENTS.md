@@ -9,6 +9,7 @@
 - Build/test only via the `icedos` CLI — **never `sudo nixos-rebuild`**.
 - **Never** `git commit/stash/reset/pull` — the user manages git.
 - Every option uses a `validate.*`/`mk*Option` helper; **no untyped options**.
+- Option-path segments that hold other options are **kebab-case** (`agent-bridge`); only leaf value keys are camelCase (`remoteLookup`).
 - A module's `config.toml` defaults must mirror its `icedos.nix` defaults.
 - Format with `icedos nixf .` after editing any `.nix`.
 
@@ -37,11 +38,11 @@ module name is `mcp-server`) and `integrations` (agent-launch, ai-accounts, alim
   writes `~/.config/opencode/rules/<name>.md` and lists it in `instructions`, and `claude-code`
   sets `programs.claude-code.rules` (mkDefault per entry).
 - `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: prime-agent
-  `skills.extraBuiltin`, antigravity `~/.gemini/antigravity-cli/skills/`, opencode
+  `skills.extra-builtin`, antigravity `~/.gemini/antigravity-cli/skills/`, opencode
   `programs.opencode.skills`, Claude Code `programs.claude-code.skills`.
 - Per-agent options of the same name win over the shared entry
   (`antigravity.{rules,skills}`, `opencode.skills`, `prime-agent.extensions.rules`,
-  `prime-agent.skills.extraBuiltin`).
+  `prime-agent.skills.extra-builtin`).
 - Non-agent modules (`llamacpp`, `ollama`, `peon-ping`, `mcp-server`) have a `skills`
   option that adds to `icedos.ai-tools.skills`, so a skill ships with the module it documents.
 
@@ -99,7 +100,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
     ollama account it tags, when that account has no key.
   - alimit keys for non-default accounts are `<provider>@<tag>/<window>`. Status lines read
     `AI_ACCOUNT_TAGS`, and `alimit headroom` feeds auto-pick.
-  - Per-account `settings` merge over the agent module's `icedos.managedSettings.<agent>` into the
+  - Per-account `settings` merge over the agent module's `icedos.managed-settings.<agent>` into the
     account's own settings file on each launch, recorded in `.ai-account-settings.json` so removing
     an override restores the value it replaced.
   - Antigravity accounts run behind `xdg-dbus-proxy`, which hides `org.freedesktop.secrets` so agy

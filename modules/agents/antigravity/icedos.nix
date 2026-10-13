@@ -14,13 +14,13 @@
       inherit ((importTOML ./config.toml).icedos.ai-tools.antigravity)
         desktopEntry
         enableMcpIntegration
-        extraMcpServers
+        extra-mcp-servers
         peonPing
         rules
         skills
         statusLine
         statusLineStackWithDefault
-        terminalTitle
+        terminal-title
         ;
     in
     {
@@ -32,7 +32,7 @@
       enableMcpIntegration = mkBoolOption { default = enableMcpIntegration; };
 
       # Additional MCP servers registered exclusively for Antigravity.
-      extraMcpServers = mkAttrsOfOption { default = extraMcpServers; } lib.types.anything;
+      extra-mcp-servers = mkAttrsOfOption { default = extra-mcp-servers; } lib.types.anything;
 
       # Play peon-ping sounds for agy sessions (upstream antigravity watcher as a user service),
       # for users with icedos.ai-tools.peon-ping configured.
@@ -52,10 +52,10 @@
 
       # Terminal title "<status glyph> <conversation title>"; the status line command drives it.
       # Give every glyph the same width in the title font.
-      terminalTitle = {
-        enable = mkBoolOption { default = terminalTitle.enable; };
-        idleGlyph = mkStrOption { default = terminalTitle.idleGlyph; };
-        workingGlyphs = mkStrListOption { default = terminalTitle.workingGlyphs; };
+      terminal-title = {
+        enable = mkBoolOption { default = terminal-title.enable; };
+        idleGlyph = mkStrOption { default = terminal-title.idleGlyph; };
+        workingGlyphs = mkStrListOption { default = terminal-title.workingGlyphs; };
       };
     };
 
@@ -82,11 +82,11 @@
           inherit (config.icedos.ai-tools.antigravity)
             desktopEntry
             enableMcpIntegration
-            extraMcpServers
+            extra-mcp-servers
             peonPing
             statusLine
             statusLineStackWithDefault
-            terminalTitle
+            terminal-title
             ;
 
           # Shared icedos.ai-tools entries first, so a same-named antigravity entry wins.
@@ -142,8 +142,8 @@
             name = "antigravity-statusline";
             text = ''
               export ANTIGRAVITY_ALIMIT=${lib.getExe alimitPkg}
-              export ANTIGRAVITY_TITLE_IDLE_GLYPH=${lib.escapeShellArg terminalTitle.idleGlyph}
-              export ANTIGRAVITY_TITLE_WORKING_GLYPHS=${lib.escapeShellArg (lib.concatStringsSep " " terminalTitle.workingGlyphs)}
+              export ANTIGRAVITY_TITLE_IDLE_GLYPH=${lib.escapeShellArg terminal-title.idleGlyph}
+              export ANTIGRAVITY_TITLE_WORKING_GLYPHS=${lib.escapeShellArg (lib.concatStringsSep " " terminal-title.workingGlyphs)}
               exec ${pkgs.python3}/bin/python3 ${statusLineScripts}/statusline.py "$@"
             '';
           };
@@ -152,7 +152,7 @@
           # with the bar off, an empty custom line stacked on agy's default renders as the default.
           statusLineCommand = lib.concatStringsSep " " (
             [ "${statusLinePkg}/bin/antigravity-statusline" ]
-            ++ lib.optional terminalTitle.enable "--title"
+            ++ lib.optional terminal-title.enable "--title"
             ++ lib.optional (!statusLine) "--no-bar"
           );
 
@@ -192,7 +192,7 @@
                   else
                     { };
 
-                allServers = mcpRegistry // extraMcpServers;
+                allServers = mcpRegistry // extra-mcp-servers;
 
                 isEnabled =
                   s:
@@ -234,9 +234,9 @@
               in
               {
                 # The same block `statusline.py --setup` writes; null clears agy's key.
-                options.icedos.managedSettings.antigravity = icedosLib.mkAttrsOption {
+                options.icedos.managed-settings.antigravity = icedosLib.mkAttrsOption {
                   default =
-                    if statusLine || terminalTitle.enable then
+                    if statusLine || terminal-title.enable then
                       {
                         statusLine = {
                           type = "command";
@@ -280,7 +280,7 @@
                   # changes), so Home Manager only merges/removes its statusLine key.
                   home.activation.icedosAntigravityStatusLine = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
                     run ${statusLinePkg}/bin/antigravity-statusline --setup ${
-                      if statusLine || terminalTitle.enable then "on" else "off"
+                      if statusLine || terminal-title.enable then "on" else "off"
                     } ${lib.escapeShellArg statusLineCommand}${
                       lib.optionalString (statusLineStackWithDefault || !statusLine) " --stack"
                     }

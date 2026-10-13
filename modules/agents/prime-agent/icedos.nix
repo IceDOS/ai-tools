@@ -20,7 +20,7 @@
         includeInIcedosGc
         providers
         sessionRetentionDays
-        terminalTitle
+        terminal-title
         ;
 
       defaults = (importTOML ./config.toml).icedos.ai-tools.prime-agent.default;
@@ -56,9 +56,9 @@
 
       # Status glyph ahead of the terminal title. Working frames cycle per pulse tick
       # (repeat one to hold it longer); give every glyph the same width in the title font.
-      terminalTitle = {
-        idleGlyph = mkStrOption { default = terminalTitle.idleGlyph; };
-        workingGlyphs = mkStrListOption { default = terminalTitle.workingGlyphs; };
+      terminal-title = {
+        idleGlyph = mkStrOption { default = terminal-title.idleGlyph; };
+        workingGlyphs = mkStrListOption { default = terminal-title.workingGlyphs; };
       };
 
       extensions = {
@@ -143,7 +143,7 @@
       skills = {
         # Extra built-in skills: name -> full SKILL.md content, shipped into dist/skills so
         # they autoload on start; each needs frontmatter `description` (loader skips without).
-        extraBuiltin = mkAttrsOfOption { default = skills.extraBuiltin; } types.str;
+        extra-builtin = mkAttrsOfOption { default = skills.extra-builtin; } types.str;
 
         dirs = mkStrListOption { default = skills.dirs; };
 
@@ -402,7 +402,7 @@
           # Shared icedos.ai-tools entries first, so a same-named prime-agent entry wins.
           prime-agent = cfg // {
             skills = cfg.skills // {
-              extraBuiltin = config.icedos.ai-tools.skills // cfg.skills.extraBuiltin;
+              extra-builtin = config.icedos.ai-tools.skills // cfg.skills.extra-builtin;
             };
             extensions = cfg.extensions // {
               inline =
@@ -438,9 +438,9 @@
             find "''${D}/logs" -maxdepth 1 -type f -mtime "+${toString prime-agent.sessionRetentionDays}" -delete 2>/dev/null || true
           '';
 
-          # ---- skills.extraBuiltin validation ----
+          # ---- skills.extra-builtin validation ----
           skillName = import ./lib/skill-name.nix { inherit lib; };
-          invalidSkillNames = skillName.invalidSkillNames (lib.attrNames prime-agent.skills.extraBuiltin);
+          invalidSkillNames = skillName.invalidSkillNames (lib.attrNames prime-agent.skills.extra-builtin);
 
           takeWhile =
             pred: list:
@@ -464,7 +464,7 @@
             content: lib.any (l: builtins.match "description[ \t]*:.*" l != null) (skillFrontmatter content);
 
           descriptionlessSkillNames = lib.attrNames (
-            lib.filterAttrs (_: c: !hasSkillDescription c) prime-agent.skills.extraBuiltin
+            lib.filterAttrs (_: c: !hasSkillDescription c) prime-agent.skills.extra-builtin
           );
 
           # dataDir as a path the wrapper expands at runtime. The home-manager copy is
@@ -508,7 +508,7 @@
             {
               assertion = invalidSkillNames == [ ];
               message = ''
-                icedos.ai-tools.prime-agent.skills.extraBuiltin names must be
+                icedos.ai-tools.prime-agent.skills.extra-builtin names must be
                 lowercase a-z, 0-9 and hyphens only (no leading/trailing or double
                 hyphens, max 64 chars), matching the loader's directory names:
                 ${builtins.concatStringsSep ", " invalidSkillNames}
@@ -517,7 +517,7 @@
             {
               assertion = descriptionlessSkillNames == [ ];
               message = ''
-                icedos.ai-tools.prime-agent.skills.extraBuiltin entries must be
+                icedos.ai-tools.prime-agent.skills.extra-builtin entries must be
                 full SKILL.md files with frontmatter `description:`; the loader
                 silently skips files without one. Entries missing it:
                 ${builtins.concatStringsSep ", " descriptionlessSkillNames}
@@ -532,11 +532,11 @@
                 inherit (icedosLib.packaging) installDesktopEntry;
                 desktopEntry = prime-agent.desktopEntry;
                 defaultAgentDir = shellDataDir;
-                extraBuiltinSkills = prime-agent.skills.extraBuiltin;
+                extraBuiltinSkills = prime-agent.skills.extra-builtin;
                 codeReview = prime-agent.skills.code.review;
                 ollamaCloud = prime-agent.providers.ollama;
-                titleIdleGlyph = prime-agent.terminalTitle.idleGlyph;
-                titleWorkingGlyphs = prime-agent.terminalTitle.workingGlyphs;
+                titleIdleGlyph = prime-agent.terminal-title.idleGlyph;
+                titleWorkingGlyphs = prime-agent.terminal-title.workingGlyphs;
               };
             })
           ];
@@ -1297,7 +1297,7 @@
                 }) prime-agent.extensions.inline;
               in
               {
-                options.icedos.managedSettings.prime-agent = icedosLib.mkAttrsOption {
+                options.icedos.managed-settings.prime-agent = icedosLib.mkAttrsOption {
                   default = seedSettings;
                 };
 

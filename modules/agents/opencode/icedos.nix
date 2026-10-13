@@ -12,9 +12,9 @@
 
       inherit ((importTOML ./config.toml).icedos.ai-tools.opencode)
         desktopEntry
-        extraSettings
+        extra-settings
         includeInIcedosGc
-        peonPingOverrides
+        peon-ping-overrides
         sessionRetentionDays
         skills
         ;
@@ -23,7 +23,7 @@
       # Whether the launcher installs a desktop entry opening in the default terminal.
       desktopEntry = mkBoolOption { default = desktopEntry; };
 
-      extraSettings = mkAttrsOfOption { default = extraSettings; } lib.types.anything;
+      extra-settings = mkAttrsOfOption { default = extra-settings; } lib.types.anything;
 
       # Merged on top of the resolved peon-ping user settings when generating
       # ~/.config/opencode/peon-ping/config.json. The plugin's loadConfig()
@@ -36,7 +36,7 @@
       # pack_rotation, pack_rotation_mode, path_rules, exclude_dirs, ide_rules,
       # mobile_notify, spam_threshold, spam_window_seconds, plus categories
       # (deep-merged over the base map, not replaced).
-      peonPingOverrides = mkAttrsOfOption { default = peonPingOverrides; } lib.types.anything;
+      peon-ping-overrides = mkAttrsOfOption { default = peon-ping-overrides; } lib.types.anything;
 
       skills = mkAttrsOfOption { default = skills; } lib.types.anything;
 
@@ -73,9 +73,9 @@
           inherit (lib) recursiveUpdate;
           inherit (config.icedos.ai-tools.opencode)
             desktopEntry
-            extraSettings
+            extra-settings
             includeInIcedosGc
-            peonPingOverrides
+            peon-ping-overrides
             sessionRetentionDays
             ;
 
@@ -167,7 +167,7 @@
 
                   # Pull every server from the shared programs.mcp.servers
                   # registry — including agent-memory — and merge it into
-                  # settings.mcp (registry entries win over extraSettings.mcp —
+                  # settings.mcp (registry entries win over extra-settings.mcp —
                   # there are none left in the config root; this is opencode's
                   # side of "declare once").
                   enableMcpIntegration = true;
@@ -182,12 +182,12 @@
                       permission.skill = lib.mapAttrs (name: _: "allow") skills;
                     }
                     // lib.optionalAttrs (rules != { }) {
-                      # extraSettings.instructions replaces this list (recursiveUpdate keeps the right side).
+                      # extra-settings.instructions replaces this list (recursiveUpdate keeps the right side).
                       instructions = lib.mapAttrsToList (
                         name: _: "${config.xdg.configHome}/opencode/rules/${name}.md"
                       ) rules;
                     }
-                  ) extraSettings;
+                  ) extra-settings;
 
                   skills = skills;
                 };
@@ -238,7 +238,7 @@
                     else
                       { };
 
-                  fullConfig = lib.recursiveUpdate baseSettings peonPingOverrides;
+                  fullConfig = lib.recursiveUpdate baseSettings peon-ping-overrides;
                 in
                 {
                   # Upstream plugin writes an OSC set-title escape to stdout with no

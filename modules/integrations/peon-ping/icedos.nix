@@ -33,7 +33,7 @@
         ;
 
       customPackTemplate = head (importTOML ./custom-packs.toml)
-        .icedos.ai-tools.peon-ping.users.username.customPacks;
+        .icedos.ai-tools.peon-ping.users.username.custom-packs;
     in
     mkSubmoduleAttrsOption { default = { }; } {
       defaultPack = mkStrOption { default = defaultPack; };
@@ -63,7 +63,7 @@
 
       packs = mkStrListOption { default = packs; };
 
-      customPacks = mkSubmoduleListOption { default = [ ]; } {
+      custom-packs = mkSubmoduleListOption { default = [ ]; } {
         name = mkStrOption { default = customPackTemplate.name; };
         owner = mkStrOption { default = customPackTemplate.owner; };
         repo = mkStrOption { default = customPackTemplate.repo; };
@@ -106,7 +106,7 @@
           };
 
           renderInstallPacks =
-            u: u.packs ++ (map renderCustomPack (filter (cp: cp.name != "") u.customPacks));
+            u: u.packs ++ (map renderCustomPack (filter (cp: cp.name != "") u.custom-packs));
 
           renderPeonSettings =
             u:

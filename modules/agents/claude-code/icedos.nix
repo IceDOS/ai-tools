@@ -366,7 +366,7 @@ in
               { config, lib, ... }:
 
               {
-                options.icedos.managedSettings.claude = icedosLib.mkAttrsOption {
+                options.icedos.managed-settings.claude = icedosLib.mkAttrsOption {
                   default = config.programs.claude-code.settings;
                 };
 

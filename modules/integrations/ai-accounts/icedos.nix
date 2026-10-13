@@ -135,7 +135,7 @@
                   agents = lib.mapAttrs (name: a: {
                     realDir = realDirs.${name} or "";
                     bin = bins.${name} or "";
-                    settings = config.icedos.managedSettings.${name} or { };
+                    settings = config.icedos.managed-settings.${name} or { };
                     accounts = lib.mapAttrs (_: acc: { inherit (acc) mode label settings; }) a.accounts;
                   }) userCfg.agents;
                 };
