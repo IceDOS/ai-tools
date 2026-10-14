@@ -60,6 +60,12 @@ def runway_ms(r) -> float | None:
     return ms if ms >= 1000 else None
 
 
+def fmt_num(v: float) -> str:
+    """One decimal, dropped when .0. Truncated so 99.96 never reads as 100."""
+    t = math.floor(v * 10 + 1e-9) / 10
+    return f"{t:.0f}" if t == int(t) else f"{t:.1f}"
+
+
 def bar(util: float, width: int = 16) -> str:
     filled = max(0, min(width, round(util / 100 * width)))
     return "█" * filled + "░" * (width - filled)
@@ -132,7 +138,7 @@ def collect(con, now_ms: int, lookback: int = 60, providers=None, tags=None):
 
 def shown(rlist):
     """Windows the views print: 0% ones are hidden. Alerts still get the full list."""
-    return [r for r in rlist if round(r.util)]
+    return [r for r in rlist if fmt_num(r.util) != "0"]
 
 
 def group_by_reset(rlist):
@@ -158,10 +164,10 @@ def _metric_values(r, now_ms: int):
     ms = runway_ms(r)
     runway = "⚠ " + fmt_dur(ms) if ms is not None else "—"
     return (
-        f"{r.per_min:.2f}",
-        f"{r.per_hour:.1f}",
-        f"{r.per_8h:.1f}",
-        f"{r.per_day:.1f}",
+        f"{r.per_min:.2f}".rstrip("0").rstrip("."),
+        fmt_num(r.per_hour),
+        fmt_num(r.per_8h),
+        fmt_num(r.per_day),
         runway,
     )
 
@@ -180,7 +186,7 @@ def render_section(r, now_ms: int, col: int, mark: str = "") -> str:
     width = col * len(METRIC_LABELS)
 
     name = config.label(r.window) + (f" {mark}" if mark else "") + (" ·stale" if r.stale else "")
-    used = f"{r.util:.0f}%"
+    used = f"{fmt_num(r.util)}%"
     warn = "⚠ hits cap before reset" if r.will_exhaust_before_reset else ""
     # pad on the plain text, colour afterwards, so the escapes never shift columns
     right = f"{warn}  {used}" if warn else used
@@ -302,9 +308,9 @@ def _bar_label(window: str, single: bool) -> str:
 
 def _statusline_segment(r, color, label_width: int = 0, single: bool = False) -> str:
     # a red runway already marks a window that caps before reset, so no separate alert
-    seg = [_bar_label(r.window, single).rjust(label_width), _c(f"{_util_code(r.util)};1", f"{r.util:.0f}%", color)]
-    if r.per_hour >= 0.05:
-        seg.append(_c("2", f"{r.per_hour:.1f}/h", color))
+    seg = [_bar_label(r.window, single).rjust(label_width), _c(f"{_util_code(r.util)};1", f"{fmt_num(r.util)}%", color)]
+    if r.per_hour >= 0.1:
+        seg.append(_c("2", f"{fmt_num(r.per_hour)}/h", color))
     if (ms := runway_ms(r)) is not None:
         seg.append(_c("31", ENDS_GLYPH + fmt_dur(ms), color))
     return " ".join(seg)
@@ -442,7 +448,7 @@ def render_prompt(payload, rlist, now_ms: int, agent: str = "claude") -> str:
     # autoCompactWindow is a Claude Code setting
     compact = _auto_compact_window() if agent == "claude" else None
     if (ctx := context_pct(payload, compact)) is not None:
-        head.append(_c(_util_code(ctx), f"{pie(ctx)} {ctx:.0f}%", True))
+        head.append(_c(_util_code(ctx), f"{pie(ctx)} {fmt_num(ctx)}%", True))
     if rate := speed.render(payload.get("transcript_path")):
         last, sep, avg = rate.partition(" · ")
         head.append(_c(CYAN, last, True) + (_c("2", sep, True) + _c(GREY, avg, True) if avg else ""))
@@ -471,7 +477,7 @@ def render_cross(rlist) -> str | None:
     c = cross_metric(rlist)
     if not c:
         return None
-    line = f"1% weekly usage ≈ {c['session_pct_per_weekly_pct']:.1f}% of 5-hour usage"
+    line = f"1% weekly usage ≈ {fmt_num(c['session_pct_per_weekly_pct'])}% of 5-hour usage"
     if c["weekly_pct_until_session_caps"] is not None:
         line += f"  ·  ~{c['weekly_pct_until_session_caps']:.0f}% more weekly usage before 5-hour usage caps"
     return _c("2", line)

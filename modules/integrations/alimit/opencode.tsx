@@ -30,6 +30,12 @@ function fmtDur(ms: number | null): string {
   return m ? `${m}m` : `${s}s`
 }
 
+// One decimal, dropped when .0. Truncated so 99.96 never reads as 100.
+function fmtPct(util: number): string {
+  const t = Math.floor(util * 10 + 1e-9) / 10
+  return Number.isInteger(t) ? `${t}` : t.toFixed(1)
+}
+
 function bar(util: number): string {
   const filled = Math.max(0, Math.min(BAR_WIDTH, Math.round((util / 100) * BAR_WIDTH)))
   return "█".repeat(filled) + "░".repeat(BAR_WIDTH - filled)
@@ -116,7 +122,7 @@ const tui: TuiPlugin = async (api) => {
                   <box flexDirection="row" columnGap={1}>
                     <text fg={theme.textMuted}>{w.bar_label.padEnd(width())}</text>
                     <text fg={color(w)}>{bar(w.util)}</text>
-                    <text fg={theme.text}>{`${Math.round(w.util)}%`.padStart(4)}</text>
+                    <text fg={theme.text}>{`${fmtPct(w.util)}%`.padStart(6)}</text>
                     <text fg={theme.textMuted}>{w.reset_ts ? fmtDur(w.reset_ts - now()) : ""}</text>
                   </box>
                 )}

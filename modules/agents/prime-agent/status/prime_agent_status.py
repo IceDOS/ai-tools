@@ -46,12 +46,18 @@ def bar(pct):
     return sgr(severity(pct), "▰" * filled) + dim("▱" * (BAR_CELLS - filled))
 
 
+def fmt_num(v):
+    """One decimal, dropped when .0. Truncated so 99.96 never reads as 100."""
+    t = int(v * 10 + 1e-9) / 10
+    return f"{t:.0f}" if t == int(t) else f"{t:.1f}"
+
+
 def fmt_tokens(n):
     if n < 1000:
         return str(n)
     if n < 1_000_000:
-        return f"{n / 1000:.{1 if n < 100_000 else 0}f}k"
-    return f"{n / 1_000_000:.1f}M"
+        return f"{fmt_num(n / 1000) if n < 100_000 else f'{n / 1000:.0f}'}k"
+    return f"{fmt_num(n / 1_000_000)}M"
 
 
 def fmt_cost(n):
@@ -363,8 +369,8 @@ def free_row(cfg, payload, model_id, now_s, state_dir):
         cache[key] = {"count": count, "at": now_s, "changed": changed}
         write_json(path, cache)
     cap = cfg["freeCaps"].get(pool, cfg["freeCapDefault"])
-    pct = min(100, round(count / cap * 100))
-    parts = [dim("reqs"), f"{count}/{cap}", bar(pct), sgr(severity(pct), f"{pct:>3}%")]
+    pct = min(100, count / cap * 100)
+    parts = [dim("reqs"), f"{count}/{cap}", bar(pct), sgr(severity(pct), f"{fmt_num(pct):>4}%")]
     reset = rate_limit_reset(payload.get("sessionFile"), now_s)
     if reset:
         parts.append(sgr("31", f"resets in {fmt_dur(reset - now_s) or 'soon'}"))
