@@ -1,7 +1,8 @@
 """ai-accounts' declared accounts, as alimit polls and shows them. Read-only."""
 import json
 import os
-from dataclasses import dataclass
+import dataclasses
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
@@ -76,15 +77,19 @@ class Headroom:
     account: str
     max_util: float
     reset_ts: int | None
+    # peak util per period ("5h", "wk", "mo"...); None where this account has no sample
+    windows: dict = field(default_factory=dict)
 
 
 def headroom(con, agent: str, names: list, now_ms: int) -> list:
     providers = config.AGENT_PROVIDERS[agent]
     present = [w for w in store.windows_present(con) if config.provider_of(w) in providers]
+    periods = sorted({config.period(w) for w in present}, key=lambda p: (p[1], p[0]))
     out = []
     for name in names:
         tag = config.account_tag(agent, name)
         best = Headroom(name, 0.0, None)
+        windows = {short: None for short, _ in periods}
         for w in present:
             if config.split_account(w)[1] != tag:
                 continue
@@ -96,7 +101,9 @@ def headroom(con, agent: str, names: list, now_ms: int) -> list:
             r = compute(w, rows, now_ms)
             if r.util > best.max_util:
                 best = Headroom(name, r.util, r.reset_ts)
-        out.append(best)
+            short = config.period(w)[0]
+            windows[short] = max(windows[short] or 0.0, r.util)
+        out.append(dataclasses.replace(best, windows=windows))
     return out
 
 

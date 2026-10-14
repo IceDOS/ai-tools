@@ -195,6 +195,7 @@ def list_rows(cfg) -> dict:
                 "label": a.label or n,
                 "loggedIn": logged[n],
                 "maxUtil": (usage.get(n) or {}).get("max_util"),
+                "windows": (usage.get(n) or {}).get("windows") or {},
                 "resetTs": (usage.get(n) or {}).get("reset_ts"),
                 "sticky": chosen == n,
                 "next": nxt == n,

@@ -55,11 +55,15 @@ def fzf_account(lines: list) -> str | None:
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
+def _pct(value) -> str:
+    return "\u2014" if value is None else f"{value:.0f}%"
+
+
 def _account_line(r: dict) -> str:
-    util = "\u2014" if r.get("maxUtil") is None else f"{r['maxUtil']:.0f}%"
     tail = " (auto)" if r.get("next") else " (sticky)" if r.get("sticky") else ""
     login = "" if r.get("loggedIn") else "  needs login"
-    return f"{r['label']:<12} {util:>5}{tail}{login}"
+    windows = "  ".join(f"{k} {_pct(v):>4}" for k, v in (r.get("windows") or {}).items())
+    return f"{r['label']:<12} {windows or _pct(r.get('maxUtil')):>4}{tail}{login}"
 
 
 def pick_account(name: str, lister=None, picker=None) -> str | None:

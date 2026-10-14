@@ -91,6 +91,11 @@ class HeadroomTest(unittest.TestCase):
         self.assertEqual(rows["default"].max_util, 80.0)
         self.assertEqual(rows["work"].max_util, 10.0)
         self.assertEqual(rows["new"].max_util, 0.0)
+        self.assertEqual(rows["default"].windows, {"5h": 80.0, "wk": 30.0})
+        self.assertEqual(rows["work"].windows, {"5h": 10.0, "wk": None})
+        self.assertEqual(rows["new"].windows, {"5h": None, "wk": None})
+        # auto-pick ranks by max_util, the peak over every printed window
+        self.assertEqual(rows["default"].max_util, max(rows["default"].windows.values()))
 
     def test_idle_redraw_does_not_lower_usage(self):
         store.record(self.con, 1500, {"five_hour": {"util": 20.0, "resets_at": "2099-01-01T00:00:00+00:00"}},

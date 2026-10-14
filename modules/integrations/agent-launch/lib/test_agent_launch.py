@@ -73,8 +73,8 @@ if __name__ == "__main__":
 
 
 ROWS = [
-    {"account": "default", "label": "default", "loggedIn": True, "maxUtil": 80.0, "sticky": False, "next": False},
-    {"account": "work", "label": "Work", "loggedIn": True, "maxUtil": 10.0, "sticky": False, "next": True},
+    {"account": "default", "label": "default", "loggedIn": True, "maxUtil": 80.0, "windows": {"5h": 30.0, "wk": 80.0, "mo": 5.0}, "sticky": False, "next": False},
+    {"account": "work", "label": "Work", "loggedIn": True, "maxUtil": 10.0, "windows": {"5h": None, "wk": 10.0, "mo": None}, "sticky": False, "next": True},
 ]
 
 
@@ -95,7 +95,8 @@ class AccountStepTest(unittest.TestCase):
             return lines[1]
 
         self.assertEqual(al.pick_account("claude", lister=lambda n: ROWS, picker=picker), "work")
-        self.assertIn("10%", seen["lines"][1])
+        self.assertIn("5h  30%  wk  80%  mo   5%", seen["lines"][0])
+        self.assertIn("5h    \u2014  wk  10%  mo    \u2014", seen["lines"][1])
         self.assertIn("(auto)", seen["lines"][1])
 
     def test_print_includes_account_env(self):

@@ -186,11 +186,13 @@ class CliTest(unittest.TestCase):
         state.set_sticky("claude", "work")
         with mock.patch.object(cli, "_headroom", return_value={"pick": None, "accounts": [
             {"account": "default", "max_util": 50.0, "reset_ts": None},
-            {"account": "work", "max_util": 5.0, "reset_ts": 9}]}):
+            {"account": "work", "max_util": 5.0, "reset_ts": 9, "windows": {"5h": 3.0, "wk": 5.0}}]}):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 cli.main(["list", "--json"])
         rows = {r["account"]: r for r in json.loads(buf.getvalue())["claude"]}
         self.assertTrue(rows["work"]["sticky"])
         self.assertEqual(rows["work"]["maxUtil"], 5.0)
+        self.assertEqual(rows["work"]["windows"], {"5h": 3.0, "wk": 5.0})
+        self.assertEqual(rows["default"]["windows"], {})
         self.assertTrue(rows["work"]["loggedIn"])

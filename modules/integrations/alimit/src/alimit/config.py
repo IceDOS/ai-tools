@@ -242,6 +242,16 @@ def is_weekly(window: str) -> bool:
     return _provider_parts(base)[2] in ("weekly", "seven_day")
 
 
+def period(window: str) -> tuple[str, int]:
+    """(short label, rank) of a window's period, dropping family and account: "5h", "wk", "mo"..."""
+    base = split_account(window)[0]
+    if provider_of(window) == "claude":
+        return ("5h", 0) if base == "five_hour" else ("wk", 2)
+    part = _provider_parts(base)[2]
+    _, short, rank = PROVIDER_WINDOWS.get(part, ("", part[:3], 9))
+    return short, rank
+
+
 def period_of(window: str) -> str | None:
     """"week" or "month" for windows rates.paced projects; None keeps the last hour's rate."""
     if is_weekly(window):

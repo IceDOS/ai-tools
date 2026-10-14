@@ -96,6 +96,13 @@ class TestAccountKeys(unittest.TestCase):
         self.assertTrue(config.is_known_window("claude@work/five_hour"))
         self.assertFalse(config.is_known_window("claude@work/bogus"))
 
+    def test_period(self):
+        self.assertEqual(config.period("claude@work/five_hour"), ("5h", 0))
+        self.assertEqual(config.period("weekly_scoped:fable"), ("wk", 2))
+        self.assertEqual(config.period("antigravity@joanna/gemini-weekly"), ("wk", 2))
+        self.assertEqual(config.period("opencode-go@opencode.solo/rolling"), ("5h", 0))
+        self.assertEqual(config.period("opencode-go/monthly"), ("mo", 3))
+
     def test_weekly_of_pairs_five_hour_windows(self):
         self.assertEqual(config.weekly_of("five_hour"), ["seven_day"])
         self.assertEqual(config.weekly_of("claude@work/five_hour"), ["claude@work/seven_day"])
