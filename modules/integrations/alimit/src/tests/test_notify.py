@@ -39,6 +39,42 @@ class TestNotifyCheck(unittest.TestCase):
         send.assert_called_once()
 
 
+class TestRepeatRules(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.con = store.connect(Path(self.tmp.name) / "u.db")
+
+    def tearDown(self):
+        self.con.close()
+        self.tmp.cleanup()
+
+    def _rate(self, util, per_hour=0.0, exhaust=False):
+        return mock.Mock(window="w", util=util, per_hour=per_hour, will_exhaust_before_reset=exhaust)
+
+    def _fires(self, r, now):
+        with mock.patch.object(notify, "_send") as send:
+            notify.check(self.con, [r], now)
+        return send.call_count
+
+    def test_full_window_alerts_once(self):
+        r = self._rate(100.0, per_hour=0.01, exhaust=True)
+        self.assertEqual(self._fires(r, 0), 1)
+        self.assertEqual(self._fires(r, notify.DEBOUNCE_MS * 10), 0)
+
+    def test_no_repeat_without_new_usage(self):
+        self.assertEqual(self._fires(self._rate(90.0), 0), 1)
+        self.assertEqual(self._fires(self._rate(90.0), notify.DEBOUNCE_MS + 1), 0)
+        self.assertEqual(self._fires(self._rate(91.0), notify.DEBOUNCE_MS + 2), 1)
+
+    def test_near_zero_pace_is_not_a_pace_warning(self):
+        self.assertIsNone(notify._condition(self._rate(50.0, per_hour=0.01, exhaust=True)))
+
+    def test_reset_rearms(self):
+        self._fires(self._rate(100.0), 0)
+        self._fires(self._rate(0.0), 1)
+        self.assertEqual(self._fires(self._rate(100.0), 2), 1)
+
+
 class TestSendArgv(unittest.TestCase):
     """_send's argv is what decides stickiness, so assert on it directly."""
 

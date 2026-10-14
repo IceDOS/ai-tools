@@ -42,7 +42,9 @@ def _send(con, key: str, title: str, body: str, style: AlertStyle = DEFAULT_STYL
 
 
 def _condition(r) -> str | None:
-    if r.will_exhaust_before_reset:
+    if r.util >= 100.0:
+        return "full"
+    if r.will_exhaust_before_reset and r.per_hour >= 0.05:  # ~0.0%/h is no real pace
         return "exhaust"
     for t in sorted(THRESHOLDS, reverse=True):
         if r.util >= t:
@@ -61,11 +63,17 @@ def check(con, rlist, now_ms: int | None = None, style: AlertStyle = DEFAULT_STY
             store.set_meta(con, key, "")
             continue
         prev = store.get_meta(con, key, "")
-        last_ms = store.get_meta_int(con, key + "_ms", 0)
-        if prev == cond and now - last_ms < DEBOUNCE_MS:
-            continue
+        if prev:
+            # a full window can't go further; otherwise repeat only after new usage
+            if prev == "full":
+                continue
+            if r.util <= float(store.get_meta(con, key + "_util", "0") or 0):
+                continue
+            if prev == cond and now - store.get_meta_int(con, key + "_ms", 0) < DEBOUNCE_MS:
+                continue
         store.set_meta(con, key, cond)
         store.set_meta(con, key + "_ms", now)
+        store.set_meta(con, key + "_util", r.util)
         label = config.label(r.window)
         if cond == "exhaust":
             _send(
@@ -76,5 +84,7 @@ def check(con, rlist, now_ms: int | None = None, style: AlertStyle = DEFAULT_STY
                 "before it resets.",
                 style,
             )
+        elif cond == "full":
+            _send(con, key, "alimit — limit reached", f"{label}: 100% used.", style)
         else:
             _send(con, key, "alimit — usage high", f"{label}: {r.util:.0f}% used.", style)
