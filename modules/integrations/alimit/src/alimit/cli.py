@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-from . import __version__, accounts, config, poller, sources, speed, store
+from . import __version__, accounts, config, poller, rates, sources, speed, store
 from .rates import compute, to_ms
 
 
@@ -127,13 +127,30 @@ def collect(con, now_ms: int, lookback: int = 60, providers=None, tags=None):
         ),
     )
     present_order = order + scoped + claude_accounts + others
-    out = []
+    out, rows_of = [], {}
     for w in store.prune_retired(con, present_order, now_ms):
-        rows = store.samples_for(con, w, since_ts=now_ms - config.HISTORY_MS)
-        r = compute(w, rows, now_ms, lookback_min=lookback)
+        period = config.period_of(w)
+        history = config.MONTH_HISTORY_MS if period == "month" else config.HISTORY_MS
+        rows_of[w] = store.samples_for(con, w, since_ts=now_ms - history)
+        r = compute(w, rows_of[w], now_ms, lookback_min=lookback)
+        if r and period:
+            r = rates.paced(r, rows_of[w], now_ms, period)
         if r:
             out.append(r)
-    return out
+    return _link_weekly(out, rows_of)
+
+
+def _link_weekly(rlist, rows_of):
+    """Tag each weekly window with how much of its 5h window 1% of it costs."""
+    by = {r.window: i for i, r in enumerate(rlist)}
+    for short in rlist:
+        for key in config.weekly_of(short.window):
+            if key not in by:
+                continue
+            if rlist[by[key]].reset_ts is not None and (ratio := rates.exchange(rows_of[short.window], rows_of[key])):
+                rlist[by[key]] = dataclasses.replace(rlist[by[key]], exchange=ratio)
+            break
+    return rlist
 
 
 def shown(rlist):
@@ -313,6 +330,8 @@ def _statusline_segment(r, color, label_width: int = 0, single: bool = False) ->
         seg.append(_c("2", f"{fmt_num(r.per_hour)}/h", color))
     if (ms := runway_ms(r)) is not None:
         seg.append(_c("31", ENDS_GLYPH + fmt_dur(ms), color))
+    if r.exchange:
+        seg.append(_c("2", f"1%={fmt_num(r.exchange)}% 5h", color))
     return " ".join(seg)
 
 
@@ -455,32 +474,40 @@ def render_prompt(payload, rlist, now_ms: int, agent: str = "claude") -> str:
     return "  ".join(head) + "\n" + render_bar(rlist, now_ms)
 
 
-def cross_metric(rlist):
-    """Exchange rate between the 5h session and weekly windows, or None when idle.
+def cross_metrics(rlist):
+    """Exchange rate between each 5h window and its weekly one (rates.exchange).
 
-    Both windows rise from the same usage, so (5h burn / weekly burn) is a fairly
+    Both windows rise from the same usage, so (5h rise / weekly rise) is a fairly
     stable "how much of the session does 1% of weekly cost" number.
     """
     by = {r.window: r for r in rlist}
-    fh, wk = by.get("five_hour"), by.get("seven_day")
-    if not fh or not wk or wk.per_hour <= 1e-6:
-        return None
-    ratio = fh.per_hour / wk.per_hour
-    headroom = (100.0 - fh.util) / ratio if ratio > 1e-9 else None
-    return {
-        "session_pct_per_weekly_pct": ratio,
-        "weekly_pct_until_session_caps": headroom,
-    }
+    out = []
+    for fh in rlist:
+        wk = next((by[k] for k in config.weekly_of(fh.window) if k in by), None)
+        if not wk or not wk.exchange:
+            continue
+        ratio = wk.exchange
+        out.append({
+            "window": wk.window,
+            "session_pct_per_weekly_pct": ratio,
+            "weekly_pct_until_session_caps": (100.0 - fh.util) / ratio,
+        })
+    return out
+
+
+def cross_metric(rlist):
+    """Claude's own pair, else the first one; the widget shows one."""
+    found = cross_metrics(rlist)
+    return next((c for c in found if c["window"] == "seven_day"), found[0] if found else None)
 
 
 def render_cross(rlist) -> str | None:
-    c = cross_metric(rlist)
-    if not c:
-        return None
-    line = f"1% weekly usage ≈ {fmt_num(c['session_pct_per_weekly_pct'])}% of 5-hour usage"
-    if c["weekly_pct_until_session_caps"] is not None:
+    lines = []
+    for c in cross_metrics(rlist):
+        line = f"{config.label(c['window'])}: 1% ≈ {fmt_num(c['session_pct_per_weekly_pct'])}% of 5-hour usage"
         line += f"  ·  ~{c['weekly_pct_until_session_caps']:.0f}% more weekly usage before 5-hour usage caps"
-    return _c("2", line)
+        lines.append(_c("2", line))
+    return "\n".join(lines) or None
 
 
 def render_json(rlist, now_ms: int, marks=None) -> str:
@@ -504,6 +531,7 @@ def render_json(rlist, now_ms: int, marks=None) -> str:
                 for r in rlist
             ],
             "cross": cross,
+            "crosses": cross_metrics(rlist),
         },
         indent=2,
     )

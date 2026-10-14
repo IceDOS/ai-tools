@@ -56,6 +56,25 @@ class TestCollect(unittest.TestCase):
         got = [r.window for r in cli.collect(self.con, now)]
         self.assertEqual(got, [SCOPED_SONNET])
 
+    def test_weekly_carries_exchange(self):
+        h = 3_600_000
+        weekly_reset = "2999-01-01T00:00:00+00:00"
+        for ts, fh, wk in ((0, 0.0, 10.0), (h, 20.0, 12.0), (2 * h, 40.0, 14.0)):
+            store.record(self.con, ts, {"five_hour": {"util": fh, "resets_at": weekly_reset},
+                                        "seven_day": {"util": wk, "resets_at": weekly_reset}}, "poll")
+        got = {r.window: r for r in cli.collect(self.con, 2 * h)}
+        self.assertAlmostEqual(got["seven_day"].exchange, 10.0)
+        self.assertIsNone(got["five_hour"].exchange)
+        self.assertAlmostEqual(cli.cross_metric(list(got.values()))["session_pct_per_weekly_pct"], 10.0)
+
+    def test_provider_weekly_is_paced(self):
+        h = 3_600_000
+        reset = "1970-01-08T00:00:00+00:00"  # opened at t=0
+        store.record(self.con, 23 * h, {"antigravity/gemini-weekly": {"util": 20.0, "resets_at": reset}}, "statusline")
+        store.record(self.con, 24 * h, {"antigravity/gemini-weekly": {"util": 24.0, "resets_at": reset}}, "statusline")
+        (r,) = cli.collect(self.con, 24 * h)
+        self.assertAlmostEqual(r.per_day, 24.0)
+
     def test_prune_disabled_at_zero(self):
         config.WEEKLY_SCOPED_RETIRE_DAYS = 0
         now = 1_000_000
@@ -157,6 +176,10 @@ class TestRenderStatusline(unittest.TestCase):
     def test_shows_ends_and_resets(self):
         line = cli.render_statusline([self._rate()], 0, color=False)
         self.assertEqual(line, "5h 40% 30/h 󰗎 2h0m 󰦛 3h0m")
+
+    def test_weekly_shows_exchange(self):
+        r = self._rate(window="seven_day", will_exhaust_before_reset=False, exchange=8.25)
+        self.assertEqual(cli.render_statusline([r], 0, color=False), "wk 40% 30/h 1%=8.2% 5h 󰦛 3h0m")
 
     def test_idle_window_omits_rate_and_ends(self):
         r = self._rate(per_min=0.0, per_hour=0.0, runway_min=None, will_exhaust_before_reset=False)

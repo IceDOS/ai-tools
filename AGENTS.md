@@ -115,6 +115,19 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   - Every bar shows only its own agent's usage: Claude Code's status line shows claude,
     antigravity's shows antigravity, prime-agent's footer and opencode's sidebar show the
     provider of the current model.
+  - Weekly and monthly windows (`config.period_of`) project their end from the average burn since
+    the window opened (reset minus 7 days, or one calendar month), blended with the previous
+    period's for its first 2/7 (`rates.paced`). A backtest on a week of samples put it closest to
+    the final weekly usage; the last hour's rate and a 5h-derived rate did worse. Antigravity opens
+    its week at first use, so its reset only drifts while usage is 0%. 5h and daily windows keep
+    the last hour's rate.
+  - Every weekly window paired with a 5h one (`config.weekly_of`; Claude, Antigravity families,
+    opencode-go `rolling`) carries `exchange`, the 5h percent per 1% weekly (`rates.exchange`):
+    rises both report at the same instants, polls only when any exist, idle-session redraws
+    skipped, and a missing `resets_at` (an idle 5h window) counts as a reset. Agent bars and
+    opencode's sidebar print it as `1%=X% 5h`, the dashboard one line per pair. Ollama's `session`
+    is unpaired: its length is undocumented, and current Ollama plans only have a monthly allowance.
+  - `alimit headroom` ranks accounts by each window's peak (`rates.compute`), not its last row.
   - API keys come from env, then prime-agent's `auth.json`, then opencode's; alimit never
     refreshes Claude Code's OAuth token.
   - `icedos ai limits` opens the full dashboard. `widget` installs the Plasma applet

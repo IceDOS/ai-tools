@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from alimit.rates import compute, parse_iso
+from alimit.rates import WEEK_MS, compute, exchange, paced, parse_iso
 
 MIN = 60_000
 FUTURE = "2999-01-01T00:00:00+00:00"
@@ -131,6 +131,90 @@ class TestRates(unittest.TestCase):
         self.assertIsNone(r.reset_ts)
         self.assertFalse(r.will_exhaust_before_reset)
 
+
+class TestExchange(unittest.TestCase):
+    @staticmethod
+    def pairs(*points):
+        """(ts, 5h util, 5h reset, weekly util) to matched row lists."""
+        return ([(t, fh, r) for t, fh, r, _ in points], [(t, wk, FUTURE) for t, _, _, wk in points])
+
+    def test_ratio_skips_reset_steps(self):
+        first, second = iso(300 * MIN), iso(600 * MIN)
+        short, weekly = self.pairs((0, 0.0, first, 10.0), (200 * MIN, 30.0, first, 13.0),
+                                   (310 * MIN, 0.0, second, 13.0), (400 * MIN, 20.0, second, 15.0))
+        self.assertAlmostEqual(exchange(short, weekly), 10.0)  # 30 + 20 of 5h for 3 + 2 of weekly
+
+    def test_too_little_weekly_rise_gives_none(self):
+        short, weekly = self.pairs((0, 0.0, FUTURE, 10.0), (60 * MIN, 9.0, FUTURE, 10.5))
+        self.assertIsNone(exchange(short, weekly))
+
+    def test_stale_redraw_not_counted_twice(self):
+        short, weekly = self.pairs((0, 10.0, FUTURE, 10.0), (MIN, 30.0, FUTURE, 12.0),
+                                   (2 * MIN, 20.0, FUTURE, 11.0), (3 * MIN, 30.0, FUTURE, 12.0))
+        self.assertAlmostEqual(exchange(short, weekly), 10.0)
+
+    def test_idle_window_without_reset_rebaselines(self):
+        short = [(0, 0.0, FUTURE), (MIN, 25.0, FUTURE), (2 * MIN, 0.0, None), (3 * MIN, 20.0, FUTURE)]
+        weekly = [(t, wk, FUTURE) for t, wk in ((0, 10.0), (MIN, 15.0), (2 * MIN, 15.0), (3 * MIN, 19.0))]
+        self.assertAlmostEqual(exchange(short, weekly), 5.0)  # 25 + 20 for 5 + 4
+
+    def test_polls_preferred_over_redraws(self):
+        short = [(0, 0.0, FUTURE, "poll"), (MIN, 30.0, FUTURE, "statusline"), (2 * MIN, 20.0, FUTURE, "poll")]
+        weekly = [(0, 10.0, FUTURE, "poll"), (MIN, 11.0, FUTURE, "statusline"), (2 * MIN, 14.0, FUTURE, "poll")]
+        self.assertAlmostEqual(exchange(short, weekly), 5.0)
+
+    def test_statusline_redraw_skipped_without_polls(self):
+        short = [(0, 0.0, FUTURE, "statusline"), (MIN, 30.0, FUTURE, "statusline"),
+                 (2 * MIN, 10.0, FUTURE, "statusline"), (3 * MIN, 35.0, FUTURE, "statusline")]
+        weekly = [(0, 10.0, FUTURE), (MIN, 13.0, FUTURE), (2 * MIN, 11.0, FUTURE), (3 * MIN, 13.5, FUTURE)]
+        self.assertAlmostEqual(exchange(short, weekly), 10.0)  # 35 for 3.5
+
+    def test_moving_weekly_reset_rebaselines(self):
+        short = [(0, 0.0, FUTURE), (MIN, 10.0, FUTURE), (2 * MIN, 90.0, FUTURE), (3 * MIN, 100.0, FUTURE)]
+        weekly = [(0, 10.0, iso(WEEK_MS)), (MIN, 12.0, iso(WEEK_MS)),
+                  (2 * MIN, 40.0, iso(WEEK_MS - 86_400_000)), (3 * MIN, 42.0, iso(WEEK_MS - 86_400_000))]
+        self.assertAlmostEqual(exchange(short, weekly), 5.0)
+
+
+class TestPaced(unittest.TestCase):
+    DAY = 1440 * MIN
+
+    def test_burns_at_average_since_window_opened(self):
+        reset = 5 * self.DAY  # opened 2 days before t=0
+        rows = [(0, 20.0, iso(reset)), (self.DAY - MIN, 29.0, iso(reset)), (self.DAY, 30.0, iso(reset))]
+        r = paced(compute_ok("seven_day", rows, self.DAY), rows, self.DAY)
+        self.assertAlmostEqual(r.per_day, 10.0)
+        self.assertAlmostEqual(r.runway_min, 7 * self.DAY / MIN)
+        self.assertFalse(r.will_exhaust_before_reset)
+
+    def test_early_week_leans_on_previous_week(self):
+        start = WEEK_MS
+        old = [(start - 60 * MIN, 70.0, iso(start))]
+        new = [(start + 60 * MIN, 5.0, iso(start + WEEK_MS))]
+        rows = old + new
+        r = paced(compute_ok("seven_day", rows, start + 6 * 60 * MIN), rows, start + 6 * 60 * MIN)
+        own, prev = 5.0 / 360, 70.0 / (WEEK_MS / MIN)
+        self.assertAlmostEqual(r.per_min, own / 8 + prev * 7 / 8)
+
+    def test_prior_found_when_week_opens_after_last_reset(self):
+        start = WEEK_MS
+        old = [(start - 1440 * MIN, 70.0, iso(start - 1440 * MIN))]  # reset a day before this week opened
+        new = [(start + 60 * MIN, 5.0, iso(start + WEEK_MS))]
+        r = paced(compute_ok("seven_day", old + new, start + 6 * 60 * MIN), old + new, start + 6 * 60 * MIN)
+        self.assertAlmostEqual(r.per_min, 5.0 / 360 / 8 + 70.0 / (WEEK_MS / MIN) * 7 / 8)
+
+    def test_month_opens_one_calendar_month_before_reset(self):
+        reset = iso(datetime(2026, 3, 31, tzinfo=timezone.utc).timestamp() * 1000)
+        opened = datetime(2026, 2, 28, tzinfo=timezone.utc).timestamp() * 1000
+        now = opened + 14 * 1440 * MIN
+        rows = [(now - MIN, 28.0, reset)]
+        r = paced(compute_ok("ollama/allowance", rows, now), rows, now, "month")
+        self.assertAlmostEqual(r.per_day, 2.0)
+
+    def test_reset_window_untouched(self):
+        rows = [(0, 60.0, iso(100 * MIN))]
+        r = compute_ok("seven_day", rows, 101 * MIN)
+        self.assertIs(paced(r, rows, 101 * MIN), r)
 
 if __name__ == "__main__":
     unittest.main()

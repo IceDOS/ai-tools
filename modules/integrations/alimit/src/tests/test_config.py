@@ -96,6 +96,30 @@ class TestAccountKeys(unittest.TestCase):
         self.assertTrue(config.is_known_window("claude@work/five_hour"))
         self.assertFalse(config.is_known_window("claude@work/bogus"))
 
+    def test_weekly_of_pairs_five_hour_windows(self):
+        self.assertEqual(config.weekly_of("five_hour"), ["seven_day"])
+        self.assertEqual(config.weekly_of("claude@work/five_hour"), ["claude@work/seven_day"])
+        self.assertEqual(config.weekly_of("opencode-go/rolling"), ["opencode-go/weekly", "opencode-go/seven_day"])
+        self.assertEqual(config.weekly_of("antigravity/gemini-5h"),
+                         ["antigravity/gemini-weekly", "antigravity/gemini-seven_day"])
+        self.assertEqual(config.weekly_of("seven_day"), [])
+        self.assertEqual(config.weekly_of("ollama/session"), [])
+
+    def test_is_weekly(self):
+        for w in ("seven_day", "claude@work/seven_day", config.WEEKLY_SCOPED_PREFIX + "fable",
+                  "ollama/weekly", "antigravity@joanna/gemini-weekly"):
+            self.assertTrue(config.is_weekly(w), w)
+        for w in ("five_hour", "antigravity/gemini-5h", "ollama/allowance"):
+            self.assertFalse(config.is_weekly(w), w)
+
+    def test_period_of(self):
+        self.assertEqual(config.period_of("seven_day"), "week")
+        self.assertEqual(config.period_of("ollama@home/weekly"), "week")
+        self.assertEqual(config.period_of("ollama/allowance"), "month")
+        self.assertEqual(config.period_of("opencode-go/monthly"), "month")
+        self.assertIsNone(config.period_of("five_hour"))
+        self.assertIsNone(config.period_of("openrouter/free_daily"))
+
     def test_account_tag(self):
         self.assertEqual(config.account_tag("claude", "work"), "work")
         self.assertEqual(config.account_tag("opencode", "work"), "opencode.work")

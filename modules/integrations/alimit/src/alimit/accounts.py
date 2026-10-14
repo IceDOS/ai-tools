@@ -68,7 +68,7 @@ def env_tags():
         return None
     return dict(part.split("=", 1) for part in raw.split(",") if "=" in part)
 from . import store
-from .rates import to_ms
+from .rates import compute
 
 
 @dataclass(frozen=True)
@@ -91,12 +91,11 @@ def headroom(con, agent: str, names: list, now_ms: int) -> list:
             rows = store.samples_for(con, w, since_ts=now_ms - config.HISTORY_MS)
             if not rows:
                 continue
-            _, util, resets_at, _ = rows[-1]
-            reset = to_ms(resets_at)
-            if reset is not None and reset <= now_ms:
-                continue
-            if util > best.max_util:
-                best = Headroom(name, util, reset)
+            # the window's peak, so an idle session redrawing old numbers can't pass for headroom;
+            # a window past its reset reads 0
+            r = compute(w, rows, now_ms)
+            if r.util > best.max_util:
+                best = Headroom(name, r.util, r.reset_ts)
         out.append(best)
     return out
 

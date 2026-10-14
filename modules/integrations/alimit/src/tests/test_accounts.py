@@ -92,6 +92,12 @@ class HeadroomTest(unittest.TestCase):
         self.assertEqual(rows["work"].max_util, 10.0)
         self.assertEqual(rows["new"].max_util, 0.0)
 
+    def test_idle_redraw_does_not_lower_usage(self):
+        store.record(self.con, 1500, {"five_hour": {"util": 20.0, "resets_at": "2099-01-01T00:00:00+00:00"}},
+                     "statusline")
+        rows = {r.account: r for r in accounts.headroom(self.con, "claude", ["default"], 2000)}
+        self.assertEqual(rows["default"].max_util, 80.0)
+
     def test_agent_account(self):
         self.assertEqual(accounts.agent_account("claude@work/five_hour"), ("claude", "work"))
         self.assertEqual(accounts.agent_account("five_hour"), ("claude", "default"))

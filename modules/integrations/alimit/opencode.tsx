@@ -14,6 +14,8 @@ type Window = {
   util: number
   reset_ts: number | null
   will_exhaust_before_reset: boolean
+  // weekly only: 5h percent spent per 1% of it
+  exchange: number | null
 }
 
 // Mirrors cli.py fmt_dur.
@@ -124,6 +126,7 @@ const tui: TuiPlugin = async (api) => {
                     <text fg={color(w)}>{bar(w.util)}</text>
                     <text fg={theme.text}>{`${fmtPct(w.util)}%`.padStart(6)}</text>
                     <text fg={theme.textMuted}>{w.reset_ts ? fmtDur(w.reset_ts - now()) : ""}</text>
+                    <text fg={theme.textMuted}>{w.exchange ? `1%=${fmtPct(w.exchange)}% 5h` : ""}</text>
                   </box>
                 )}
               </For>

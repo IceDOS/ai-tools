@@ -7,13 +7,19 @@ an idle window's rate decays as 1/t instead of dropping to zero. Usage inside a
 window rarely goes down, so the running peak absorbs sources that round
 differently (the endpoint can say 75 while the status line says 74).
 """
-from dataclasses import dataclass
-from datetime import datetime
+import calendar
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 # A window starts when resets_at moves later by more than this; sub-second jitter doesn't count.
 RESET_SHIFT_MS = 10 * 60_000
 # Without resets_at on both rows, a drop this far below the window's peak marks a reset.
 RESET_DROP = 5.0
+# Weekly rise needed before exchange() reports a ratio.
+EXCHANGE_MIN_WEEKLY = 1.0
+WEEK_MS = 7 * 86_400_000
+# Share of the period paced() blends in the previous one's average: 48h of a week.
+PRIOR_SHARE = 2 / 7
 
 
 def parse_iso(s):
@@ -93,6 +99,16 @@ class Rate:
     will_exhaust_before_reset: bool
     stale: bool
     last_ts: int
+    exchange: float | None = None       # weekly only: 5h percent spent per 1% of this window
+
+
+def _projection(util, per_min, reset_ts, now_ms):
+    """(runway_min, exhaust_ts, will_exhaust_before_reset) at a steady per_min."""
+    if per_min <= 1e-6:
+        return None, None, False
+    runway_min = max(100.0 - util, 0.0) / per_min
+    exhaust_ts = int(now_ms + runway_min * 60_000)
+    return runway_min, exhaust_ts, bool(reset_ts is not None and exhaust_ts < reset_ts)
 
 
 def compute(window, rows, now_ms, lookback_min=60, stale_after_min=30):
@@ -119,15 +135,7 @@ def compute(window, rows, now_ms, lookback_min=60, stale_after_min=30):
     per_min = max((util_now - util_start) / span_min, 0.0)
     per_hour, per_8h, per_day = per_min * 60, per_min * 480, per_min * 1440
 
-    remaining = max(100.0 - util_now, 0.0)
-    if per_min > 1e-6:
-        runway_min = remaining / per_min
-        exhaust_ts = int(now_ms + runway_min * 60_000)
-    else:
-        runway_min = None
-        exhaust_ts = None
-
-    will = bool(exhaust_ts is not None and reset_ts is not None and exhaust_ts < reset_ts)
+    runway_min, exhaust_ts, will = _projection(util_now, per_min, reset_ts, now_ms)
     return Rate(
         window=window,
         util=util_now,
@@ -142,4 +150,79 @@ def compute(window, rows, now_ms, lookback_min=60, stale_after_min=30):
         will_exhaust_before_reset=will,
         stale=stale,
         last_ts=latest_ts,
+    )
+
+
+def exchange(short_rows, weekly_rows):
+    """5h percent spent per 1% of weekly over the stored history, or None.
+
+    Only rises both windows report at the same instants count, and a reset of either one
+    rebaselines both, so resets and gaps drop out of both sides. Polls are used when there are
+    any; otherwise a status line row below the running peak is an idle session's redraw."""
+    if any(_is_poll(row) for row in short_rows):
+        short_rows = [row for row in short_rows if _is_poll(row)]
+    weekly_at = {row[0]: row for row in weekly_rows}
+    short_sum = weekly_sum = 0.0
+    prev = None
+    for s_row in short_rows:
+        w_row = weekly_at.get(s_row[0])
+        if w_row is None:
+            continue
+        cur = (s_row[1], to_ms(s_row[2]), w_row[1], to_ms(w_row[2]))
+        if prev and not _is_poll(s_row) and _redraw(prev, cur):
+            continue
+        if prev and not _new_window(prev[0], prev[1], cur[0], cur[1]) \
+                and not _new_window(prev[2], prev[3], cur[2], cur[3]):
+            short_sum += max(0.0, cur[0] - prev[0])
+            weekly_sum += max(0.0, cur[2] - prev[2])
+            cur = (max(cur[0], prev[0]), cur[1], max(cur[2], prev[2]), cur[3])
+        prev = cur
+    if weekly_sum < EXCHANGE_MIN_WEEKLY or short_sum <= 0:
+        return None
+    return short_sum / weekly_sum
+
+
+def _redraw(prev, cur):
+    """A drop with both resets unchanged: old numbers, not a new window."""
+    return all(a is not None and b is not None and abs(a - b) <= RESET_SHIFT_MS
+               for a, b in ((prev[1], cur[1]), (prev[3], cur[3]))) \
+        and (cur[0] < prev[0] - RESET_DROP or cur[2] < prev[2] - RESET_DROP)
+
+
+def _new_window(util, reset, util2, reset2):
+    # an idle 5h window reports no resets_at, so a missing one on either side counts as a reset
+    if reset is None or reset2 is None:
+        return reset is not reset2 or util2 < util - RESET_DROP
+    return abs(reset - reset2) > RESET_SHIFT_MS or util2 < util - RESET_DROP
+
+
+def _month_before(ms):
+    """The same day and time one calendar month earlier, clamped to that month's length."""
+    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+    year, month = (dt.year, dt.month - 1) if dt.month > 1 else (dt.year - 1, 12)
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return int(dt.replace(year=year, month=month, day=day).timestamp() * 1000)
+
+
+def paced(r, rows, now_ms, period="week"):
+    """The Rate burning at its average since the window opened, not the last hour's.
+
+    Backtested on a week of samples, this was the closest to where weekly usage ended up.
+    Early on it leans on the previous period's average, so one early burst isn't a week."""
+    if r.reset_ts is None:
+        return r
+    start = r.reset_ts - WEEK_MS if period == "week" else _month_before(r.reset_ts)
+    length = r.reset_ts - start
+    elapsed = max(now_ms - start, 3_600_000)
+    per_min = r.util / (elapsed / 60_000)
+    # the previous window reset by this one's start; Antigravity's opens later, at first use
+    prev = [row[1] for row in rows
+            if (t := to_ms(row[2])) is not None and start - length < t <= start + RESET_SHIFT_MS]
+    if prev and elapsed < length * PRIOR_SHARE:
+        w = elapsed / (length * PRIOR_SHARE)
+        per_min = w * per_min + (1 - w) * max(prev) / (length / 60_000)
+    runway_min, exhaust_ts, will = _projection(r.util, per_min, r.reset_ts, now_ms)
+    return replace(
+        r, per_min=per_min, per_hour=per_min * 60, per_8h=per_min * 480, per_day=per_min * 1440,
+        runway_min=runway_min, exhaust_ts=exhaust_ts, will_exhaust_before_reset=will,
     )

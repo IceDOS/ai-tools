@@ -233,3 +233,35 @@ def _provider_parts(window: str):
 def provider_window_rank(window: str) -> int:
     _, _, part = _provider_parts(split_account(window)[0])
     return PROVIDER_WINDOWS.get(part, ("", "", 9))[2]
+
+
+def is_weekly(window: str) -> bool:
+    base = split_account(window)[0]
+    if provider_of(window) == "claude":
+        return base == "seven_day" or base.startswith(WEEKLY_SCOPED_PREFIX)
+    return _provider_parts(base)[2] in ("weekly", "seven_day")
+
+
+def period_of(window: str) -> str | None:
+    """"week" or "month" for windows rates.paced projects; None keeps the last hour's rate."""
+    if is_weekly(window):
+        return "week"
+    if provider_of(window) != "claude" and _provider_parts(split_account(window)[0])[2] in ("monthly", "allowance"):
+        return "month"
+    return None
+
+
+# Monthly windows reach back far enough to find last month's total.
+MONTH_HISTORY_MS = 40 * 86_400_000
+
+
+def weekly_of(window: str) -> list[str]:
+    """Keys of the weekly window paired with a 5-hour window (same provider, family, account)."""
+    base, tag = split_account(window)
+    if provider_of(window) == "claude":
+        return [with_account("seven_day", tag)] if base == "five_hour" else []
+    provider, _, rest = base.partition(PROVIDER_SEP)
+    family, dash, part = rest.rpartition("-")
+    if part not in ("5h", "rolling"):
+        return []
+    return [with_account(f"{provider}{PROVIDER_SEP}{family}{dash}{w}", tag) for w in ("weekly", "seven_day")]
