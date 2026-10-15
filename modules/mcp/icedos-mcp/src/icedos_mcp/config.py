@@ -14,11 +14,13 @@ into a hidden ``configs/.local.toml``).
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 import tomlkit
-import tomllib
 from tomlkit import dumps, loads
 
 from . import config_files
@@ -66,23 +68,46 @@ def _coerce_candidates(raw: str) -> list[Any]:
 
 
 def _is_config_root(p: Path) -> bool:
-    """A config root is a flake (has flake.nix, the mkIceDOS entry). config.toml
-    is optional — a root may be defined by configs/*.toml and/or modules/ — so we
-    also require one of config.toml / configs/ / modules/ to avoid matching an
-    unrelated flake during the cwd walk-up."""
-    if not (p / "flake.nix").exists():
+    """A config root's flake.nix calls mkIceDOS, the same test core's rebuild shim
+    uses. Module repos also hold flake.nix and modules/, so that alone is not enough."""
+    try:
+        return "mkIceDOS" in (p / "flake.nix").read_text()
+    except (OSError, UnicodeDecodeError):
         return False
-    return (
-        (p / "config.toml").exists()
-        or (p / "configs").is_dir()
-        or (p / "modules").is_dir()
-    )
+
+
+# Per call, not per server, so concurrent calls can each target their own sandbox.
+_root_override: ContextVar[Path | None] = ContextVar("icedos_root_override", default=None)
+
+
+def root_override() -> Path | None:
+    """The sandbox root the current call runs against, or None for the live config."""
+    return _root_override.get()
+
+
+@contextmanager
+def use_config_root(root: Path) -> Iterator[None]:
+    """Point find_config_root() at `root` for the duration of the block."""
+    token = _root_override.set(root)
+    try:
+        yield
+    finally:
+        _root_override.reset(token)
 
 
 def find_config_root() -> Path:
     """Find the IceDOS config root by walking up from cwd for a flake.nix root
     (config.toml is optional). Respects the ICEDOS_CONFIG_DIR env var if set.
+    A sandbox set with use_config_root() wins over both.
     """
+    override = _root_override.get()
+    if override is not None:
+        return override
+    return live_config_root()
+
+
+def live_config_root() -> Path:
+    """The real config root, ignoring any sandbox set for the current call."""
     env_dir = os.environ.get("ICEDOS_CONFIG_DIR")
     if env_dir:
         p = Path(env_dir)
@@ -95,51 +120,35 @@ def find_config_root() -> Path:
         if _is_config_root(parent):
             return parent
     raise FileNotFoundError(
-        "Cannot find IceDOS config root (flake.nix + config.toml/configs/modules). "
+        "Cannot find IceDOS config root (a flake.nix that calls mkIceDOS). "
         "Set ICEDOS_CONFIG_DIR or run from within an IceDOS config directory."
     )
 
 
-def _read_plain(path: Path) -> dict[str, Any]:
-    """Parse one TOML file to a plain dict (stdlib tomllib — no round-trip)."""
-    with path.open("rb") as fh:
-        return tomllib.load(fh)
+_read_plain = config_files._read
 
 
 def _read_doc(path: Path) -> tomlkit.TOMLDocument:
     """Round-trip tomlkit document for a specific file; empty doc if it does not
     exist yet (so writing to a new ``configs/<name>.toml`` creates it)."""
-    return loads(path.read_text()) if path.exists() else tomlkit.document()
+    if not path.exists():
+        return tomlkit.document()
+    try:
+        return loads(path.read_text())
+    except Exception as e:
+        raise ValueError(f"invalid TOML in '{path}': {e}") from None
 
 
-def resolve_write_target(
-    file: str | None = None,
-    *,
-    dotted_path: str | None = None,
-    repo_url: str | None = None,
-    for_repos: bool = False,
-) -> Path:
-    """The file a mutation should write to.
+def _save(target: Path, doc: tomlkit.TOMLDocument) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_normalize_blank_lines(dumps(doc)))
 
-    Explicit ``file`` wins. Otherwise: the file that already declares the target
-    (``find_owning_file`` for a key, ``find_repo_file`` for a repo, the first file
-    holding any ``[[icedos.repositories]]`` for ``for_repos``), falling back to
-    ``config.toml`` for brand-new entries. Deterministic, so the server can
-    resolve the same target for its revert snapshot.
-    """
-    root = find_config_root()
-    if file:
-        return config_files.resolve_file(root, file)
-    if repo_url is not None:
-        return config_files.find_repo_file(root, repo_url) or (root / "config.toml")
-    if for_repos:
-        for f in config_files.list_config_files(root):
-            if _read_plain(f).get("icedos", {}).get("repositories"):
-                return f
-        return root / "config.toml"
-    if dotted_path is not None:
-        return config_files.find_owning_file(root, dotted_path) or (root / "config.toml")
-    return root / "config.toml"
+
+def rel(path: Path) -> str:
+    """``path`` relative to the config root, for messages."""
+    root = find_config_root().resolve()
+    p = path.resolve()
+    return p.relative_to(root).as_posix() if p.is_relative_to(root) else str(path)
 
 
 def read_config(file: str | None = None) -> dict[str, Any]:
@@ -154,6 +163,7 @@ def read_config(file: str | None = None) -> dict[str, Any]:
 from .config_path import APPEND as _APPEND
 from .config_path import get_by_tokens as _get_by_tokens
 from .config_path import parse_path as _parse_path
+from .config_path import quote_key
 
 
 def get_value(dotted_path: str, file: str | None = None) -> Any:
@@ -176,23 +186,8 @@ def _table_add(table: Any, key: str, value: Any) -> None:
         table[key] = value
 
 
-def set_value(dotted_path: str, value: Any, file: str | None = None) -> str:
-    """Set a value by dotted path. Returns the updated TOML content.
-
-    Writes to the file that already declares the key, else ``config.toml`` (or the
-    explicit ``file``). Supports array accessors:
-    - 'icedos.system.packages[2]' — replace element 2 (must exist; negatives ok)
-    - 'icedos.system.packages[]'  — append a new element (creates the array if missing)
-    - 'icedos.repositories[0].modules[1]' — nested list / array-of-tables
-    """
-    target = resolve_write_target(file, dotted_path=dotted_path)
-    doc = _read_doc(target)
-    tokens = _parse_path(dotted_path)
-    if not tokens:
-        raise ValueError("empty path")
-
-    # Navigate to the container that holds the last accessor, creating missing
-    # string-key intermediates (as arrays or tables per the next token's kind).
+def _set_in_doc(doc: Any, tokens: list[Any], value: Any, dotted_path: str) -> None:
+    # Missing string-key intermediates are created as arrays or tables per the next token.
     current = doc
     for i, tok in enumerate(tokens[:-1]):
         if isinstance(tok, str):
@@ -201,7 +196,7 @@ def set_value(dotted_path: str, value: Any, file: str | None = None) -> str:
                 new = tomlkit.array() if (nxt is _APPEND or isinstance(nxt, int)) else tomlkit.table()
                 _table_add(current, tok, new)
             current = current[tok]
-        else:  # int index — must already exist
+        else:
             try:
                 current = current[tok]
             except (IndexError, KeyError, TypeError):
@@ -219,135 +214,195 @@ def set_value(dotted_path: str, value: Any, file: str | None = None) -> str:
             current[last] = value
         except IndexError:
             raise IndexError(f"index [{last}] out of range for '{dotted_path}' (len {len(current)})")
+    elif not isinstance(current, dict):
+        raise TypeError(f"'{dotted_path}' descends into a {type(current).__name__}, not a table")
+    elif last in current:
+        current[last] = value
     else:
-        if last in current:
-            current[last] = value
-        else:
-            _table_add(current, last, value)
-
-    content = _normalize_blank_lines(dumps(doc))
-    target.write_text(content)
-    return content
+        _table_add(current, last, value)
 
 
-def delete_value(dotted_path: str, file: str | None = None) -> str:
-    """Delete a value by dotted path from the file that declares it (or ``file``).
+def set_value(dotted_path: str, value: Any, file: str | None = None) -> Path:
+    """Set a value by dotted path. Returns the file written.
 
-    Supports:
-    - Removing a key from a table: 'icedos.system.ssh'
-    - Removing an array item by value: 'icedos.system.packages|signal-desktop'
-    - Removing an array element by index: 'icedos.system.packages[2]'
-
-    Returns the updated TOML content.
+    Without ``file``, the path is read against the merged view: the write lands
+    in the file that declares the key, ``[N]`` names the Nth item of the merged
+    array (mapped to the file holding it), and ``[]`` appends to the last file
+    holding the array. A new key goes to the file declaring its nearest existing
+    parent, else ``config.toml``. With ``file``, indices are local to that file.
     """
     root = find_config_root()
-    lookup = dotted_path.split("|", 1)[0]
-    if file:
-        target = config_files.resolve_file(root, file)
-    else:
-        target = config_files.find_owning_file(root, lookup)
-        if target is None:
-            raise KeyError(f"'{dotted_path}' not found in any config file")
-    doc = _read_doc(target)
-
-    # Array item deletion by value (path|value format).
-    if "|" in dotted_path:
-        array_path, item_value = dotted_path.split("|", 1)
-        arr = _get_by_tokens(doc, _parse_path(array_path), array_path)
-        if not isinstance(arr, list):
-            raise TypeError(f"Expected array at '{array_path}', got {type(arr).__name__}")
-        # Match against array items, coercing the string arg to the item type
-        # for non-string arrays (ints, floats, bools).
-        for candidate in _coerce_candidates(item_value):
-            if candidate in arr:
-                arr.remove(candidate)
-                break
-        else:
-            raise ValueError(f"Item '{item_value}' not found in array '{array_path}'")
-        content = _normalize_blank_lines(dumps(doc))
-        target.write_text(content)
-        return content
-
-    # Key or array-index deletion.
     tokens = _parse_path(dotted_path)
-    if not tokens:
-        raise ValueError("empty path")
-    current = _get_by_tokens(doc, tokens[:-1], dotted_path)
-    last = tokens[-1]
-    if last is _APPEND:
-        raise ValueError("'[]' append is not valid for delete")
-    if isinstance(last, int):
-        if not isinstance(current, list):
-            raise TypeError(f"'[{last}]' index target is not an array: '{dotted_path}'")
-        try:
-            del current[last]
-        except IndexError:
-            raise IndexError(f"index [{last}] out of range for '{dotted_path}' (len {len(current)})")
+    if file:
+        target, local = config_files.resolve_file(root, file), tokens
     else:
-        if last not in current:
-            raise KeyError(f"Key '{dotted_path}' not found in config")
-        del current[last]
+        loc = config_files.locate(root, tokens)
+        appending = tokens[-1] is _APPEND
+        if loc.exists and not appending and len(loc.files) > 1:
+            raise ValueError(
+                f"'{dotted_path}' is merged from several files ({', '.join(rel(f) for f in loc.files)}); "
+                "set a narrower path or pass file="
+            )
+        if loc.files:
+            target = loc.files[-1] if appending else loc.files[0]
+        else:
+            target = root / "config.toml"
+        local = loc.local
+    doc = _read_doc(target)
+    _set_in_doc(doc, local, value, dotted_path)
+    _save(target, doc)
+    return target
 
-    content = _normalize_blank_lines(dumps(doc))
-    target.write_text(content)
-    return content
+
+def _remove_item(arr: list[Any], raw: str) -> bool:
+    """Drop the first item equal to ``raw`` read as str, bool, int or float, matching types exactly."""
+    for candidate in _coerce_candidates(raw):
+        for i, item in enumerate(arr):
+            v = item.unwrap() if hasattr(item, "unwrap") else item
+            if type(v) is type(candidate) and v == candidate:
+                del arr[i]
+                return True
+    return False
+
+
+def delete_value(dotted_path: str, file: str | None = None) -> list[Path]:
+    """Delete a value by dotted path. Returns the files written.
+
+    Supports:
+    - Removing a key: 'icedos.system.ssh' (from every file that declares it)
+    - Removing an array item by value: 'icedos.system.packages|signal-desktop'
+      (the first match, searching the declaring files in load order)
+    - Removing an array element by merged index: 'icedos.system.packages[2]'
+    With ``file``, only that file is edited and indices are local to it.
+    """
+    root = find_config_root()
+    by_value = "|" in dotted_path
+    path, item = dotted_path.split("|", 1) if by_value else (dotted_path, "")
+    tokens = _parse_path(path)
+    if any(t is _APPEND for t in tokens):
+        raise ValueError("'[]' append is not valid for delete")
+    if file:
+        places = [(config_files.resolve_file(root, file), tokens)]
+    else:
+        loc = config_files.locate(root, tokens)
+        if not loc.exists:
+            raise KeyError(f"'{path}' not found in any config file")
+        places = [(f, loc.local) for f in loc.files]
+
+    written: list[Path] = []
+    for target, local in places:
+        doc = _read_doc(target)
+        if by_value:
+            arr = _get_by_tokens(doc, local, path)
+            if not isinstance(arr, list):
+                raise TypeError(f"Expected array at '{path}', got {type(arr).__name__}")
+            if _remove_item(arr, item):
+                _save(target, doc)
+                return [target]
+            continue
+        parent = _get_by_tokens(doc, local[:-1], path)
+        last = local[-1]
+        if isinstance(last, int):
+            if not isinstance(parent, list):
+                raise TypeError(f"'[{last}]' index target is not an array: '{path}'")
+            try:
+                del parent[last]
+            except IndexError:
+                raise IndexError(f"index [{last}] out of range for '{path}' (len {len(parent)})")
+        else:
+            if not isinstance(parent, dict) or last not in parent:
+                raise KeyError(f"Key '{path}' not found in {rel(target)}")
+            del parent[last]
+        _save(target, doc)
+        written.append(target)
+    if by_value:
+        raise ValueError(f"Item '{item}' not found in array '{path}'")
+    return written
 
 
 def list_repositories() -> list[dict[str, Any]]:
-    """List all [[icedos.repositories]] entries across the merged config (so
-    repos declared in configs/*.toml — including hidden ones — are included)."""
-    config = read_config()
-    repos = config.get("icedos", {}).get("repositories", [])
-    return [
-        {
-            "url": repo.get("url", ""),
-            "override_url": repo.get("overrideUrl", ""),
-            "modules": repo.get("modules", []),
-            "fetch_dependencies": repo.get("fetchDependencies", True),
-            "fetch_optional_dependencies": repo.get("fetchOptionalDependencies", False),
-            "patches": repo.get("patches", []),
-        }
-        for repo in repos
-    ]
+    """Every repository, one row per repo, folded over all its entries like core.
 
-
-def set_module_enabled(module: str, repo_url: str, enabled: bool, file: str | None = None) -> str:
-    """Add or remove a module name in a repository's `modules` array.
-
-    `repo_url` identifies which [[icedos.repositories]] entry owns the module; the
-    edit lands in whichever config file declares that repo (or the explicit
-    ``file``). Raises if the repo is not present. Returns the updated TOML content.
+    Rows key on the base url (ref stripped). Modules and patches concatenate,
+    `fetchDependencies = false` and `fetchOptionalDependencies = true` win when
+    any entry sets them, and ``files`` lists every file with an entry. An
+    override set by sandbox_override_repo shows as ``sandbox_override``.
     """
     root = find_config_root()
-    target = config_files.resolve_file(root, file) if file else config_files.find_repo_file(root, repo_url)
-    if target is None:
-        raise KeyError(f"repository '{repo_url}' not found in any config file")
-    doc = _read_doc(target)
+    rows: dict[str, dict[str, Any]] = {}
+    for f in config_files.list_config_files(root):
+        for r in _read_plain(f).get("icedos", {}).get("repositories", []) or []:
+            url = r.get("url", "")
+            row = rows.setdefault(
+                config_files.base_url(url),
+                {
+                    "url": url,
+                    "files": [],
+                    "override_url": "",
+                    "modules": [],
+                    "fetch_dependencies": True,
+                    "fetch_optional_dependencies": False,
+                    "patches": [],
+                    "input_patches": [],
+                },
+            )
+            if f.name == config_files.OVERRIDES_FILE:
+                row["sandbox_override"] = r.get("overrideUrl", "")
+            else:
+                row["files"].append(rel(f))
+            if r.get("overrideUrl") and not row["override_url"]:
+                row["override_url"] = r["overrideUrl"]
+            row["modules"] += r.get("modules", [])
+            row["fetch_dependencies"] &= r.get("fetchDependencies", True)
+            row["fetch_optional_dependencies"] |= r.get("fetchOptionalDependencies", False)
+            row["patches"] += r.get("patches", [])
+            row["input_patches"] += r.get("input-patches", [])
+    return list(rows.values())
 
-    repos = doc.get("icedos", {}).get("repositories", None)
-    if repos is None:
-        raise KeyError("no [[icedos.repositories]] entries in config")
 
-    repo_target = next((r for r in repos if r.get("url") == repo_url), None)
-    if repo_target is None:
-        raise KeyError(f"repository '{repo_url}' not found in config")
+def set_module_enabled(module: str, repo_url: str, enabled: bool, file: str | None = None) -> list[Path]:
+    """Add or remove ``module`` in the ``modules`` list of ``repo_url``'s entries.
 
-    if "modules" not in repo_target:
-        repo_target.add("modules", tomlkit.array())
-    mods = repo_target["modules"]
+    Entries match by base url, so ``github:o/r/ref`` and ``github:o/r`` are one
+    repo. Enabling appends to the first entry unless any entry already lists it.
+    Disabling removes it from every entry. ``file`` limits both to that file.
+    Returns the files written.
+    """
+    root = find_config_root()
+    entries = config_files.repo_entries(root, repo_url)
+    if file:
+        only = config_files.resolve_file(root, file)
+        entries = [(f, j) for f, j in entries if f == only]
+    if not entries:
+        where = f" in {file}" if file else " in any config file"
+        raise KeyError(f"repository '{repo_url}' not found{where}")
+    holding = [(f, j) for f, j in entries if module in (_read_plain(f)["icedos"]["repositories"][j].get("modules") or [])]
 
     if enabled:
-        if module in mods:
-            raise ValueError(f"module '{module}' already enabled in {repo_url}")
-        mods.append(module)
-    else:
-        if module not in mods:
-            raise ValueError(f"module '{module}' not enabled in {repo_url}")
-        mods.remove(module)
+        if holding:
+            raise ValueError(f"module '{module}' already enabled in {repo_url} ({rel(holding[0][0])})")
+        f, j = entries[0]
+        doc = _read_doc(f)
+        entry = doc["icedos"]["repositories"][j]
+        if "modules" not in entry:
+            entry.add("modules", tomlkit.array())
+        entry["modules"].append(module)
+        _save(f, doc)
+        return [f]
 
-    content = _normalize_blank_lines(dumps(doc))
-    target.write_text(content)
-    return content
+    if not holding:
+        raise ValueError(f"module '{module}' not enabled in {repo_url}")
+    written: list[Path] = []
+    for f in dict.fromkeys(f for f, _ in holding):
+        doc = _read_doc(f)
+        for g, j in holding:
+            if g == f:
+                mods = doc["icedos"]["repositories"][j]["modules"]
+                while module in mods:
+                    mods.remove(module)
+        _save(f, doc)
+        written.append(f)
+    return written
 
 
 def add_repository(
@@ -357,20 +412,29 @@ def add_repository(
     fetch_deps: bool = True,
     override_url: str = "",
     patches: list[str] | None = None,
+    input_patches: list[dict[str, Any]] | None = None,
     file: str | None = None,
-) -> str:
-    """Add a new [[icedos.repositories]] entry.
+) -> Path:
+    """Add a new [[icedos.repositories]] entry. Returns the file written.
 
-    Appends to the file that already holds repositories (keeping them together),
-    else ``config.toml`` — or the explicit ``file``. Duplicate-url check spans the
-    whole merged config.
+    Appends to the first file that already holds repositories (keeping them
+    together), else ``config.toml``, or the explicit ``file``. The duplicate
+    check compares base urls across every config file.
     """
-    target = resolve_write_target(file, for_repos=True)
-
-    merged = read_config()
-    for repo in merged.get("icedos", {}).get("repositories", []) or []:
-        if repo.get("url") == url:
-            raise ValueError(f"Repository '{url}' already exists in config")
+    root = find_config_root()
+    existing = config_files.repo_entries(root, url)
+    if existing:
+        raise ValueError(f"Repository '{url}' already exists in {rel(existing[0][0])}")
+    for ip in input_patches or []:
+        if not isinstance(ip, dict) or not {"module", "input", "patches"} <= ip.keys():
+            raise ValueError("each input_patches entry needs module, input and patches")
+    if file:
+        target = config_files.resolve_file(root, file)
+    else:
+        target = next(
+            (f for f in config_files.writable_files(root) if _read_plain(f).get("icedos", {}).get("repositories")),
+            root / "config.toml",
+        )
 
     doc = _read_doc(target)
     if "icedos" not in doc:
@@ -379,61 +443,43 @@ def add_repository(
     if "repositories" not in icedos:
         icedos.add("repositories", tomlkit.aot())
 
-    repos = icedos["repositories"]
     entry = tomlkit.table()
     entry.add("url", url)
     if override_url:
         entry.add("overrideUrl", override_url)
     if modules:
-        mods = tomlkit.array()
-        mods.extend(modules)
-        entry.add("modules", mods)
+        entry.add("modules", list(modules))
     if not fetch_deps:
         entry.add("fetchDependencies", False)
     if fetch_optional_deps:
         entry.add("fetchOptionalDependencies", True)
     if patches:
-        parr = tomlkit.array()
-        parr.extend(patches)
-        entry.add("patches", parr)
+        entry.add("patches", list(patches))
+    if input_patches:
+        aot = tomlkit.aot()
+        for ip in input_patches:
+            aot.append(tomlkit.item(ip))
+        entry.add("input-patches", aot)
+    icedos["repositories"].append(entry)
+    _save(target, doc)
+    return target
 
-    repos.append(entry)
 
-    content = _normalize_blank_lines(dumps(doc))
-    target.write_text(content)
-    return content
+def edit_user(username: str, settings: dict[str, Any], file: str | None = None) -> list[Path]:
+    """Add or update keys of ``[icedos.users.<username>]``. Returns the files written.
 
-
-def edit_user(
-    username: str,
-    settings: dict[str, Any],
-    file: str | None = None,
-) -> str:
-    """Add or update an [icedos.users.<username>] entry in the file that declares
-    it (or ``config.toml`` / the explicit ``file``)."""
-    target = resolve_write_target(file, dotted_path=f"icedos.users.{username}")
-    doc = _read_doc(target)
-
-    if "icedos" not in doc:
-        doc.add("icedos", tomlkit.table())
-    icedos = doc["icedos"]
-    if "users" not in icedos:
-        icedos.add("users", tomlkit.table())
-
-    users = icedos["users"]
-    if username not in users:
-        users.add(username, tomlkit.table())
-
-    user_table = users[username]
+    Each key goes through set_value, so it lands in the file that declares it,
+    or the file declaring the user, or ``config.toml``. ``file`` forces one file.
+    """
+    if not isinstance(settings, dict) or not settings:
+        raise ValueError("settings must be a non-empty JSON object")
+    base = f"icedos.users.{quote_key(username)}"
+    written: list[Path] = []
     for key, value in settings.items():
-        if key in user_table:
-            user_table[key] = value
-        else:
-            user_table.add(key, value)
-
-    content = _normalize_blank_lines(dumps(doc))
-    target.write_text(content)
-    return content
+        f = set_value(f"{base}.{quote_key(key)}", value, file=file)
+        if f not in written:
+            written.append(f)
+    return written
 
 
 def get_config_toml_string(file: str | None = None) -> str:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -95,43 +94,29 @@ async def _fetch_raw_file(
 
 
 def _resolve_override_path(url: str) -> str | None:
-    """Check the config for a local path: override for the given repo URL.
+    """Local checkout for `url` when the active config (sandbox or live) overrides it with path:.
 
-    Searches the full config set (config.toml + configs/*.toml), so a repo
-    declared in configs/repositories.toml is found. Returns the local path if
-    overrideUrl starts with 'path:', else None.
+    Matches entries by base url across every loaded config file, the sandbox
+    overrides file included, and takes the first overrideUrl like core.
     """
     try:
-        env_dir = os.environ.get("ICEDOS_CONFIG_DIR")
-        if env_dir:
-            root = Path(env_dir)
-        else:
-            current = Path.cwd()
-            root = None
-            for parent in [current, *current.parents]:
-                # config.toml is optional — key on flake.nix + a config marker.
-                if (parent / "flake.nix").exists() and (
-                    (parent / "config.toml").exists()
-                    or (parent / "configs").is_dir()
-                    or (parent / "modules").is_dir()
-                ):
-                    root = parent
-                    break
-            if root is None:
-                return None
+        from .config import find_config_root
 
-        config = config_files.merged_config(root)
-        repos = config.get("icedos", {}).get("repositories", [])
-        for repo_entry in repos:
-            if repo_entry.get("url") == url:
+        root = find_config_root()
+        want = config_files.base_url(url)
+        for f in config_files.list_config_files(root):
+            for repo_entry in config_files._read(f).get("icedos", {}).get("repositories", []) or []:
                 override = repo_entry.get("overrideUrl", "")
-                if override.startswith("path:"):
-                    path = override[5:]
-                    if Path(path).exists():
-                        logger.info("Resolved %s -> local path %s", url, path)
-                        return path
-                    logger.warning("Override path %s does not exist, falling back to GitHub", path)
+                if config_files.base_url(repo_entry.get("url", "")) != want or not override:
+                    continue
+                if not override.startswith("path:"):
                     return None
+                path = override[5:]
+                if Path(path).exists():
+                    logger.info("Resolved %s -> local path %s", url, path)
+                    return path
+                logger.warning("Override path %s does not exist, falling back to GitHub", path)
+                return None
         return None
     except Exception as e:
         logger.debug("Could not resolve override for %s: %s", url, e)
@@ -144,14 +129,12 @@ async def explore_github_repo(url: str) -> list[dict[str, Any]]:
     Checks config.toml for a local path: override first. If found, reads
     the local checkout. Otherwise fetches from GitHub API.
     """
-    if url in _repo_cache:
-        return _repo_cache[url]
-
+    # Overrides differ per sandbox, so check them before the GitHub cache.
     local_path = _resolve_override_path(url)
     if local_path:
-        modules = explore_local_repo(local_path)
-        _repo_cache[url] = modules
-        return modules
+        return explore_local_repo(local_path)
+    if url in _repo_cache:
+        return _repo_cache[url]
 
     owner, repo, ref = _parse_github_url(url)
     branch = ref or "main"

@@ -82,16 +82,17 @@ Key concepts:
 - **Config**: `config.toml` (base) + autoloaded `configs/*.toml` (merged), edited then rebuilt; hidden `configs/.*.toml` stay off git
 - **Binary cache**: pre-built packages from the IceDOS server
 
-Available tools:
-- Config: `get_config`, `get_config_value`, `set_config_value`, `delete_config_value`, `list_repositories`, `add_repository`, `edit_user`
+Available tools (sandbox mode by default: edits and builds run on a temp copy of the config):
+- Config: `get_config`, `get_config_value`, `set_config_value`, `delete_config_value`, `list_repositories`, `add_repository`, `edit_user`, `list_config_files`, `set_config_file_enabled`, `validate_config`
 - Modules: `enable_module`, `disable_module`, `module_graph` (prefer these over hand-editing the repo `modules` list)
-- Query: `search_options`, `get_option`, `search_modules`, `get_module`, `list_modules`, `nix_eval` (last resort — evaluates arbitrary Nix against the live config; the index tools above are faster and safer)
-- System: `rebuild`, `get_diff`, `rollback`, `status`, `list_inputs`, `diff_generations`
-- Packages: `list_packages`, `run_package`
-- Explorer: `explore_repo`, `explore_local_repo`
-- Info: `get_system_info_tool`, `get_generations_tool`
+- Query: `search_options`, `get_option`, `search_modules`, `get_module`, `list_modules`, `nix_eval` (last resort; the index tools above are faster)
+- Sandboxes: `sandbox_create`, `sandbox_list`, `sandbox_diff`, `sandbox_inputs_diff`, `sandbox_delete`, `sandbox_override_repo`
+- System: `rebuild`, `get_diff`, `rollback`, `gc`, `doctor`, `list_inputs`, `diff_generations`, `config_history`
+- Packages: `list_packages`, `run_package`, `pkgs_build`, `format_nix`
+- Explorer: `explore_repo`, `explore_local_repo`, `list_repo_tree`, `read_repo_file`
+- Info: `get_system_info_tool`, `get_generations_tool`, `list_state_files`, `read_state_file`
 
-Resources: `icedos://config`, `icedos://config/files`, `icedos://options`, `icedos://modules`, `icedos://generations`, `icedos://system-info`, `icedos://repo/{url}`
+Resources: `icedos://config`, `icedos://config/files`, `icedos://options`, `icedos://modules`, `icedos://generations`, `icedos://system-info`, `icedos://repo/{{url}}`
 """,
     },
 }

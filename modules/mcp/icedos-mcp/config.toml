@@ -1,3 +1,96 @@
 # Skills for this module, name = full SKILL.md content. Added to the shared
 # icedos.ai-tools.skills pool, so every agent loads them.
 [icedos.ai-tools.mcp-server.skills]
+icedos-mcp = """
+---
+name: icedos-mcp
+description: Use ALWAYS when working on IceDOS config, options, modules or builds. Covers the icedos MCP tools (mcp__icedos__*), its sandbox-by-default mode, the edit, validate, build and diff loop, and when to use the nixos MCP instead.
+---
+
+# IceDOS MCP
+
+The icedos MCP server reads and edits the IceDOS config, searches options and modules, builds the system and inspects state. Use it before file reads, grep or web search for anything IceDOS.
+
+## Sandbox mode (the default)
+
+The server starts in sandbox mode. Every config, module, query, state, `nix_eval`, `get_diff` and `rebuild` call runs on a copy of the config root, not the real one.
+
+- A call without `sandbox=` uses this server's default sandbox. The server creates it on the first such call.
+- The copy lives in `$TMPDIR/icedos-sandboxes-<uid>/<name>`. It has every config file, the live `.state/flake.lock` (so builds use the same pinned inputs) and the option and module search index.
+- `rebuild` in a sandbox runs `icedos rebuild --dir <sandbox> --build`. It builds the closure, never activates it, runs no rebuild hooks and records no generation. `--boot`, `--target`, `--update-hooks`, `--nh-args` and `--build-args` need live mode. `--update*` flags in a sandbox change only the sandbox's locks; `sandbox_inputs_diff` shows what moved.
+- `rollback` and `gc` change the running system, so they only run with `dry=true` in sandbox mode.
+- Resources (`icedos://config` and the rest) read the same root as a call without `sandbox=`.
+- `nix_eval` reads the sandbox's generated flake, which is the live one until the sandbox's first full `rebuild` (`--dry` and `--genflake-only` keep nothing). `declared` shows sandbox edits at once; `config` needs that rebuild.
+- On exit the server deletes its default sandbox if it holds no changes. A sandbox with changes stays until someone calls `sandbox_delete` or the temp dir is cleared. If the default sandbox disappears under the server, the next call fails once to tell you the edits are gone.
+
+Live mode exists only when the user starts the server with `icedos mcp serve --live` or sets `ICEDOS_MCP_LIVE=1`. No tool argument switches it. Never ask for live mode just to finish a task faster. Hand the user a diff instead.
+
+`sandbox_list` shows the mode, the default sandbox name and every sandbox on the machine.
+
+## Workflow
+
+1. Look things up: `search_options`, `get_option`, `search_modules`, `get_module`, `module_graph`, `get_config_value`.
+2. Edit: `set_config_value`, `delete_config_value`, `enable_module`, `disable_module`, `add_repository`, `edit_user`, `set_config_file_enabled`. Every write re-checks the merged config and restores all touched files on failure. `set_config_value` and `delete_config_value` also validate with a flake eval by default. The other write tools validate only with `validate=true`.
+3. Check: `validate_config` evaluates every option and module without building. `rebuild` builds and returns a summary with the closure diff and the built store path. Pass `logs=true` for the full log with `--show-trace`.
+4. Review: `get_diff` returns a unified diff of the sandbox's edits (`a/` as copied, `b/` the sandbox). If the live config changed since the copy, the diff starts with a note naming those files.
+5. Report the diff to the user. They decide whether to apply it to the real config.
+
+Never hand-edit the config TOML or run `icedos rebuild` yourself. That writes the real config and its `.state`.
+
+## Testing changes to a module repo
+
+To build a module repo (ai-tools, apps, desktop and so on) from a local checkout, call `sandbox_override_repo(repo, path)`:
+
+- `repo` is the flake url (`github:icedos/ai-tools`, any ref) or the repo name (`ai-tools`) of a repository the config lists. Other repos are refused; add them with `add_repository` first.
+- `path` is the checkout holding the repo's `flake.nix`. An empty `path` clears the override.
+
+The server keeps overrides in its own file inside the sandbox. They never touch a config file, never show in `sandbox_diff`, and config writes never land there. Never set `overrideUrl` with `set_config_value` for testing. `sandbox_list` and `list_repositories` show each sandbox's overrides. An `overrideUrl` for the same url in a file that loads earlier still wins, and the tool returns a warning when that happens. `explore_repo`, `list_repo_tree` and `read_repo_file` read the overridden checkout too. Core itself is the flake input in `flake.nix`, not a repository, so this tool cannot override it.
+
+Edit the checkout with your normal file tools, then `rebuild` the sandbox. The build copies the checkout into the store, so later edits need another `rebuild`. Use `nix_eval` to confirm the result, e.g. `config.icedos.ai-tools.skills`.
+
+## Parallel agents and subagents
+
+Every call can carry `sandbox=<name>`, and the override applies to that call only.
+
+- Subagents of one agent share one server, and so share its default sandbox. Give each one its own copy: call `sandbox_create` (optionally with `name`), then pass that name as `sandbox=` on every call.
+- Separate agents start separate servers, and each gets its own default sandbox.
+- Two builds of different sandboxes can run at once. Nix shares the store between them.
+- Delete a sandbox you created with `sandbox_delete` once its diff is reported. `gc` later frees the store paths its builds made.
+
+## Tools
+
+Sandbox-aware, all take `sandbox=`:
+
+- Config: `get_config`, `get_config_value` (`resolved=true` returns the effective option value), `set_config_value`, `delete_config_value`, `list_repositories`, `add_repository` (with `input_patches`), `edit_user`, `list_config_files`, `set_config_file_enabled`, `validate_config`.
+- The config is `config.toml` merged with every `*.toml` under `configs/`, subdirectories included, like core: tables merge, arrays concatenate, and one scalar in two files is an error. Writes land in the file that declares the key, a new key goes next to its nearest existing parent, else `config.toml`, or in `file=`.
+- Paths take `[N]` indices and a final `[]` to append, e.g. `icedos.system.packages[]`. `[N]` counts across all files that add to the array. Quote keys with dots: `environment.etc."foo.conf".text`. `delete_config_value` also takes `path|value` to drop an array item by value. Setting a whole array or table that several files add to needs `file=`.
+- Modules: `enable_module`, `disable_module`, `list_modules`, `search_modules`, `get_module`, `module_graph`. Repos match by url with refs ignored. `disable_module` refuses a module that is only on as a dependency.
+- Options: `search_options`, `get_option` (returns a TOML snippet to paste).
+- Build and state: `rebuild`, `get_diff`, `list_inputs`, `list_state_files`, `read_state_file`.
+- `nix_eval` evaluates an expression with `config`, `options`, `declared`, `pkgs`, `lib`, `icedosLib` and `inputs` bound, like `icedos repl`. Prefer the index tools for single options.
+- Repo source, local checkout or override first, else GitHub: `explore_repo`, `list_repo_tree`, `read_repo_file`. Use these instead of reading module files by hand.
+- `format_nix` runs nixfmt on a file or dir (`icedos nixf`). In sandbox mode it refuses paths in the live config.
+
+Sandbox management: `sandbox_create`, `sandbox_list`, `sandbox_diff`, `sandbox_inputs_diff`, `sandbox_delete`, `sandbox_override_repo`.
+
+Always live and read-only or self-contained: `doctor`, `get_system_info_tool`, `get_generations_tool`, `diff_generations`, `config_history`, `list_packages`, `run_package` (`args`, `insecure`), `pkgs_build` (builds a package.nix against the system's pkgs), `explore_local_repo`.
+
+Live mode only, unless `dry=true`: `rollback`, `gc`.
+
+## Other sources
+
+- The nixos MCP (`mcp__nixos__*`) covers options outside `icedos.*` (NixOS, home-manager), nixpkgs packages and versions, the binary cache and the NixOS wiki.
+- Use web search only when neither MCP answers.
+- Use plain file tools for files outside the IceDOS config, and Bash for git.
+
+## Errors
+
+Failed calls return JSON like `{"ok": false, "error": {"kind": "...", "message": "..."}}`.
+
+- `sandbox`: unknown or invalid sandbox name, or a sandbox-only tool called without one.
+- `bad_flags`: a `rebuild` flag that is unknown, refused, needs a value, or needs live mode.
+- `write_error`: the write failed or left an invalid config (bad TOML, duplicate key). Nothing changed.
+- `validation`: the flake eval failed. The change was reverted.
+- `live_only`: the call needs live mode. Report it to the user rather than working around it.
+- `not_found`: the path is not declared. Retry `get_config_value` with `resolved=true` for defaults.
+"""

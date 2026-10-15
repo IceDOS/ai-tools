@@ -60,8 +60,8 @@
               commands = [
                 {
                   command = "serve";
-                  help = "start the IceDOS MCP server (stdio transport)";
-                  script = "ICEDOS_CONFIG_DIR=${config.icedos.configurationLocation}/.. exec ${icedosMcpServer}/bin/icedos-mcp-server";
+                  help = "start the IceDOS MCP server (stdio); tools use a temp config copy unless --live";
+                  script = "ICEDOS_CONFIG_DIR=${config.icedos.configurationLocation}/.. exec ${icedosMcpServer}/bin/icedos-mcp-server \"$@\"";
                   completion.files = false;
                 }
               ];

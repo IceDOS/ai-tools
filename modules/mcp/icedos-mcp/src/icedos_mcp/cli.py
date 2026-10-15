@@ -9,7 +9,7 @@ import shutil
 import signal
 from pathlib import Path
 
-from .config import find_config_root
+from .config import find_config_root, root_override
 
 
 def _kill_proc_group(
@@ -193,15 +193,24 @@ async def run_icedos_streaming(
     return proc.returncode, "".join(lines), ""
 
 
+# Flags that pick another action or stop before the build; adding --build would clash.
+_NO_BUILD_FLAGS = {"--lock-only", "--dry", "-n", "--dry-run", "--genflake-only", "--update-hooks", "--boot", "--build-vm"}
+
+
 async def rebuild(*flags: str, timeout: float = 3600, on_line=None) -> tuple[int, str, str]:
-    """Run `icedos rebuild` with given flags. Always includes --build for safety.
+    """Run `icedos rebuild` with given flags, adding --build unless a flag picks another action.
 
     When on_line is given the build is streamed (each log line is passed to the
     callback as it arrives); otherwise the output is buffered until the process exits.
+    Inside a sandbox the build runs with `--dir`, which skips hooks and generation
+    records and keeps every `.state` write in the sandbox copy.
     """
+    sandbox = root_override()
+    build = () if _NO_BUILD_FLAGS & set(flags) else ("--build",)
+    args = ("rebuild", *(("--dir", str(sandbox)) if sandbox else ()), *build, *flags)
     if on_line is not None:
-        return await run_icedos_streaming("rebuild", "--build", *flags, timeout=timeout, on_line=on_line)
-    return await run_icedos("rebuild", "--build", *flags, timeout=timeout)
+        return await run_icedos_streaming(*args, timeout=timeout, on_line=on_line)
+    return await run_icedos(*args, timeout=timeout)
 
 
 async def get_diff() -> tuple[int, str, str]:
@@ -248,9 +257,32 @@ async def list_packages() -> tuple[int, str, str]:
     return await run_icedos("pkgs", "list")
 
 
-async def run_package(attr: str, timeout: float = 300) -> tuple[int, str, str]:
-    """Run `icedos pkgs run <attr>`."""
-    return await run_icedos("pkgs", "run", attr, timeout=timeout)
+async def run_package(
+    attr: str, args: list[str] | None = None, insecure: bool = False, timeout: float = 300
+) -> tuple[int, str, str]:
+    """Run `icedos pkgs run [--insecure] <attr> [-- args...]`."""
+    cmd = ["pkgs", "run", *(["--insecure"] if insecure else []), attr]
+    if args:
+        cmd += ["--", *args]
+    return await run_icedos(*cmd, timeout=timeout)
+
+
+async def pkgs_build(path: str, run: str = "", args: list[str] | None = None, timeout: float = 1800) -> tuple[int, str, str]:
+    """Run `icedos pkgs build --path <path> [--run <bin> [-- args...]]`."""
+    cmd = ["pkgs", "build", "--path", path]
+    if run:
+        cmd += ["--run", run, *(["--", *args] if args else [])]
+    return await run_icedos(*cmd, timeout=timeout)
+
+
+async def config_history(generation: int | None = None) -> tuple[int, str, str]:
+    """Run `icedos configuration history --json`, or `history <gen>` for one generation's diff."""
+    return await run_icedos("configuration", "history", *([str(generation)] if generation is not None else ["--json"]))
+
+
+async def nixf(path: str, timeout: float = 300) -> tuple[int, str, str]:
+    """Run `icedos nixf <path>` (nixfmt over a file or tree)."""
+    return await run_icedos("nixf", path, timeout=timeout)
 
 
 async def _run_build_sh(*flags: str, timeout: float = 180) -> tuple[int, str, str]:

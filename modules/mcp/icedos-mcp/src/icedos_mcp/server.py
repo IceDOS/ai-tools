@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import argparse
+import asyncio
+import atexit
+import functools
+import inspect
 import json
 import logging
+import os
+import re
 import shlex
+import signal
 import sys
 import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
+import tomlkit
 from mcp.server.fastmcp import Context, FastMCP
 
 from . import config_files
+from . import sandbox as sandboxes
 from .cli import (
     _ANSI_RE,
     _NOM_FRAME_RE,
@@ -29,6 +39,9 @@ from .cli import (
     genflake_only as cli_genflake_only,
 )
 from .cli import (
+    config_history as cli_config_history,
+)
+from .cli import (
     get_diff as cli_get_diff,
 )
 from .cli import (
@@ -36,6 +49,12 @@ from .cli import (
 )
 from .cli import (
     nix_eval_expr as cli_nix_eval_expr,
+)
+from .cli import (
+    nixf as cli_nixf,
+)
+from .cli import (
+    pkgs_build as cli_pkgs_build,
 )
 from .cli import (
     rebuild as cli_rebuild,
@@ -60,8 +79,11 @@ from .config import (
     find_config_root,
     get_config_toml_string,
     get_value,
-    resolve_write_target,
+    live_config_root,
+    rel,
+    root_override,
     set_value,
+    use_config_root,
 )
 from .config import (
     edit_user as config_edit_user,
@@ -116,7 +138,7 @@ async def _ensure_search_index() -> None:
         if not stale:
             oldest = min(d.stat().st_mtime for d in docs)
             # Invalidate index when any source is newer: config files, flake.lock, or generated flake.nix.
-            sources = config_files.list_config_files(root) + [
+            sources = config_files.all_config_tomls(root) + [
                 root / "flake.lock",
                 root / ".state" / "flake.nix",
             ]
@@ -204,28 +226,134 @@ def _err(kind: str, message: str) -> str:
     return json.dumps({"ok": False, "error": {"kind": kind, "message": message}}, indent=2)
 
 
-async def _revalidate(target: Path, original: str | None) -> str | None:
-    """Eval-validate the just-written config; revert `target` on failure.
+_SANDBOX_DOC = """
+    sandbox: Name of a sandbox from sandbox_create. Empty uses this server's
+             default sandbox, created on first use. Only a server started with
+             --live (or ICEDOS_MCP_LIVE=1) runs an empty value on the live config.
+"""
 
-    `original` is the target file's prior text, or None if the write created the
-    file (a failed validation then removes it). Uses `--genflake-only` (eval +
-    lock, no closure realize) — catches schema/type/duplicate-key errors far
-    cheaper than a full build. Returns an error message if validation failed
-    (after reverting), or None on success.
+# Only the operator can enable live mode, through argv or env. No tool argument can.
+LIVE_ENV = "ICEDOS_MCP_LIVE"
+_live = os.environ.get(LIVE_ENV, "").strip().lower() in {"1", "true", "yes"}
+_default_name: str | None = None
+
+
+def _default_sandbox() -> str | None:
+    """Sandbox for a call without `sandbox=`, created lazily; None in live mode."""
+    global _default_name
+    if _live:
+        return None
+    if _default_name:
+        try:
+            _ = sandboxes.resolve(_default_name)
+            return _default_name
+        except FileNotFoundError:
+            # Fail once rather than silently swap in a fresh copy that lacks the earlier edits.
+            gone, _default_name = _default_name, None
+            raise FileNotFoundError(
+                f"default sandbox '{gone}' was deleted outside this server and its changes are gone; "
+                "the next call starts a fresh one"
+            ) from None
+    _default_name = sandboxes.create()["name"]
+    logger.info("default sandbox: %s", _default_name)
+    return _default_name
+
+
+def _live_only(action: str) -> str | None:
+    if _live:
+        return None
+    return _err(
+        "live_only",
+        f"{action} changes the running system, and this server runs in sandbox mode. "
+        f"Ask the user to start it with --live or {LIVE_ENV}=1.",
+    )
+
+
+def _sandboxable(fn):
+    """Add a `sandbox` argument that runs the tool against a sandbox copy.
+
+    FastMCP builds the tool schema from the signature, so the new parameter goes
+    into `__signature__` with its annotations already evaluated.
     """
-    rc, _, stderr = await cli_genflake_only()
-    if rc != 0:
-        if original is None:
-            target.unlink(missing_ok=True)
-        else:
-            target.write_text(original)
-        return stderr.strip() or "unknown eval error"
-    return None
+    sig = inspect.signature(fn, eval_str=True)
+    param = inspect.Parameter("sandbox", inspect.Parameter.KEYWORD_ONLY, default="", annotation=str)
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, sandbox: str = "", **kwargs: Any) -> Any:
+        try:
+            name = sandbox or _default_sandbox()
+            root = sandboxes.resolve(name) if name else None
+        except Exception as e:
+            return _err("sandbox", str(e))
+        if root is None:
+            return await fn(*args, **kwargs)
+        with use_config_root(root):
+            return await fn(*args, **kwargs)
+
+    wrapper.__signature__ = sig.replace(parameters=[*sig.parameters.values(), param])  # type: ignore[attr-defined]
+    wrapper.__annotations__ = {**fn.__annotations__, "sandbox": str}
+    wrapper.__doc__ = (fn.__doc__ or "").rstrip() + "\n" + _SANDBOX_DOC
+    return wrapper
+
+
+_root_locks: dict[Path, asyncio.Lock] = {}
+
+
+def _snapshot(root: Path) -> dict[Path, str]:
+    return {p: p.read_text() for p in config_files.all_config_tomls(root)}
+
+
+def _restore(root: Path, snap: dict[Path, str]) -> None:
+    for p, text in snap.items():
+        if not p.is_file() or p.read_text() != text:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+    try:
+        for p in config_files.all_config_tomls(root):
+            if p not in snap:
+                p.unlink()
+    except Exception as e:
+        logger.warning("could not remove files created by a reverted change: %s", e)
+
+
+async def _mutate(change, validate: bool) -> str:
+    """Run a config write under the root's lock, then check it and revert every file on failure.
+
+    `change` returns a message. The merged config is always re-read, which
+    catches TOML and duplicate-key errors at once. `validate` adds an eval of
+    the generated flake (`--genflake-only`), which catches option type errors.
+    """
+    root = find_config_root()
+    lock = _root_locks.setdefault(root.resolve(), asyncio.Lock())
+    async with lock:
+        snap = _snapshot(root)
+        try:
+            msg = change()
+            config_files.merged_config(root)
+        except Exception as e:
+            _restore(root, snap)
+            return _err("write_error", str(e))
+        if not validate:
+            return f"{msg} (not validated)"
+        try:
+            rc, _, stderr = await cli_genflake_only()
+            err = None if rc == 0 else (stderr.strip() or "unknown eval error")
+        except Exception as e:
+            err = f"validation could not run: {e}"
+        if err:
+            _restore(root, snap)
+            return _err("validation", f"change reverted: {err}")
+        return f"{msg} (validated)"
+
+
+def _files(paths: list[Path]) -> str:
+    return ", ".join(rel(p) for p in paths)
 
 
 # --- CONFIG TOOLS ---
 
 @mcp.tool()
+@_sandboxable
 async def get_config(section: str = "", file: str = "") -> str:
     """Read the IceDOS config (merged across config.toml + configs/*.toml).
 
@@ -245,6 +373,7 @@ async def get_config(section: str = "", file: str = "") -> str:
 
 
 @mcp.tool()
+@_sandboxable
 async def get_config_value(path: str, resolved: bool = False, file: str = "") -> str:
     """Get a value by dotted path — either declared in config, or the resolved option.
 
@@ -278,22 +407,25 @@ async def get_config_value(path: str, resolved: bool = False, file: str = "") ->
 
 
 @mcp.tool()
+@_sandboxable
 async def set_config_value(path: str, value: str, file: str = "", validate: bool = True) -> str:
     """Set a value in the config by dotted path.
 
-    Writes to the config file that already declares the key (so edits to values
-    now living in configs/*.toml land there), else config.toml — or the file you
-    pass. Array accessors are supported in the path:
-      - 'icedos.system.packages[2]'  — replace element 2 (must exist; negatives ok)
+    Without `file`, the path reads the merged config: the write lands in the
+    file that declares the key (a new key goes next to its nearest existing
+    parent, else config.toml), and `[N]` counts items across every file that
+    contributes to the array. Accessors:
+      - 'icedos.system.packages[2]'  — replace merged element 2 (negatives ok)
       - 'icedos.system.packages[]'   — append a new element
       - 'icedos.repositories[0].modules[1]' — nested list / array-of-tables
+      - 'environment.etc."foo.conf".text' — quote keys that hold dots
 
     Args:
         path: Dotted path (e.g. 'icedos.system.arch'), with optional '[N]'/'[]' accessors.
         value: New value as JSON (string, number, boolean, array, or object).
         file: Config-root-relative target file (e.g. 'configs/gaming.toml', or a
-              hidden 'configs/.local.toml' for secrets). Default = auto (the owning
-              file, else config.toml).
+              hidden 'configs/.local.toml' for secrets). Indices are then local
+              to that file. Default = auto.
         validate: If True, eval-validate (genflake) after writing; revert on failure.
     """
     try:
@@ -301,63 +433,62 @@ async def set_config_value(path: str, value: str, file: str = "", validate: bool
     except json.JSONDecodeError:
         parsed = value
 
-    try:
-        target = resolve_write_target(file or None, dotted_path=path)
-        original = target.read_text() if target.exists() else None
-        set_value(path, parsed, file=file or None)
+    def change() -> str:
+        target = set_value(path, parsed, file=file or None)
+        return f"Set {path} = {json.dumps(parsed)} in {rel(target)}{_disabled_note([target])}"
 
-        if validate:
-            err = await _revalidate(target, original)
-            if err:
-                return f"Validation failed — change reverted:\n{err}"
-            return f"Set {path} = {json.dumps(parsed)} in {target.name} (validated)"
-        return f"Set {path} = {json.dumps(parsed)} in {target.name} (not validated)"
-    except Exception as e:
-        return _err("write_error", str(e))
+    return await _mutate(change, validate)
+
+
+def _disabled_note(paths: list[Path]) -> str:
+    """Warn when a write lands in a file core does not load (`enable = false`)."""
+    loaded = set(config_files.list_config_files(find_config_root()))
+    off = [p for p in paths if p.resolve() not in {q.resolve() for q in loaded} and p.exists()]
+    return f"; warning: {_files(off)} has enable = false, so core ignores it" if off else ""
 
 
 @mcp.tool()
+@_sandboxable
 async def delete_config_value(path: str, file: str = "", validate: bool = True) -> str:
     """Delete a value from the config by dotted path.
 
-    Removes it from the file that declares it (or the file you pass). Handles a
-    table key, an array element by index, or an array item by value:
+    Without `file`, a key is removed from every file that declares it, `[N]` is
+    a merged index, and 'path|value' removes the first matching item searching
+    the files in load order:
       - 'icedos.system.packages'            — delete the key
-      - 'icedos.system.packages[2]'         — delete element 2 (negatives ok)
+      - 'icedos.system.packages[2]'         — delete merged element 2 (negatives ok)
       - 'icedos.system.packages|signal-desktop' — delete the item matching a value
 
     Args:
         path: Dotted path (optionally with '[N]'), or 'path|value' for value-match removal.
-        file: Optional config-root-relative file to delete from; default = the file
-              that declares the key.
+        file: Optional config-root-relative file to delete from; indices are
+              then local to it. Default = the declaring files.
         validate: If True, eval-validate (genflake) after deleting; revert on failure.
     """
-    try:
-        lookup = path.split("|", 1)[0]
-        target = resolve_write_target(file or None, dotted_path=lookup)
-        original = target.read_text() if target.exists() else None
-        delete_value(path, file=file or None)
 
-        if validate:
-            err = await _revalidate(target, original)
-            if err:
-                return f"Validation failed — change reverted:\n{err}"
-            return f"Deleted '{path}' from {target.name} (validated)"
-        return f"Deleted '{path}' from {target.name} (not validated)"
-    except Exception as e:
-        return _err("write_error", str(e))
+    def change() -> str:
+        return f"Deleted '{path}' from {_files(delete_value(path, file=file or None))}"
+
+    return await _mutate(change, validate)
 
 
 @mcp.tool()
+@_sandboxable
 async def list_repositories() -> str:
-    """List all [[icedos.repositories]] entries (merged across config.toml + configs/*.toml)."""
+    """List configured repositories, one row per repo folded over all its entries like core.
+
+    Each row has the url, the files with an entry for it, overrideUrl, modules,
+    fetch flags, patches and input-patches. `sandbox_override` shows an override
+    set through sandbox_override_repo.
+    """
     try:
         return json.dumps(config_list_repositories(), indent=2)
     except Exception as e:
-        return f"Error: {e}"
+        return _err("read_error", str(e))
 
 
 @mcp.tool()
+@_sandboxable
 async def add_repository(
     url: str,
     modules: list[str] | None = None,
@@ -365,124 +496,154 @@ async def add_repository(
     fetch_deps: bool = True,
     override_url: str = "",
     patches: list[str] | None = None,
+    input_patches: list[dict[str, Any]] | None = None,
     file: str = "",
+    validate: bool = False,
 ) -> str:
     """Add a new [[icedos.repositories]] entry.
 
     Appends to the config file that already holds repositories (keeping them
-    together), else config.toml — or the file you pass.
+    together), else config.toml, or the file you pass. Fails if any config file
+    already lists the repo (refs ignored, like core).
 
     Args:
         url: Repository URL (e.g. 'github:icedos/apps').
         modules: Module names to enable (e.g. ['steam', 'btop']).
         fetch_optional_deps: Also pull optional dependencies.
         fetch_deps: Pull required dependencies (default True; set False to pull none).
-        override_url: Local/alternate source, e.g. 'path:/home/ice/.code/icedos/apps'.
+        override_url: Local/alternate source written to the config. For test
+                      builds use sandbox_override_repo instead.
         patches: Paths to repo-wide patch files (config-root-relative).
+        input_patches: Patches for a module's flake input, as
+                       [{"module": "...", "input": "...", "patches": ["..."]}].
         file: Optional config-root-relative target file (e.g. 'configs/repositories.toml').
+        validate: If True, eval-validate (genflake) after writing; revert on failure.
     """
-    try:
-        config_add_repository(
+
+    def change() -> str:
+        target = config_add_repository(
             url=url,
             modules=modules or [],
             fetch_optional_deps=fetch_optional_deps,
             fetch_deps=fetch_deps,
             override_url=override_url,
             patches=patches or [],
+            input_patches=input_patches or [],
             file=file or None,
         )
-        return f"Added repository {url}"
-    except Exception as e:
-        return _err("write_error", str(e))
+        return f"Added repository {url} to {rel(target)}{_disabled_note([target])}"
+
+    return await _mutate(change, validate)
 
 
-def _module_repo(name: str) -> str | None:
-    """Find which configured repo owns a module, via the modules index."""
-    for m in _load_index("modules-doc.json"):
-        if m.get("name") == name:
-            return m.get("repo")
-    return None
+def _module_entries(name: str) -> list[dict[str, Any]]:
+    return [m for m in _load_index("modules-doc.json") if m.get("name") == name]
+
+
+def _module_repo(name: str) -> str:
+    """The configured repo that owns a module, via the modules index."""
+    repos = sorted({m.get("repo", "") for m in _module_entries(name)})
+    if not repos:
+        raise LookupError(f"module '{name}' is not in the modules index; pass repo=")
+    if len(repos) > 1:
+        raise LookupError(f"module '{name}' exists in several repos ({', '.join(repos)}); pass repo=")
+    return repos[0]
 
 
 @mcp.tool()
+@_sandboxable
 async def enable_module(module: str, repo: str = "", file: str = "", validate: bool = False) -> str:
     """Enable a module by adding it to its repository's `modules` list.
 
+    Entries match by repo url with any ref ignored. The module goes into the
+    first entry for the repo, unless any entry already lists it.
+
     Args:
         module: Module name (e.g. 'steam').
         repo: Owning repo URL. If omitted, resolved from the module index.
         file: Optional config-root-relative file holding the repo; default = the
-              file that declares it (e.g. 'configs/repositories.toml').
+              first file that declares it.
         validate: If True, eval-validate (genflake) after writing; revert on failure.
     """
     await _ensure_search_index()
-    repo_url = repo or _module_repo(module)
-    if not repo_url:
-        return _err("not_found", f"cannot resolve owning repo for '{module}'; pass repo=")
     try:
-        target = resolve_write_target(file or None, repo_url=repo_url)
-        original = target.read_text() if target.exists() else None
-        config_set_module_enabled(module, repo_url, enabled=True, file=file or None)
-        if validate:
-            err = await _revalidate(target, original)
-            if err:
-                return f"Validation failed — change reverted:\n{err}"
-        return f"Enabled '{module}' in {repo_url}"
-    except Exception as e:
-        return _err("write_error", str(e))
+        repo_url = repo or _module_repo(module)
+    except LookupError as e:
+        return _err("not_found", str(e))
+
+    def change() -> str:
+        written = config_set_module_enabled(module, repo_url, enabled=True, file=file or None)
+        return f"Enabled '{module}' in {repo_url} ({_files(written)}){_disabled_note(written)}"
+
+    return await _mutate(change, validate)
 
 
 @mcp.tool()
+@_sandboxable
 async def disable_module(module: str, repo: str = "", file: str = "", validate: bool = False) -> str:
-    """Disable a module by removing it from its repository's `modules` list.
+    """Disable a module by removing it from every `modules` list of its repository.
+
+    A module pulled in only as a dependency is not in any list; disable the
+    modules that depend on it instead (see module_graph).
 
     Args:
         module: Module name (e.g. 'steam').
         repo: Owning repo URL. If omitted, resolved from the module index.
-        file: Optional config-root-relative file holding the repo; default = the
-              file that declares it (e.g. 'configs/repositories.toml').
+        file: Optional config-root-relative file; default = every file that lists it.
         validate: If True, eval-validate (genflake) after writing; revert on failure.
     """
     await _ensure_search_index()
-    repo_url = repo or _module_repo(module)
-    if not repo_url:
-        return _err("not_found", f"cannot resolve owning repo for '{module}'; pass repo=")
     try:
-        target = resolve_write_target(file or None, repo_url=repo_url)
-        original = target.read_text() if target.exists() else None
-        config_set_module_enabled(module, repo_url, enabled=False, file=file or None)
-        if validate:
-            err = await _revalidate(target, original)
-            if err:
-                return f"Validation failed — change reverted:\n{err}"
-        return f"Disabled '{module}' in {repo_url}"
-    except Exception as e:
-        return _err("write_error", str(e))
+        repo_url = repo or _module_repo(module)
+    except LookupError as e:
+        return _err("not_found", str(e))
+
+    def change() -> str:
+        try:
+            written = config_set_module_enabled(module, repo_url, enabled=False, file=file or None)
+        except ValueError:
+            dep = [m for m in _module_entries(module) if m.get("enabled") and not m.get("explicit")]
+            if dep:
+                raise ValueError(
+                    f"'{module}' is only enabled as a dependency; disable the modules that need it (module_graph)"
+                ) from None
+            raise
+        return f"Disabled '{module}' in {repo_url} ({_files(written)})"
+
+    return await _mutate(change, validate)
 
 
 @mcp.tool()
-async def edit_user(username: str, settings: str = "{}", file: str = "") -> str:
-    """Add or update a user under [icedos.users.<username>].
+@_sandboxable
+async def edit_user(username: str, settings: str = "{}", file: str = "", validate: bool = False) -> str:
+    """Add or update keys of a user under [icedos.users.<username>].
+
+    Each key lands in the file that declares it, else the file declaring the
+    user, else config.toml. Keys not in `settings` stay as they are.
 
     Args:
         username: The username.
         settings: JSON object with keys: initialPassword, sudo, extraGroups,
                   packages, trusted, isNormalUser, isSystemUser, home, description.
-        file: Optional config-root-relative target file; default = the file that
-              declares the user, else config.toml.
+        file: Optional config-root-relative target file for every key.
+        validate: If True, eval-validate (genflake) after writing; revert on failure.
     """
     try:
-        config_edit_user(username, json.loads(settings), file=file or None)
-        return f"Updated user '{username}'"
+        parsed = json.loads(settings)
     except json.JSONDecodeError:
-        return "Error: settings must be a valid JSON object"
-    except Exception as e:
-        return f"Error: {e}"
+        return _err("write_error", "settings must be a valid JSON object")
+
+    def change() -> str:
+        written = config_edit_user(username, parsed, file=file or None)
+        return f"Updated user '{username}' in {_files(written)}{_disabled_note(written)}"
+
+    return await _mutate(change, validate)
 
 
 # --- QUERY & DISCOVERY ---
 
 @mcp.tool()
+@_sandboxable
 async def search_options(query: str = "", category: str = "", limit: int = 50, offset: int = 0) -> str:
     """Search IceDOS options by name/description, ranked, with pagination.
 
@@ -506,6 +667,7 @@ async def search_options(query: str = "", category: str = "", limit: int = 50, o
 
 
 @mcp.tool()
+@_sandboxable
 async def get_option(name: str) -> str:
     """Get full details for a specific IceDOS option with a paste-ready TOML snippet.
 
@@ -520,6 +682,7 @@ async def get_option(name: str) -> str:
 
 
 @mcp.tool()
+@_sandboxable
 async def search_modules(query: str = "", repo: str = "", status: str = "all",
                          limit: int = 50, offset: int = 0) -> str:
     """Search IceDOS modules, ranked, with pagination.
@@ -547,6 +710,7 @@ async def search_modules(query: str = "", repo: str = "", status: str = "all",
 
 
 @mcp.tool()
+@_sandboxable
 async def module_graph(name: str) -> str:
     """Dependency graph for a module — forward (deps) and reverse (dependents).
 
@@ -595,6 +759,7 @@ async def module_graph(name: str) -> str:
 
 
 @mcp.tool()
+@_sandboxable
 async def get_module(name: str) -> str:
     """Get full details for a specific IceDOS module.
 
@@ -609,6 +774,7 @@ async def get_module(name: str) -> str:
 
 
 @mcp.tool()
+@_sandboxable
 async def list_modules(repo: str = "", status: str = "all") -> str:
     """List all IceDOS modules with status markers (● explicit, ◐ dependency, ○ available).
 
@@ -635,24 +801,229 @@ async def list_modules(repo: str = "", status: str = "all") -> str:
     return "\n".join(lines) if lines else "No modules found."
 
 
+# --- SANDBOXES ---
+
+# icedos rebuild flags the tool accepts. Value flags take the next word.
+_REBUILD_FLAGS = {
+    "--dry", "-n", "--dry-run", "--logs", "--update", "--update-core", "--update-core-only",
+    "--update-repos", "--update-repos-only", "--update-repo-inputs-only", "--lock-only",
+    "--genflake-only", "--build-vm",
+}
+_REBUILD_VALUE_FLAGS = {"--update-state-inputs", "--update-repos-select", "--update-except", "--builder", "--github-token-path"}
+# Live only: they activate or deploy a system, run hooks, or forward raw args to nh/nix.
+_REBUILD_LIVE_FLAGS = {"--boot", "--update-hooks"}
+_REBUILD_LIVE_VALUE_FLAGS = {"--target"}
+_REBUILD_LIVE_REST_FLAGS = {"--nh-args", "--build-args"}
+_REBUILD_REJECT = {
+    "--dir": "the server picks the config dir; use sandbox= instead",
+    "--run-vm": "it starts an interactive VM; use --build-vm and run the script yourself",
+    "--ask": "it waits for a confirmation the server cannot give",
+    "--github-token": "a literal token would land in logs; use --github-token-path",
+    "--build": "the server adds it",
+}
+
+
+def _check_rebuild_flags(extra: list[str], in_sandbox: bool) -> str | None:
+    i = 0
+    while i < len(extra):
+        f = extra[i]
+        if f in _REBUILD_REJECT:
+            return f"{f} is not supported: {_REBUILD_REJECT[f]}"
+        live_only = f in _REBUILD_LIVE_FLAGS | _REBUILD_LIVE_VALUE_FLAGS | _REBUILD_LIVE_REST_FLAGS
+        if live_only and in_sandbox:
+            return f"{f} is not allowed in a sandbox rebuild"
+        if f in _REBUILD_LIVE_REST_FLAGS:
+            return None
+        if f in _REBUILD_VALUE_FLAGS | _REBUILD_LIVE_VALUE_FLAGS:
+            if i + 1 >= len(extra) or extra[i + 1].startswith("--"):
+                return f"{f} needs a value"
+            i += 2
+            continue
+        if f not in _REBUILD_FLAGS and not live_only:
+            return f"unknown rebuild flag {f}"
+        i += 1
+    return None
+
+
+@mcp.tool()
+async def sandbox_create(name: str = "") -> str:
+    """Copy the live config into a new throwaway sandbox for edits and test builds.
+
+    Calls without `sandbox=` already use this server's default sandbox, so you
+    need this only for a separate copy, e.g. one per subagent sharing this
+    server. Pass the returned name as `sandbox=` to the config, module, query,
+    state, nix_eval, get_diff and rebuild tools. A sandbox `rebuild` runs
+    `icedos rebuild --dir <sandbox> --build`, which never activates and never
+    writes the live config or its `.state`. Delete it with sandbox_delete.
+
+    Args:
+        name: Optional name (letters, digits, '.', '_', '-'); default is random.
+    """
+    try:
+        return json.dumps(sandboxes.create(name), indent=2)
+    except Exception as e:
+        return _err("sandbox", str(e))
+
+
+@mcp.tool()
+async def sandbox_list() -> str:
+    """Show the server mode, this server's default sandbox and every existing sandbox.
+
+    `mode` is "sandbox" (the default: calls without `sandbox=` use `default`) or
+    "live" (calls without `sandbox=` use the real config). `default` is null
+    until the first call that needs it.
+    """
+    try:
+        return json.dumps(
+            {
+                "mode": "live" if _live else "sandbox",
+                "default": _default_name,
+                "sandboxes": sandboxes.list_all(),
+            },
+            indent=2,
+        )
+    except Exception as e:
+        return _err("sandbox", str(e))
+
+
+@mcp.tool()
+async def sandbox_diff(name: str) -> str:
+    """Unified diff of the live config against a sandbox (a/ = live, b/ = sandbox).
+
+    Covers every file in the config root except `.git` and `.state`, so the
+    output is a patch the user can review and apply to the live config.
+
+    Args:
+        name: Sandbox name.
+    """
+    try:
+        return _with_drift(name, sandboxes.diff(name) or "No differences.")
+    except Exception as e:
+        return _err("sandbox", str(e))
+
+
+def _with_drift(name: str, text: str) -> str:
+    drift = sandboxes.live_drift(name)
+    if not drift:
+        return text
+    return (
+        f"Note: the live config changed since this sandbox was copied ({', '.join(drift)}). "
+        "The diff only holds sandbox edits; check it still applies.\n\n" + text
+    )
+
+
+@mcp.tool()
+@_sandboxable
+async def sandbox_inputs_diff() -> str:
+    """Flake input revs that differ between a sandbox and the live config.
+
+    Compares the config flake.lock and the generated `.state/flake.lock` of the
+    sandbox against the live ones, e.g. after a sandbox `rebuild --update`.
+    """
+    root = root_override()
+    if root is None:
+        return _err("sandbox", "needs a sandbox; pass sandbox= or use sandbox mode")
+    live = live_config_root()
+    out: dict[str, Any] = {}
+    for lock in ("flake.lock", ".state/flake.lock"):
+        a, b = _lock_revs(live / lock), _lock_revs(root / lock)
+        changed = {
+            k: {"live": a.get(k), "sandbox": b.get(k)} for k in sorted(a.keys() | b.keys()) if a.get(k) != b.get(k)
+        }
+        if changed:
+            out[lock] = changed
+    return json.dumps(out, indent=2) if out else "No input differences."
+
+
+def _lock_revs(path: Path) -> dict[str, str]:
+    try:
+        nodes = json.loads(path.read_text()).get("nodes", {})
+    except (OSError, ValueError):
+        return {}
+    revs = {}
+    for name, node in nodes.items():
+        locked = node.get("locked", {})
+        rev = locked.get("rev") or locked.get("narHash") or locked.get("path")
+        if rev:
+            revs[name] = rev
+    return revs
+
+
+@mcp.tool()
+async def sandbox_delete(name: str) -> str:
+    """Delete a sandbox directory. Store paths its builds made go away with `gc`.
+
+    Args:
+        name: Sandbox name.
+    """
+    global _default_name
+    try:
+        sandboxes.delete(name)
+        if name == _default_name:
+            _default_name = None
+        return f"Deleted sandbox '{name}'."
+    except Exception as e:
+        return _err("sandbox", str(e))
+
+
+@mcp.tool()
+@_sandboxable
+async def sandbox_override_repo(repo: str, path: str = "") -> str:
+    """Build an icedos repo from a local checkout inside a sandbox, without editing config files.
+
+    Use it to test changes to a module repo (core excluded) in a sandbox build.
+    The server keeps the override in its own file inside the sandbox, which
+    sandbox_diff leaves out, so the user's config never gains an overrideUrl.
+    Only an `overrideUrl` set in the sandbox's config.toml takes precedence.
+
+    Args:
+        repo: Full flake url (e.g. 'github:icedos/ai-tools') or the repo name
+              ('ai-tools') of a configured repository.
+        path: Local checkout holding the repo's flake.nix ('path:' prefix
+              optional). Empty clears the override.
+    """
+    sandbox_root = root_override()
+    if sandbox_root is None:
+        return _err("sandbox", "repo overrides only apply inside a sandbox; pass sandbox= or use sandbox mode")
+    try:
+        return json.dumps(sandboxes.set_override(sandbox_root, repo, path), indent=2)
+    except Exception as e:
+        return _err("sandbox", str(e))
+
+
 # --- SYSTEM OPERATIONS ---
 
 @mcp.tool()
+@_sandboxable
 async def rebuild(ctx: Context, flags: str = "", logs: bool = False) -> str:
-    """Rebuild the IceDOS system (evaluates + builds the closure; never activates).
+    """Run `icedos rebuild --build`: evaluate and build the closure without switching to it.
 
     Output is condensed to the build summary by default (the raw nom stream is huge);
-    pass logs=true for the full, unabridged log. Build progress is streamed as MCP
-    progress notifications so long closure builds keep the client's tool call alive.
+    pass logs=true for the full log with --show-trace. Progress is streamed as MCP
+    progress notifications so long builds keep the client's tool call alive. On
+    success the result names the built store path.
 
     Args:
-        flags: Additional build.sh flags, e.g. --dry, --boot, --update, --update-core,
-               --update-core-only, --update-state-inputs "...", --update-repos, --update-repos-only,
-               --update-repo-inputs-only,
-               --build-vm, --genflake-only.
+        flags: Extra `icedos rebuild` flags:
+               --dry/-n/--dry-run, --genflake-only (eval and lock only),
+               --update, --update-core, --update-core-only, --update-repos,
+               --update-repos-only, --update-repo-inputs-only,
+               --update-repos-select "<urls>", --update-state-inputs "<inputs>",
+               --update-except "<inputs>", --lock-only (with an --update flag),
+               --build-vm, --builder <host>, --github-token-path <file>.
+               Live mode only: --boot, --target <host>, --update-hooks,
+               --nh-args ..., --build-args ...
+               In a sandbox, --update* flags change only the sandbox's locks.
         logs: Return the full raw log instead of the condensed summary.
     """
-    extra = shlex.split(flags) if flags else []
+    try:
+        extra = shlex.split(flags) if flags else []
+    except ValueError as e:
+        return _err("bad_flags", f"cannot parse flags: {e}")
+    if bad := _check_rebuild_flags(extra, root_override() is not None):
+        return _err("bad_flags", bad)
+    if logs and "--logs" not in extra:
+        extra.append("--logs")
 
     ansi = _ANSI_RE
     state = {"last": 0.0, "n": 0}
@@ -683,12 +1054,37 @@ async def rebuild(ctx: Context, flags: str = "", logs: bool = False) -> str:
             detail += f"\n--- last output ---\n{cli_summarize_log_tail(partial)}"
         return _err("timeout", detail)
     out = (stdout + (f"\n--- stderr ---\n{stderr}" if stderr else "")) if logs else cli_summarize_build(stdout, stderr)
-    return f"Build succeeded!\n{out}" if rc == 0 else f"Build failed (exit {rc}):\n{out}"
+    if rc != 0:
+        return f"Build failed (exit {rc}):\n{out}"
+    built = _built_path(stdout)
+    return "Build succeeded!" + (f"\nresult: {built}" if built else "") + f"\n{out}"
+
+
+_BUILD_DIR_RE = re.compile(r"building from path (\S+?)\.{3}")
+
+
+def _built_path(log: str) -> str | None:
+    """Store path of the closure, read from the build dir's result link."""
+    for m in reversed(_BUILD_DIR_RE.findall(_ANSI_RE.sub("", log))):
+        try:
+            return os.readlink(Path(m) / "result")
+        except OSError:
+            continue
+    return None
 
 
 @mcp.tool()
+@_sandboxable
 async def get_diff() -> str:
-    """Show pending config.toml changes since last rebuild."""
+    """Show pending config changes: in a sandbox, its edits as a unified diff
+    (same as sandbox_diff); live, the config against the one that built the running system."""
+    sandbox_root = root_override()
+    if sandbox_root is not None:
+        try:
+            name = sandbox_root.name
+            return _with_drift(name, sandboxes.diff(name) or "No differences from the live config.")
+        except Exception as e:
+            return _err("sandbox", str(e))
     _rc, stdout, stderr = await cli_get_diff()
     if stdout:
         return stdout
@@ -701,10 +1097,14 @@ async def get_diff() -> str:
 async def rollback(generation: int | None = None, dry: bool = False) -> str:
     """Roll back to a previous system generation.
 
+    Needs a server in live mode, except with `dry`.
+
     Args:
         generation: Target generation number (omit for previous).
         dry: Show the plan without changing anything.
     """
+    if not dry and (blocked := _live_only("rollback")):
+        return blocked
     rc, stdout, stderr = await cli_rollback(generation=generation, dry=dry)
     out = stdout + (f"\n{stderr}" if stderr else "")
     return out if rc == 0 else f"Rollback failed (exit {rc}):\n{out}"
@@ -719,7 +1119,8 @@ async def gc(days: int | None = None, generations: int | None = None, dry: bool 
     snapshots (days = keep newer than N days; generations = keep N newest; 0 = aggressive).
     Generations are system rollback points — a small `generations` value irreversibly drops
     them, so prefer `dry` first. This command needs root; without a passwordless sudo rule
-    it will fail with a sudo error rather than prompt.
+    it will fail with a sudo error rather than prompt. Needs a server in live mode, except
+    with `dry`.
 
     Args:
         days: Retention in days for the store and cache snapshots (None = use config default).
@@ -728,6 +1129,8 @@ async def gc(days: int | None = None, generations: int | None = None, dry: bool 
         dry: Preview what would be deleted without actually cleaning.
         timeout: Max seconds to wait before killing the process (default 1800).
     """
+    if not dry and (blocked := _live_only("gc")):
+        return blocked
     try:
         rc, stdout, stderr = await cli_gc(days=days, generations=generations, dry=dry, timeout=timeout)
     except TimeoutError as e:
@@ -756,25 +1159,53 @@ async def list_packages() -> str:
 
 
 @mcp.tool()
-async def run_package(attr: str, timeout: int = 300) -> str:
-    """Run a package without installing it (blocks until it exits or times out).
+async def run_package(attr: str, args: list[str] | None = None, insecure: bool = False, timeout: int = 300) -> str:
+    """Run a nixpkgs package's main binary without installing it (`icedos pkgs run`).
 
-    Not for long-lived GUI apps — the call blocks. For those, launch out-of-band.
+    Blocks until it exits or times out, so it is not for long-lived GUI apps.
 
     Args:
-        attr: Package attribute (e.g. 'firefox', 'btop').
+        attr: Package attribute (e.g. 'ripgrep', 'btop').
+        args: Arguments for the binary, e.g. ['--version'].
+        insecure: Allow packages marked insecure.
         timeout: Max seconds to wait before killing the process (default 300).
     """
     try:
-        _rc, stdout, stderr = await cli_run_package(attr, timeout=timeout)
+        rc, stdout, stderr = await cli_run_package(attr, args=args, insecure=insecure, timeout=timeout)
     except TimeoutError as e:
         return _err("timeout", str(e))
-    return stdout + (f"\n{stderr}" if stderr else "")
+    out = stdout + (f"\n{stderr}" if stderr else "")
+    return out if rc == 0 else f"exit {rc}:\n{out}"
+
+
+@mcp.tool()
+async def pkgs_build(path: str, run: str = "", args: list[str] | None = None, timeout: int = 1800) -> str:
+    """Build a package.nix against the system's pkgs (`icedos pkgs build`).
+
+    The package is called with icedosLib.packaging supplied, like a module's
+    packages. Returns the store path, or the binary's output with `run`. Uses
+    the live system's generated flake, so it needs a prior live rebuild.
+
+    Args:
+        path: Path to a package.nix file.
+        run: Binary name to launch from the build's bin/ after building.
+        args: Arguments for that binary (needs `run`).
+        timeout: Max seconds (default 1800).
+    """
+    if args and not run:
+        return _err("bad_args", "args need run=")
+    try:
+        rc, stdout, stderr = await cli_pkgs_build(str(Path(path).expanduser()), run=run, args=args, timeout=timeout)
+    except TimeoutError as e:
+        return _err("timeout", str(e))
+    out = _ANSI_RE.sub("", stdout + (f"\n{stderr}" if stderr else "")).strip()
+    return out if rc == 0 else f"Build failed (exit {rc}):\n{cli_summarize_log_tail(out)}"
 
 
 # --- REPO EXPLORER ---
 
 @mcp.tool()
+@_sandboxable
 async def explore_repo(url: str) -> str:
     """Explore an IceDOS module repo — METADATA ONLY (checks local override, then GitHub).
 
@@ -815,6 +1246,7 @@ async def explore_local_repo(path: str) -> str:
 
 
 @mcp.tool()
+@_sandboxable
 async def read_repo_file(repo: str, path: str, offset: int = 0, limit: int = 0) -> str:
     """Read the raw contents of a single file in an IceDOS repo — local OR online.
 
@@ -845,6 +1277,7 @@ async def read_repo_file(repo: str, path: str, offset: int = 0, limit: int = 0) 
 
 
 @mcp.tool()
+@_sandboxable
 async def list_repo_tree(repo: str, subdir: str = "") -> str:
     """List every file path in an IceDOS repo — local OR online.
 
@@ -896,11 +1329,13 @@ async def get_generations_tool() -> str:
 
 
 @mcp.tool()
+@_sandboxable
 async def list_inputs() -> str:
-    """Flake inputs that built the running system — pinned rev + freshness.
+    """Flake inputs pinned in .state/flake.lock: rev, source and age.
 
-    Parses .state/flake.lock: every repo, nixpkgs, home-manager, etc. with its
-    locked rev, source, and age (how stale). Broader than doctor's two checks.
+    Live, these built the running system. In a sandbox they are the sandbox's
+    pins (copied from live, changed by a sandbox `rebuild --update*`); see
+    sandbox_inputs_diff for the difference.
     """
     try:
         return json.dumps(sys_list_flake_inputs(), indent=2)
@@ -932,6 +1367,7 @@ async def diff_generations(generation_a: int, generation_b: int) -> str:
 # --- STATE FILES ---
 
 @mcp.tool()
+@_sandboxable
 async def list_state_files(subdir: str = "") -> str:
     """List files and directories under .state/.
 
@@ -946,7 +1382,7 @@ async def list_state_files(subdir: str = "") -> str:
         target = state / subdir if subdir else state
         target_resolved = target.resolve()
         state_resolved = state.resolve()
-        if not str(target_resolved).startswith(str(state_resolved)):
+        if not target_resolved.is_relative_to(state_resolved):
             return _err("bad_path", "path traversal not allowed")
         if not target.is_dir():
             return _err("not_found", f"{subdir or '.state/'} is not a directory or does not exist")
@@ -966,6 +1402,7 @@ async def list_state_files(subdir: str = "") -> str:
 
 
 @mcp.tool()
+@_sandboxable
 async def read_state_file(path: str, offset: int = 0, limit: int = 0) -> str:
     """Read a file from .state/.
 
@@ -982,7 +1419,7 @@ async def read_state_file(path: str, offset: int = 0, limit: int = 0) -> str:
         target = state / path
         target_resolved = target.resolve()
         state_resolved = state.resolve()
-        if not str(target_resolved).startswith(str(state_resolved)):
+        if not target_resolved.is_relative_to(state_resolved):
             return _err("bad_path", "path traversal not allowed")
         if not target.is_file():
             return _err("not_found", f"'{path}' not found in .state/")
@@ -995,32 +1432,162 @@ async def read_state_file(path: str, offset: int = 0, limit: int = 0) -> str:
         return _err("read_error", str(e))
 
 
+# --- CONFIG FILES, VALIDATION, FORMATTING ---
+
+@mcp.tool()
+@_sandboxable
+async def list_config_files() -> str:
+    """Every config file in load order, with whether core loads it.
+
+    config.toml first, then each *.toml under the extraConfigs dirs sorted by
+    path. A file with top-level `enable = false` is listed with loaded=false.
+    """
+    try:
+        root = find_config_root()
+        loaded = set(config_files.list_config_files(root))
+        rows = [
+            {
+                "file": p.relative_to(root).as_posix(),
+                "loaded": p in loaded,
+                "managed_by_server": p.name == config_files.OVERRIDES_FILE,
+            }
+            for p in config_files.all_config_tomls(root)
+        ]
+        return json.dumps(rows, indent=2)
+    except Exception as e:
+        return _err("read_error", str(e))
+
+
+@mcp.tool()
+@_sandboxable
+async def set_config_file_enabled(file: str, enabled: bool, validate: bool = False) -> str:
+    """Turn a whole extra config file on or off through its top-level `enable` key.
+
+    Core skips a file with `enable = false`. config.toml always loads.
+
+    Args:
+        file: Config-root-relative file, e.g. 'configs/gaming.toml'.
+        enabled: False writes `enable = false`; True removes the key.
+        validate: If True, eval-validate (genflake) after writing; revert on failure.
+    """
+
+    def change() -> str:
+        root = find_config_root()
+        target = config_files.resolve_file(root, file)
+        if target == (root / "config.toml").resolve():
+            raise ValueError("config.toml always loads; it has no enable switch")
+        if not target.is_file():
+            raise FileNotFoundError(f"'{file}' does not exist")
+        doc = tomlkit.loads(target.read_text())
+        if enabled:
+            doc.pop("enable", None)
+        elif "enable" in doc:
+            doc["enable"] = False
+        else:
+            # Top-level keys must come before the first table.
+            body = doc.as_string()
+            target.write_text(f"enable = false\n\n{body}" if body.strip() else "enable = false\n")
+            return f"Disabled {rel(target)}"
+        target.write_text(tomlkit.dumps(doc))
+        return f"{'Enabled' if enabled else 'Disabled'} {rel(target)}"
+
+    return await _mutate(change, validate)
+
+
+@mcp.tool()
+@_sandboxable
+async def validate_config() -> str:
+    """Evaluate the config without building, like `icedos configuration validate`.
+
+    Runs the search-index export, which evaluates every option and module, and
+    refreshes the index used by search_options and search_modules.
+    """
+    try:
+        root = find_config_root()
+        config_files.merged_config(root)
+        rc, stdout, stderr = await export_search_index()
+    except Exception as e:
+        return _err("validation", str(e))
+    if rc != 0:
+        return _err("validation", cli_summarize_log_tail(stderr or stdout))
+    return "Config is valid."
+
+
+@mcp.tool()
+async def config_history(generation: int | None = None) -> str:
+    """System generations with their config snapshots, or one generation's config diff.
+
+    Without `generation`, returns `icedos configuration history --json`. With
+    it, the diff between that generation's config snapshot and the live config.
+
+    Args:
+        generation: Generation number to diff against the live config.
+    """
+    rc, stdout, stderr = await cli_config_history(generation)
+    out = _ANSI_RE.sub("", stdout + (f"\n{stderr}" if stderr else ""))
+    return out if rc == 0 else _err("cli_error", out.strip())
+
+
+@mcp.tool()
+@_sandboxable
+async def format_nix(path: str) -> str:
+    """Format .nix files in place with nixfmt (`icedos nixf`), recursively for a dir.
+
+    A relative path is resolved against the active config root (the sandbox
+    copy in sandbox mode). In sandbox mode paths inside the live config are
+    refused; format a module checkout or the sandbox instead.
+
+    Args:
+        path: File or directory to format.
+    """
+    root = find_config_root()
+    target = (root / Path(path).expanduser()).resolve()
+    if not target.exists():
+        return _err("not_found", f"'{target}' does not exist")
+    if not _live and target.is_relative_to(live_config_root().resolve()):
+        return _err("live_only", "formatting the live config needs a server in live mode")
+    rc, stdout, stderr = await cli_nixf(str(target))
+    out = (stdout + stderr).strip()
+    return f"Formatted {target}" + (f"\n{out}" if out else "") if rc == 0 else _err("cli_error", out)
+
+
 # --- RESOURCES ---
 
+def _on_default_root(fn):
+    """Run a resource on the root a tool call without sandbox= would use."""
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            name = _default_sandbox()
+            if name is None:
+                return await fn(*args, **kwargs)
+            with use_config_root(sandboxes.resolve(name)):
+                return await fn(*args, **kwargs)
+        except Exception as e:
+            return f"Error: {e}"
+
+    return wrapper
+
+
 @mcp.resource("icedos://config")
-def resource_config() -> str:
+@_on_default_root
+async def resource_config() -> str:
     """The full merged config (config.toml + every enabled configs/*.toml)."""
-    try:
-        return get_config_toml_string()
-    except Exception as e:
-        return f"Error: {e}"
+    return get_config_toml_string()
 
 
 @mcp.resource("icedos://config/files")
-def resource_config_files() -> str:
+@_on_default_root
+async def resource_config_files() -> str:
     """The loaded config file set — config.toml + enabled configs/*.toml, in
     merge order, as config-root-relative paths."""
-    try:
-        root = find_config_root()
-        return json.dumps(
-            [str(p.relative_to(root)) for p in config_files.list_config_files(root)],
-            indent=2,
-        )
-    except Exception as e:
-        return f"Error: {e}"
+    root = find_config_root()
+    return json.dumps([str(p.relative_to(root)) for p in config_files.list_config_files(root)], indent=2)
 
 
 @mcp.resource("icedos://options")
+@_on_default_root
 async def resource_options() -> str:
     """All IceDOS options with types, descriptions, and values."""
     await _ensure_search_index()
@@ -1028,6 +1595,7 @@ async def resource_options() -> str:
 
 
 @mcp.resource("icedos://modules")
+@_on_default_root
 async def resource_modules() -> str:
     """Full module graph across all repositories."""
     await _ensure_search_index()
@@ -1086,6 +1654,7 @@ def icedos_overview() -> str:
 
 
 @mcp.tool()
+@_sandboxable
 async def nix_eval(expression: str, raw: bool = False) -> str:
     """Evaluate a Nix expression against the same context as `icedos repl`.
 
@@ -1126,8 +1695,34 @@ async def nix_eval(expression: str, raw: bool = False) -> str:
 
 # ===========================================================================
 
+def _drop_unused_default() -> None:
+    """Delete the default sandbox on exit when it holds no changes worth reviewing."""
+    global _default_name
+    if not _default_name:
+        return
+    try:
+        if not sandboxes.diff(_default_name):
+            sandboxes.delete(_default_name)
+            _default_name = None
+    except Exception as e:
+        logger.warning("could not clean default sandbox %s: %s", _default_name, e)
+
+
 def main() -> None:
     """Entry point."""
+    global _live
+    parser = argparse.ArgumentParser(prog="icedos-mcp-server")
+    _ = parser.add_argument(
+        "--live",
+        action="store_true",
+        help=f"run calls without sandbox= on the real config (same as {LIVE_ENV}=1)",
+    )
+    _live = _live or parser.parse_args().live
+    logger.info("mode: %s", "live" if _live else "sandbox")
+    atexit.register(_drop_unused_default)
+    # sys.exit would hang on the stdio reader thread, so clean up and leave directly.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda *_: (_drop_unused_default(), os._exit(0)))
     mcp.run(transport="stdio")
 
 
