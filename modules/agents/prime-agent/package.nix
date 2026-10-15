@@ -1,6 +1,7 @@
 {
   lib,
   stdenv,
+  stdenvNoCC,
   rustPlatform,
   # Shell-expandable default for PRIME_AGENT_CODING_AGENT_DIR, applied in the wrapper
   # so launches that never see the session variables still find the configured dir.
@@ -70,7 +71,7 @@ let
   );
 
   # Collision-check + write each extra skill's SKILL.md into the payload skills dir.
-  # toFile paths are build inputs, so content edits rebuild the package.
+  # Only the cheap wrapper layer depends on these, so edits never recompile the Rust build.
   extraBuiltinSkillsCheck = lib.concatStringsSep "\n" (
     lib.mapAttrsToList (name: _: ''
       if [ -e "$packageDir/skills/${name}" ]; then
@@ -112,6 +113,21 @@ let
 
   desktopFile = "prime-agent.desktop";
 
+  meta = {
+    description = "Self-improving RLM coding and research agent";
+    homepage = "https://github.com/PrimeIntellect-ai/prime-agent";
+    changelog = "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/${source.rev}";
+    license = lib.licenses.mit;
+    maintainers = [ lib.maintainers.okwilkins ];
+    mainProgram = "prime-agent";
+    platforms = [
+      "aarch64-linux"
+      "x86_64-linux"
+      "aarch64-darwin"
+    ];
+    sourceProvenance = with lib.sourceTypes; [ fromSource ];
+  };
+
   # Assert the shared skill-name rule; names are spliced into bash paths below.
   skillName = import ./lib/skill-name.nix { inherit lib; };
   invalidSkillNames = skillName.invalidSkillNames (builtins.attrNames extraBuiltinSkills);
@@ -120,49 +136,92 @@ assert lib.assertMsg (invalidSkillNames == [ ]) (
   "extraBuiltinSkills names must match the skill-name rule, got: "
   + lib.concatStringsSep ", " invalidSkillNames
 );
-rustPlatform.buildRustPackage (finalAttrs: {
+let
+  # Rust build plus the upstream payload. It takes no module settings, so skill or
+  # wrapper edits reuse the cached build.
+  unwrapped = rustPlatform.buildRustPackage (finalAttrs: {
+    pname = "prime-agent-unwrapped";
+    inherit (source) version;
+    __structuredAttrs = true;
+
+    src = fetchFromGitHub {
+      owner = "PrimeIntellect-ai";
+      repo = "prime-agent";
+      tag = source.rev;
+      inherit (source) hash;
+    };
+
+    inherit (source) cargoHash;
+
+    patches = map (patch: ./patches + "/${patch}") patchSeries;
+
+    # The vendored tree includes every workspace member; ship only the CLI binary.
+    cargoBuildFlags = [
+      "-p"
+      "pa-cli"
+      "--bin"
+      "prime-agent"
+    ];
+
+    # The full suite needs PTYs, tmux and gh; run it in the scratch tree instead.
+    doCheck = false;
+
+    nativeBuildInputs = [ python3 ];
+
+    postInstall = ''
+      packageDir=$out/libexec/prime-agent
+      mkdir -p "$packageDir"
+      mv $out/bin/prime-agent "$packageDir/prime-agent"
+      rmdir $out/bin
+
+      cp -R prime-agent-runtime skills "$packageDir/"
+      rm -rf "$packageDir/prime-agent-runtime/test"
+      cp LICENSE README.md "$packageDir/"
+      cp ${catalog}/models/catalog.v1.json "$packageDir/models.bundled.json"
+      cp ${catalog}/plugins/catalog.v2.json "$packageDir/mcp-services.bundled.json"
+      python3 scripts/release/bundle_catalog.py verify --out "$packageDir"
+    '';
+
+    doInstallCheck = true;
+
+    installCheckPhase = ''
+      runHook preInstallCheck
+
+      requiredPythonVersion=$(grep -oP 'const PYTHON_VERSION: &str = "\K[^"]+' \
+        crates/pa-core/src/kernel/bootstrap/venv.rs)
+      actualVersion=$(${lib.getExe python311} -c 'import sys;print("%d.%d"%sys.version_info[:2])')
+      if [ "$actualVersion" != "$requiredPythonVersion" ]; then
+        echo "ERROR: prime-agent requires Python $requiredPythonVersion but $actualVersion provided"
+        exit 1
+      fi
+      for payload in prime-agent-runtime/pyproject.toml skills models.bundled.json mcp-services.bundled.json; do
+        [ -e "$packageDir/$payload" ] || { echo "ERROR: missing payload $payload" >&2; exit 1; }
+      done
+
+      runHook postInstallCheck
+    '';
+
+    inherit meta;
+  });
+in
+stdenvNoCC.mkDerivation {
   pname = "prime-agent";
-  inherit (source) version;
+  inherit (unwrapped) version;
   __structuredAttrs = true;
 
-  src = fetchFromGitHub {
-    owner = "PrimeIntellect-ai";
-    repo = "prime-agent";
-    tag = source.rev;
-    inherit (source) hash;
-  };
+  dontUnpack = true;
 
-  inherit (source) cargoHash;
+  nativeBuildInputs = [ makeWrapper ];
 
-  patches = map (patch: ./patches + "/${patch}") patchSeries;
+  # The payload is small text, so copy it; PI_PACKAGE_DIR makes the linked binary use it.
+  installPhase = ''
+    runHook preInstall
 
-  # The vendored tree includes every workspace member; ship only the CLI binary.
-  cargoBuildFlags = [
-    "-p"
-    "pa-cli"
-    "--bin"
-    "prime-agent"
-  ];
-
-  # The full suite needs PTYs, tmux and gh; run it in the scratch tree instead.
-  doCheck = false;
-
-  nativeBuildInputs = [
-    makeWrapper
-    python3
-  ];
-
-  postInstall = ''
     packageDir=$out/libexec/prime-agent
     mkdir -p "$packageDir"
-    mv $out/bin/prime-agent "$packageDir/prime-agent"
-
-    cp -R prime-agent-runtime skills "$packageDir/"
-    rm -rf "$packageDir/prime-agent-runtime/test"
-    cp LICENSE README.md "$packageDir/"
-    cp ${catalog}/models/catalog.v1.json "$packageDir/models.bundled.json"
-    cp ${catalog}/plugins/catalog.v2.json "$packageDir/mcp-services.bundled.json"
-    python3 scripts/release/bundle_catalog.py verify --out "$packageDir"
+    cp -R ${unwrapped}/libexec/prime-agent/. "$packageDir/"
+    chmod -R u+w "$packageDir"
+    ln -sf ${unwrapped}/libexec/prime-agent/prime-agent "$packageDir/prime-agent"
 
     ${lib.optionalString codeReview ''
       if [ -e "$packageDir/skills/code-review" ]; then
@@ -189,41 +248,15 @@ rustPlatform.buildRustPackage (finalAttrs: {
     ${lib.optionalString desktopEntry ''
       ${installDesktopEntry { inherit desktopItem desktopFile; }}
     ''}
+
+    runHook postInstall
   '';
 
   doInstallCheck = true;
   nativeInstallCheckInputs = [ versionCheckHook ];
   versionCheckProgramArg = "--version";
 
-  installCheckPhase = ''
-    runHook preInstallCheck
+  passthru = { inherit unwrapped; };
 
-    requiredPythonVersion=$(grep -oP 'const PYTHON_VERSION: &str = "\K[^"]+' \
-      crates/pa-core/src/kernel/bootstrap/venv.rs)
-    actualVersion=$(${lib.getExe python311} -c 'import sys;print("%d.%d"%sys.version_info[:2])')
-    if [ "$actualVersion" != "$requiredPythonVersion" ]; then
-      echo "ERROR: prime-agent requires Python $requiredPythonVersion but $actualVersion provided"
-      exit 1
-    fi
-    for payload in prime-agent-runtime/pyproject.toml skills models.bundled.json mcp-services.bundled.json; do
-      [ -e "$packageDir/$payload" ] || { echo "ERROR: missing payload $payload" >&2; exit 1; }
-    done
-
-    runHook postInstallCheck
-  '';
-
-  meta = {
-    description = "Self-improving RLM coding and research agent";
-    homepage = "https://github.com/PrimeIntellect-ai/prime-agent";
-    changelog = "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/${source.rev}";
-    license = lib.licenses.mit;
-    maintainers = [ lib.maintainers.okwilkins ];
-    mainProgram = "prime-agent";
-    platforms = [
-      "aarch64-linux"
-      "x86_64-linux"
-      "aarch64-darwin"
-    ];
-    sourceProvenance = with lib.sourceTypes; [ fromSource ];
-  };
-})
+  inherit meta;
+}

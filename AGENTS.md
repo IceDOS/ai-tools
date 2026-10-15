@@ -43,7 +43,8 @@ basic-memory, chrome-devtools, context7, kwin, nixos, rea, signal, each named
   sets `programs.claude-code.rules` (mkDefault per entry).
 - `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: prime-agent
   `skills.extra-builtin`, antigravity `~/.gemini/antigravity-cli/skills/`, opencode
-  `programs.opencode.skills`, Claude Code `programs.claude-code.skills`.
+  `programs.opencode.skills`, Claude Code `programs.claude-code.skills`. prime-agent bakes
+  them into a wrapper layer over `prime-agent.unwrapped`, so skill edits never recompile Rust.
 - Per-agent options of the same name win over the shared entry
   (`antigravity.{rules,skills}`, `opencode.skills`, `prime-agent.extensions.rules`,
   `prime-agent.skills.extra-builtin`).
