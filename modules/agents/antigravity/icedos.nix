@@ -207,7 +207,16 @@
 
                 transformServer =
                   s:
-                  if (s.command or null) != null then
+                  let
+                    timeoutAttrs =
+                      if (s.timeoutSeconds or null) != null then
+                        { inherit (s) timeoutSeconds; }
+                      else if (s.timeout or null) != null then
+                        { timeoutSeconds = s.timeout / 1000; }
+                      else
+                        { };
+                  in
+                  (if (s.command or null) != null then
                     {
                       inherit (s) command;
                     }
@@ -225,7 +234,8 @@
                       inherit (s) serverUrl;
                     }
                   else
-                    s;
+                    s)
+                  // timeoutAttrs;
 
                 mcpConfig = {
                   mcpServers = mapAttrs (_: transformServer) enabledServers;
