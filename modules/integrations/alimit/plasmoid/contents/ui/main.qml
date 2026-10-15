@@ -36,8 +36,8 @@ PlasmoidItem {
         var d = Math.floor(s / 86400); s -= d * 86400;
         var h = Math.floor(s / 3600);  s -= h * 3600;
         var m = Math.floor(s / 60);    s -= m * 60;
-        if (d) return d + "d" + h + "h";
-        if (h) return h + "h" + m + "m";
+        if (d) return h ? d + "d" + h + "h" : d + "d";
+        if (h) return m ? h + "h" + m + "m" : h + "h";
         if (m) return m + "m";
         return s + "s";
     }

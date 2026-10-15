@@ -175,19 +175,19 @@ class TestRenderStatusline(unittest.TestCase):
 
     def test_shows_ends_and_resets(self):
         line = cli.render_statusline([self._rate()], 0, color=False)
-        self.assertEqual(line, "5h 40% 30/h 󰗎 2h0m 󰦛 3h0m")
+        self.assertEqual(line, "5h 40% 30/h 󰗎 2h 󰦛 3h")
 
     def test_weekly_shows_exchange(self):
         r = self._rate(window="seven_day", will_exhaust_before_reset=False, exchange=8.25)
-        self.assertEqual(cli.render_statusline([r], 0, color=False), "wk 40% 30/h 1%=8.2% 5h 󰦛 3h0m")
+        self.assertEqual(cli.render_statusline([r], 0, color=False), "wk 40% 30/h 1%=8.2% 5h 󰦛 3h")
 
     def test_idle_window_omits_rate_and_ends(self):
         r = self._rate(per_min=0.0, per_hour=0.0, runway_min=None, will_exhaust_before_reset=False)
-        self.assertEqual(cli.render_statusline([r], 0, color=False), "5h 40% 󰦛 3h0m")
+        self.assertEqual(cli.render_statusline([r], 0, color=False), "5h 40% 󰦛 3h")
 
     def test_ends_hidden_when_reset_comes_first(self):
         r = self._rate(runway_min=600.0, will_exhaust_before_reset=False)
-        self.assertEqual(cli.render_statusline([r], 0, color=False), "5h 40% 30/h 󰦛 3h0m")
+        self.assertEqual(cli.render_statusline([r], 0, color=False), "5h 40% 30/h 󰦛 3h")
 
     def test_shared_reset_printed_once(self):
         a = self._rate(window="seven_day", will_exhaust_before_reset=False, per_hour=0.0)
@@ -199,21 +199,21 @@ class TestRenderStatusline(unittest.TestCase):
         self.assertEqual([[r.window for r in rs] for _, rs in groups],
                          [["five_hour"], ["seven_day", SCOPED_FABLE]])
         line = cli.render_statusline([c, a, b], 0, color=False)
-        self.assertTrue(line.startswith("5h 40% 󰦛 1h0m │ "))
-        self.assertTrue(line.endswith("󰦛 3h0m"))
+        self.assertTrue(line.startswith("5h 40% 󰦛 1h │ "))
+        self.assertTrue(line.endswith("󰦛 3h"))
 
     def test_at_cap_window_omits_zero_ends(self):
         # 100% used leaves no runway; "󰗎 0s" is noise on every surface.
         at_cap = self._rate(util=100.0, runway_min=0.0)
         self.assertEqual(cli.render_statusline([at_cap], 0, color=False),
-                         "5h 100% 30/h 󰦛 3h0m")
+                         "5h 100% 30/h 󰦛 3h")
         self.assertIn("—", cli.render_table([at_cap], 0))
         self.assertNotIn("0s", cli.render_table([at_cap], 0))
 
     def test_sub_second_runway_treated_as_zero(self):
         r = self._rate(runway_min=0.001)  # 60ms, would format as "0s"
         self.assertEqual(cli.render_statusline([r], 0, color=False),
-                         "5h 40% 30/h 󰦛 3h0m")
+                         "5h 40% 30/h 󰦛 3h")
 
     def test_table_borders_spans_and_rules(self):
         rows = [[("head", 3)], ["ab", cli._c("31", "c", True), "d"], [("e", 2), "f"]]
@@ -244,7 +244,7 @@ class TestRenderStatusline(unittest.TestCase):
         zero = self._rate(window="seven_day", util=0.0, per_min=0.0, per_hour=0.0,
                           runway_min=None, will_exhaust_before_reset=False)
         busy = self._rate(will_exhaust_before_reset=False, per_hour=0.0)
-        self.assertEqual(cli.render_statusline([busy, zero], 0, color=False), "5h 40% 󰦛 3h0m")
+        self.assertEqual(cli.render_statusline([busy, zero], 0, color=False), "5h 40% 󰦛 3h")
         self.assertEqual(cli.render_statusline([zero], 0, color=False), "alimit: no usage")
         self.assertNotIn("weekly", cli.render_table([busy, zero], 0))
         windows = json.loads(cli.render_json([busy, zero], 0))["windows"]

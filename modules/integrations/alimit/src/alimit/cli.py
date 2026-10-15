@@ -40,10 +40,11 @@ def fmt_dur(ms) -> str:
     d, s = divmod(s, 86400)
     h, s = divmod(s, 3600)
     m, s = divmod(s, 60)
+    # A zero second unit is dropped: 5d, not 5d0h.
     if d:
-        return f"{d}d{h}h"
+        return f"{d}d{h}h" if h else f"{d}d"
     if h:
-        return f"{h}h{m}m"
+        return f"{h}h{m}m" if m else f"{h}h"
     if m:
         return f"{m}m"
     return f"{s}s"

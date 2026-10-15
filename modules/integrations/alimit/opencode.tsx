@@ -27,8 +27,8 @@ function fmtDur(ms: number | null): string {
   const h = Math.floor(s / 3600)
   s -= h * 3600
   const m = Math.floor(s / 60)
-  if (d) return `${d}d${h}h`
-  if (h) return `${h}h${m}m`
+  if (d) return h ? `${d}d${h}h` : `${d}d`
+  if (h) return m ? `${h}h${m}m` : `${h}h`
   return m ? `${m}m` : `${s}s`
 }
 
