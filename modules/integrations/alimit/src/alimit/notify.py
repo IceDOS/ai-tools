@@ -75,6 +75,8 @@ def check(con, rlist, now_ms: int | None = None, style: AlertStyle = DEFAULT_STY
         store.set_meta(con, key + "_ms", now)
         store.set_meta(con, key + "_util", r.util)
         label = config.label(r.window)
+        if config.provider_of(r.window) == "claude":
+            label = "Claude · " + label  # other providers already carry their name
         if cond == "exhaust":
             _send(
                 con,

@@ -69,6 +69,13 @@ class TestRepeatRules(unittest.TestCase):
     def test_near_zero_pace_is_not_a_pace_warning(self):
         self.assertIsNone(notify._condition(self._rate(50.0, per_hour=0.01, exhaust=True)))
 
+    def test_body_names_the_provider(self):
+        for window, prefix in (("five_hour", "Claude · 5-hour"), ("ollama/5h", "Ollama")):
+            r = mock.Mock(window=window, util=90.0, per_hour=0.0, will_exhaust_before_reset=False)
+            with mock.patch.object(notify, "_send") as send:
+                notify.check(self.con, [r], 0)
+            self.assertTrue(send.call_args[0][3].startswith(prefix), send.call_args[0][3])
+
     def test_reset_rearms(self):
         self._fires(self._rate(100.0), 0)
         self._fires(self._rate(0.0), 1)
