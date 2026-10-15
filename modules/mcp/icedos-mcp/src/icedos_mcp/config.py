@@ -352,7 +352,7 @@ def list_repositories() -> list[dict[str, Any]]:
                 row["files"].append(rel(f))
             if r.get("overrideUrl") and not row["override_url"]:
                 row["override_url"] = r["overrideUrl"]
-            row["modules"] += r.get("modules", [])
+            row["modules"] += [m for m in r.get("modules", []) if m not in row["modules"]]
             row["fetch_dependencies"] &= r.get("fetchDependencies", True)
             row["fetch_optional_dependencies"] |= r.get("fetchOptionalDependencies", False)
             row["patches"] += r.get("patches", [])
