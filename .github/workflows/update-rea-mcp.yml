@@ -1,0 +1,18 @@
+name: Update rea-agents
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: rea-mcp
+      paths: modules/mcp/rea
+      command: nix-shell modules/mcp/rea/update.sh
+      version-file: modules/mcp/rea/source.json
+    secrets: inherit

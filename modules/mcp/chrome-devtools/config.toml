@@ -1,0 +1,30 @@
+[icedos.ai-tools.chrome-devtools-mcp]
+# Browser binary the server drives. Empty uses nixpkgs chromium.
+executablePath = ""
+
+# Run the browser with a temporary profile that is deleted on exit.
+isolated = true
+
+# Send Google usage statistics.
+usageStatistics = false
+
+# Tool-call timeout in milliseconds for agents that honour it.
+timeout = 600000
+
+# Extra chrome-devtools-mcp arguments.
+extraArgs = []
+
+# Skills read from the packaged npm release (skills/), references inlined.
+upstreamSkills = [
+  "a11y-debugging",
+  "chrome-devtools",
+  "chrome-devtools-cli",
+  "cookie-debugging",
+  "debug-optimize-lcp",
+  "memory-leak-debugging",
+  "troubleshooting",
+]
+
+# Extra skills, name = full SKILL.md content. A name here replaces the upstream
+# skill of the same name. Both go to the shared icedos.ai-tools.skills pool.
+[icedos.ai-tools.chrome-devtools-mcp.skills]

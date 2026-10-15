@@ -9,3 +9,9 @@
 # Written for claude-code, antigravity, opencode and prime-agent. A per-agent
 # skill of the same name wins.
 [icedos.ai-tools.skills]
+
+# Shared MCP server registry: name = server entry (command/args/env or url).
+# Each MCP module adds its own. Every hm user gets them in programs.mcp.servers,
+# which all agent modules read, and /etc/mcp/servers.json lists them for agents
+# outside Home Manager.
+[icedos.ai-tools.mcp-servers]

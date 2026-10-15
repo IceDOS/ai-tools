@@ -1,0 +1,10 @@
+[icedos.ai-tools.rea-mcp]
+# Tool-call timeout in milliseconds for agents that honour it.
+timeout = 600000
+
+# Skills read from the packaged npm release (skills/), references inlined.
+upstreamSkills = ["reverse-engineer-anything"]
+
+# Extra skills, name = full SKILL.md content. A name here replaces the upstream
+# skill of the same name. Both go to the shared icedos.ai-tools.skills pool.
+[icedos.ai-tools.rea-mcp.skills]

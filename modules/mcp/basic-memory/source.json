@@ -1,0 +1,15 @@
+{
+  "version": "0.23.2",
+  "rev": "v0.23.2",
+  "hash": "sha256-etL0RHkSNFzT00p3yCBtH92XDaqwakDO8Eurf+dS3ug=",
+  "fastmcp-slim": {
+    "version": "4.0.0b1",
+    "url": "https://files.pythonhosted.org/packages/90/5d/fbe192d2ab50bb31b284fd0eb6c72d4347df7a57d836bee4f1973ffd1d7d/fastmcp_slim-4.0.0b1-py3-none-any.whl",
+    "hash": "sha256-3ZB6PbWi9HnKlYwwFX4ie097NApW0zPrkd6VcZJUWXo="
+  },
+  "fastmcp": {
+    "version": "4.0.0b1",
+    "url": "https://files.pythonhosted.org/packages/2c/66/41b503ef852eff83f3f0c04f46cd1fc738c5374fd509384fc6b96e45918f/fastmcp-4.0.0b1-py3-none-any.whl",
+    "hash": "sha256-1m63sHY///KuD8Vzd46iVgTct+WXaeWvr5hRqAbrESk="
+  }
+}

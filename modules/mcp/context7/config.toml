@@ -1,0 +1,11 @@
+[icedos.ai-tools.context7-mcp]
+# Remote Context7 MCP endpoint.
+url = "https://mcp.context7.com/mcp"
+
+# Skills read from the nixpkgs context7-mcp source (skills/). find-docs and
+# context7-cli there target the ctx7 CLI, which this module does not install.
+upstreamSkills = ["context7-mcp"]
+
+# Extra skills, name = full SKILL.md content. A name here replaces the upstream
+# skill of the same name. Both go to the shared icedos.ai-tools.skills pool.
+[icedos.ai-tools.context7-mcp.skills]

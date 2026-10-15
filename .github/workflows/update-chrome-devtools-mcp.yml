@@ -1,0 +1,18 @@
+name: Update chrome-devtools-mcp
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "40 3 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: chrome-devtools-mcp
+      paths: modules/mcp/chrome-devtools
+      command: nix-shell modules/mcp/chrome-devtools/update.sh
+      version-file: modules/mcp/chrome-devtools/source.json
+    secrets: inherit

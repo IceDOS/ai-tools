@@ -1,10 +1,20 @@
 { icedosLib, lib, ... }:
 
+let
+  defaults = (lib.importTOML ./config.toml).icedos.ai-tools.mcp-server;
+in
 {
-  # Skills for this module (name = SKILL.md), loaded by every agent via icedos.ai-tools.skills.
-  options.icedos.ai-tools.mcp-server.skills = icedosLib.mkAttrsOfOption {
-    default = (lib.importTOML ./config.toml).icedos.ai-tools.mcp-server.skills;
-  } lib.types.lines;
+  options.icedos.ai-tools.mcp-server = {
+    # Tool-call timeout in milliseconds for agents that honour it.
+    timeout = icedosLib.mkIntBetweenOption {
+      path = "icedos.ai-tools.mcp-server.timeout";
+      source = ./config.toml;
+      default = defaults.timeout;
+    } 1000 86400000;
+
+    # Skills for this module (name = SKILL.md), loaded by every agent via icedos.ai-tools.skills.
+    skills = icedosLib.mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
+  };
 
   outputs.nixosModules =
     { ... }:
@@ -51,6 +61,15 @@
           icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) config.icedos.ai-tools.mcp-server.skills;
 
           environment.systemPackages = [ icedosMcpServer ];
+
+          icedos.ai-tools.mcp-servers.icedos = {
+            command = "icedos";
+            args = [
+              "mcp"
+              "serve"
+            ];
+            inherit (config.icedos.ai-tools.mcp-server) timeout;
+          };
 
           icedos.system.toolset.commands = [
             {

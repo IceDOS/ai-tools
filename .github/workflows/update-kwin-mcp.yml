@@ -1,0 +1,18 @@
+name: Update kwin-mcp
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "50 3 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: kwin-mcp
+      paths: modules/mcp/kwin
+      command: nix-shell modules/mcp/kwin/update.sh
+      version-file: modules/mcp/kwin/source.json
+    secrets: inherit

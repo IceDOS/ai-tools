@@ -1,3 +1,7 @@
+[icedos.ai-tools.mcp-server]
+# Tool-call timeout in milliseconds for agents that honour it. Rebuilds run long.
+timeout = 3600000
+
 # Skills for this module, name = full SKILL.md content. Added to the shared
 # icedos.ai-tools.skills pool, so every agent loads them.
 [icedos.ai-tools.mcp-server.skills]

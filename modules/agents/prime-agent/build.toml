@@ -1,5 +1,5 @@
 [[icedos.repositories]]
-url = "github:icedos/apps"
+url = "github:icedos/ai-tools"
 fetchDependencies = false
 modules = ["prime-agent"]
 

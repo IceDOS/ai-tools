@@ -16,20 +16,23 @@
 ## Purpose
 AI agents, local model servers and their glue: `claude-code`, `antigravity`, `opencode`, `prime-agent`
 (agents), `llamacpp`, `ollama` (model servers), `peon-ping` (agent-event audio),
-`mcp-server` (`icedos mcp serve`), `alimit` (usage limits for every agent and provider),
+`mcp-server` (`icedos mcp serve`), one module per MCP server (`basic-memory-mcp`,
+`chrome-devtools-mcp`, `context7-mcp`, `kwin-mcp`, `nixos-mcp`, `rea-mcp`,
+`signal-mcp`), `alimit` (usage limits for every agent and provider),
 `ai-accounts` (several accounts per agent), `agent-launch` (fzf agent picker) and
 `code-intelligence` (per-language LSP skills).
 
 ## Namespace
-Every option here lives under `icedos.ai-tools`: the shared `rules` and `skills`, and one
+Every option here lives under `icedos.ai-tools`: the shared `rules`, `skills` and `mcp-servers`, and one
 attrset per module (`icedos.ai-tools.prime-agent`, ...).
 
 ## Layout
 `modules/<category>/<name>/{icedos.nix,config.toml}`; `flake.nix` exposes them via
 `icedosLib.scanModules { path = ./modules; filename = "icedos.nix"; }`, which recurses, and
 `meta.name` (not the folder) names the module. The categories are `agents` (antigravity,
-claude-code, opencode, prime-agent), `models` (llamacpp, ollama), `mcp` (icedos-mcp, whose
-module name is `mcp-server`) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence, peon-ping).
+claude-code, opencode, prime-agent), `models` (llamacpp, ollama), `mcp` (one folder per MCP server: icedos-mcp, whose module name is `mcp-server`, and
+basic-memory, chrome-devtools, context7, kwin, nixos, rea, signal, each named
+`<folder>-mcp` except `kwin-mcp`; `mcp/lib` holds their shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence, peon-ping).
 `modules/default` loads whenever the repo is listed and owns the shared options.
 
 ## Shared options (`icedos.ai-tools.*`)
@@ -44,8 +47,36 @@ module name is `mcp-server`) and `integrations` (agent-launch, ai-accounts, alim
 - Per-agent options of the same name win over the shared entry
   (`antigravity.{rules,skills}`, `opencode.skills`, `prime-agent.extensions.rules`,
   `prime-agent.skills.extra-builtin`).
-- Non-agent modules (`llamacpp`, `ollama`, `peon-ping`, `mcp-server`) have a `skills`
+- Non-agent modules (`llamacpp`, `ollama`, `peon-ping` and the `mcp` modules) have a `skills`
   option that adds to `icedos.ai-tools.skills`, so a skill ships with the module it documents.
+- `icedos.ai-tools.mcp-servers` — name = `programs.mcp.servers` entry. `default` gives every hm
+  user these servers (mkDefault per entry, so a same-named `programs.mcp.servers` entry wins),
+  which every agent module reads, and writes `/etc/mcp/servers.json` (`{"mcpServers": ...}`,
+  remote ones with `type = "http"`) for agents outside Home Manager.
+
+## MCP modules
+- Each one packages its server as a real derivation, puts it on the system PATH, registers it
+  in `mcp-servers` under the server name agents already use (`basic-memory`, `chrome-devtools`,
+  `context7`, `icedos`, `kwin-mcp`, `nixos`, `rea`, `signal-mcp`) and ships
+  its skills.
+- Skills that upstream ships come from the package source: `upstreamSkills` lists the names,
+  `lib/upstream-skills.nix` reads `SKILL.md` and appends `references/*.md`. They read
+  `${package.src}` (`pkgs.context7-mcp.src` for context7), an IFD that only needs the fetch,
+  so skills always match the packaged version. basic-memory builds from its GitHub release
+  for this, since its wheel leaves out `skills/`. The module's own `skills`
+  replaces an upstream skill of the same name.
+- `lib/python.nix` is Python 3 with the MCP Python SDK 2.x (nixpkgs ships 1.x), used by
+  `kwin-mcp` and `basic-memory-mcp`; `basic-memory-mcp` adds the FastMCP release it pins on top.
+  `lib/python-bin.nix` runs an entry point through `python.withPackages`, since kwin-mcp
+  re-runs `sys.executable -m kwin_mcp.*` and needs its packages in the child.
+- `rea-mcp` builds the npm tarball with `package-lock.json` generated from the trimmed
+  `package.json` its `postPatch` writes (frida dropped). Its `update.sh` regenerates the lock
+  with the same jq trim, so keep the two filters identical.
+- Pins not in nixpkgs live in JSON next to the package: `source.json` per server and
+  `lib/python-sdk.json` for the SDK wheels. Each has an `update.sh` (`lib/update-python-sdk.sh`
+  for the SDK) and an `update-<module>.yml` workflow over `module-update.yml`. kwin-mcp and
+  signal-mcp track upstream `main`, which runs ahead of their tags; basic-memory follows its
+  latest release and the exact FastMCP version its `pyproject.toml` pins.
 
 ## Agent registry
 `agent-launch` owns `icedos.ai-tools.agent-launch.agents.<name>` (`command`, `label`,

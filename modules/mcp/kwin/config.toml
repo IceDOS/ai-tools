@@ -1,0 +1,7 @@
+[icedos.ai-tools.kwin-mcp]
+# Skills read from the packaged source (integrations/claude-code/skills).
+upstreamSkills = ["kwin-desktop-automation"]
+
+# Extra skills, name = full SKILL.md content. A name here replaces the upstream
+# skill of the same name. Both go to the shared icedos.ai-tools.skills pool.
+[icedos.ai-tools.kwin-mcp.skills]

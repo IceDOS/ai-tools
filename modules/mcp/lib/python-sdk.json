@@ -1,0 +1,22 @@
+{
+  "httpcore2": {
+    "version": "2.13.1",
+    "url": "https://files.pythonhosted.org/packages/09/ba/a4568248771ce81957bfb7cc600264a40fbcda092391ee1c415c50be4bea/httpcore2-2.13.1-py3-none-any.whl",
+    "hash": "sha256-4eBdTyX319SWv7lnSPb0tnZXsD2gabOmjDYGnz23PQo="
+  },
+  "httpx2": {
+    "version": "2.13.1",
+    "url": "https://files.pythonhosted.org/packages/d8/9c/6fe8931fd9f381042a9e4c7d5a7b4cbf7016b252bec0c99a49fce42c3326/httpx2-2.13.1-py3-none-any.whl",
+    "hash": "sha256-bf9Q+rwnDuX9JdhF0LB47SBWRXl0TW2WKFCXWZbS+aQ="
+  },
+  "mcp-types": {
+    "version": "2.3.0",
+    "url": "https://files.pythonhosted.org/packages/ce/48/32583066b155bb5d4507e7887dc88ee23118cc4de8e2a12870c49719e2a8/mcp_types-2.3.0-py3-none-any.whl",
+    "hash": "sha256-lo79va7fqwatrkDTeKNDlfEJDFkh1L48nN4oOq922R0="
+  },
+  "mcp": {
+    "version": "2.3.0",
+    "url": "https://files.pythonhosted.org/packages/20/d7/4a2878f128df729db3ca04e71bfce26405cc2e0c9ebe19c592feeb4c61b9/mcp-2.3.0-py3-none-any.whl",
+    "hash": "sha256-3QxEwInRZFPorjGjh3oAVNeiMUyqqB9eBUG5sXNLI3c="
+  }
+}

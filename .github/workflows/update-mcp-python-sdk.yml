@@ -1,0 +1,19 @@
+name: Update MCP Python SDK
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "20 4 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: mcp-python-sdk
+      paths: modules/mcp/lib/python-sdk.json
+      command: nix-shell modules/mcp/lib/update-python-sdk.sh
+      version-file: modules/mcp/lib/python-sdk.json
+      version-jq: '.mcp.version'
+    secrets: inherit

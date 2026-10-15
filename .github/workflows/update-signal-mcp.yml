@@ -1,0 +1,18 @@
+name: Update signal-mcp
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "10 4 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: signal-mcp
+      paths: modules/mcp/signal
+      command: nix-shell modules/mcp/signal/update.sh
+      version-file: modules/mcp/signal/source.json
+    secrets: inherit

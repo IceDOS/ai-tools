@@ -1,0 +1,20 @@
+[icedos.ai-tools.basic-memory-mcp]
+# Config dir, relative to $HOME (BASIC_MEMORY_CONFIG_DIR).
+configDir = ".config/basic-memory"
+
+# Default notes and database dir, relative to $HOME (BASIC_MEMORY_HOME).
+dataDir = ".local/share/basic-memory"
+
+# Ignore Basic Memory Cloud and always use the local database.
+forceLocal = true
+
+# Skills read from the release source (skills/), references inlined. Available:
+# memory-capture, memory-ci-capture, memory-continue, memory-curate,
+# memory-defrag, memory-ingest, memory-lifecycle, memory-literary-analysis,
+# memory-metadata-search, memory-notes, memory-onboarding, memory-reflect,
+# memory-research, memory-schema, memory-tasks.
+upstreamSkills = ["memory-capture", "memory-continue", "memory-notes"]
+
+# Extra skills, name = full SKILL.md content. A name here replaces the upstream
+# skill of the same name. Both go to the shared icedos.ai-tools.skills pool.
+[icedos.ai-tools.basic-memory-mcp.skills]
