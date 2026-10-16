@@ -2,15 +2,17 @@ Index: prime-agent-src/crates/pa-ai/src/providers/anthropic/mod.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/anthropic/mod.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/anthropic/mod.rs
-@@ -410,8 +410,9 @@ pub(crate) fn build_request_headers(
+@@ -410,8 +410,11 @@ pub(crate) fn build_request_headers(
          }
      };
  
 -    // withOpenCodeHeaders: session header for opencode providers.
 -    if model.provider == "opencode" || model.provider == "opencode-go" {
-+    // withOpenCodeHeaders: session_id plus zen's x-opencode-session (opencode providers only).
-+    if let Some((name, value)) = super::opencode_session::session_header(&model.provider, session_id) {
++    // withOpenCodeHeaders: session_id plus opencode session headers (opencode providers only).
++    for (name, value) in super::opencode_session::session_headers(&model.provider, session_id) {
 +        default_headers.entry(name).or_insert(json!(value));
++    }
++    if model.provider == "opencode" || model.provider == "opencode-go" {
          if let Some(session_id) = session_id {
              default_headers.insert("session_id".into(), json!(session_id));
          }
@@ -22,7 +24,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/google.rs
          if let Some(session_id) = &options.base.session_id {
              headers.push(("session_id".into(), session_id.clone()));
          }
-+        crate::providers::opencode_session::push_session_header(
++        crate::providers::opencode_session::push_session_headers(
 +            &mut headers,
 +            &model.provider,
 +            options.base.session_id.as_deref(),
@@ -41,20 +43,61 @@ Index: prime-agent-src/crates/pa-ai/src/providers/mod.rs
 +pub(crate) mod opencode_session;
  pub mod simple_options;
  pub mod transform_messages;
+Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/mod.rs
++++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/mod.rs
+@@ -331,7 +331,14 @@ pub fn stream_openai_completions(
+ ) -> AssistantMessageEventStream {
+     let api_key = options
+         .and_then(|options| options.base.api_key.clone())
+-        .or_else(|| get_env_api_key(&model.provider));
++        .or_else(|| get_env_api_key(&model.provider))
++        .or_else(|| {
++            if model.provider == "opencode" || model.provider == "opencode-zen" || model.provider == "opencode_zen" {
++                Some("public".to_string())
++            } else {
++                None
++            }
++        });
+     let Some(api_key) = api_key else {
+         let (writer, reader) = create_assistant_message_event_stream();
+         let mut message = AssistantMessage {
 Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/params.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/params.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/params.rs
-@@ -351,8 +351,8 @@ pub(crate) fn build_headers(
+@@ -351,8 +351,14 @@ pub(crate) fn build_headers(
          }
      }
  
-+    crate::providers::opencode_session::push_session_header(&mut headers, &model.provider, conversation_id);
-     headers.insert(0, ("Authorization".into(), format!("Bearer {api_key}")));
++    crate::providers::opencode_session::push_session_headers(&mut headers, &model.provider, conversation_id);
++    let is_opencode = model.provider == "opencode" || model.provider == "opencode-zen" || model.provider == "opencode_zen";
++    let effective_key = if is_opencode && api_key.is_empty() {
++        "public"
++    } else {
++        api_key
++    };
++    headers.insert(0, ("Authorization".into(), format!("Bearer {effective_key}")));
+-    headers.insert(0, ("Authorization".into(), format!("Bearer {api_key}")));
 -    let _ = conversation_id;
      headers
  }
  
+Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/stream.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/stream.rs
++++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/stream.rs
+@@ -581,7 +581,8 @@ async fn run_stream(
+         }
+     }
+ 
+-    let url = format!("{}/chat/completions", model.base_url.trim_end_matches('/'));
++    let base_url = crate::providers::opencode_session::sanitize_opencode_url(&model.provider, &model.base_url);
++    let url = format!("{base_url}/chat/completions");
+     let headers = build_headers(
+         model,
+         &api_key,
 Index: prime-agent-src/crates/pa-ai/src/providers/openai_responses.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/openai_responses.rs
@@ -63,7 +106,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_responses.rs
              headers.push((name.clone(), value.clone()));
          }
      }
-+    crate::providers::opencode_session::push_session_header(
++    crate::providers::opencode_session::push_session_headers(
 +        &mut headers,
 +        &model.provider,
 +        options.base.session_id.as_deref(),
@@ -75,7 +118,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 ===================================================================
 --- /dev/null
 +++ prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,208 @@
 +use std::fmt::Write as _;
 +use std::sync::OnceLock;
 +
@@ -122,36 +165,90 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +    out
 +}
 +
-+// Header for opencode provider request; calls without session id share a process id.
 +#[must_use]
-+pub fn session_header(provider: &str, session_id: Option<&str>) -> Option<(String, String)> {
-+    static PROCESS_ID: OnceLock<String> = OnceLock::new();
-+    if !is_opencode_provider(provider) {
-+        return None;
++pub fn sanitize_opencode_url(provider: &str, base_url: &str) -> String {
++    let trimmed = base_url.trim_end_matches('/');
++    if is_opencode_provider(provider) && trimmed.contains("opencode.ai/zen/v1") {
++        trimmed.replace("opencode.ai/zen/v1", "opencode.ai/inference/v1")
++    } else {
++        trimmed.to_string()
 +    }
-+    let source = match session_id.filter(|id| !id.is_empty()) {
-+        Some(id) => id.to_string(),
-+        None => PROCESS_ID
-+            .get_or_init(|| format!("prime-agent-{}-{}", std::process::id(), now_millis()))
-+            .clone(),
-+    };
-+    Some((SESSION_HEADER.to_string(), opencode_session_id(&source)))
 +}
 +
-+// Append header unless caller already set one (a models.json pin wins).
-+pub fn push_session_header(
++// Headers for opencode provider request; calls without session id share a process id.
++#[must_use]
++pub fn session_headers(provider: &str, session_id: Option<&str>) -> Vec<(String, String)> {
++    let mut headers = Vec::new();
++    push_session_headers(&mut headers, provider, session_id);
++    headers
++}
++
++// Append headers required by OpenCode inference gate.
++pub fn push_session_headers(
 +    headers: &mut Vec<(String, String)>,
 +    provider: &str,
 +    session_id: Option<&str>,
 +) {
-+    if headers
-+        .iter()
-+        .any(|(name, _)| name.eq_ignore_ascii_case(SESSION_HEADER))
-+    {
++    static PROCESS_ID: OnceLock<String> = OnceLock::new();
++    if !is_opencode_provider(provider) {
 +        return;
 +    }
-+    if let Some(header) = session_header(provider, session_id) {
-+        headers.push(header);
++
++    // User-Agent: rewrite legacy 1.x or push 2.0.29
++    let mut has_ua = false;
++    for (name, val) in headers.iter_mut() {
++        if name.eq_ignore_ascii_case("User-Agent") {
++            has_ua = true;
++            if val.starts_with("opencode/1.") || val == "opencode" {
++                *val = "opencode/latest/2.0.29/cli".to_string();
++            }
++        }
++    }
++    if !has_ua {
++        headers.push(("User-Agent".to_string(), "opencode/latest/2.0.29/cli".to_string()));
++    }
++
++    // Clean up stale or non-ses_ session headers (e.g. legacy UUID pins)
++    headers.retain(|(name, val)| {
++        if name.eq_ignore_ascii_case(SESSION_HEADER) {
++            val.starts_with("ses_")
++        } else {
++            true
++        }
++    });
++
++    let sid = if let Some((_, val)) = headers
++        .iter()
++        .find(|(name, _)| name.eq_ignore_ascii_case(SESSION_HEADER))
++    {
++        val.clone()
++    } else {
++        let source = match session_id.filter(|id| !id.is_empty()) {
++            Some(id) => id.to_string(),
++            None => PROCESS_ID
++                .get_or_init(|| format!("prime-agent-{}-{}", std::process::id(), now_millis()))
++                .clone(),
++        };
++        let val = opencode_session_id(&source);
++        headers.push((SESSION_HEADER.to_string(), val.clone()));
++        val
++    };
++
++    for header_name in ["x-opencode-session-id", "x-session-affinity", "x-session-id"] {
++        if !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(header_name)) {
++            headers.push((header_name.to_string(), sid.clone()));
++        }
++    }
++
++    if !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-opencode-client")) {
++        headers.push(("x-opencode-client".to_string(), "cli".to_string()));
++    }
++
++    if !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-opencode-project")) {
++        let cwd = std::env::current_dir().unwrap_or_default();
++        let hex_full = format!("{:x}", Sha256::digest(cwd.to_string_lossy().as_bytes()));
++        let hex_40 = if hex_full.len() >= 40 { &hex_full[..40] } else { &hex_full };
++        headers.push(("x-opencode-project".to_string(), hex_40.to_string()));
 +    }
 +}
 +
@@ -190,17 +287,72 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +    }
 +
 +    #[test]
-+    fn header_only_for_opencode_providers_and_never_twice() {
-+        assert!(session_header("anthropic", Some("s")).is_none());
-+        assert!(session_header("opencode-go", None).is_some());
-+        let mut headers = vec![("X-OpenCode-Session".to_string(), "pinned".to_string())];
-+        push_session_header(&mut headers, "opencode", Some("s"));
-+        assert_eq!(headers.len(), 1);
-+        let mut headers = Vec::new();
-+        push_session_header(&mut headers, "opencode", Some("s"));
-+        assert_eq!(headers[0].0, SESSION_HEADER);
++    fn headers_only_for_opencode_providers_and_never_twice() {
++        assert!(session_headers("anthropic", Some("s")).is_empty());
++        assert!(!session_headers("opencode-go", None).is_empty());
++        let mut headers = vec![("X-OpenCode-Session".to_string(), "ses_valid0123456789".to_string())];
++        push_session_headers(&mut headers, "opencode", Some("s"));
++        assert_eq!(headers[0].1, "ses_valid0123456789");
++        assert!(headers.iter().any(|(k, _)| k == "x-opencode-session-id"));
++        assert!(headers.iter().any(|(k, _)| k == "x-opencode-client"));
++        assert!(headers.iter().any(|(k, _)| k == "x-opencode-project"));
++    }
++
++    #[test]
++    fn legacy_uuid_session_header_is_filtered() {
++        let mut headers = vec![("x-opencode-session".to_string(), "dc8edd48-001d-4050-aa32-f46c3935c285".to_string())];
++        push_session_headers(&mut headers, "opencode", Some("s"));
++        let session = headers.iter().find(|(k, _)| k == "x-opencode-session").unwrap();
++        assert!(session.1.starts_with("ses_"));
++        assert_ne!(session.1, "dc8edd48-001d-4050-aa32-f46c3935c285");
++    }
++
++    #[test]
++    fn legacy_user_agent_is_upgraded() {
++        let mut headers = vec![("User-Agent".to_string(), "opencode/1.19.0".to_string())];
++        push_session_headers(&mut headers, "opencode", Some("s"));
++        let ua = headers.iter().find(|(k, _)| k == "User-Agent").unwrap();
++        assert_eq!(ua.1, "opencode/latest/2.0.29/cli");
++    }
++
++    #[test]
++    fn url_sanitization_rewrites_zen() {
++        assert_eq!(
++            sanitize_opencode_url("opencode", "https://opencode.ai/zen/v1/"),
++            "https://opencode.ai/inference/v1"
++        );
++        assert_eq!(
++            sanitize_opencode_url("openai", "https://api.openai.com/v1/"),
++            "https://api.openai.com/v1"
++        );
 +    }
 +}
+Index: prime-agent-src/crates/pa-core/src/models/registry.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/models/registry.rs
++++ prime-agent-src/crates/pa-core/src/models/registry.rs
+@@ -246,6 +246,9 @@ impl ModelRegistry {
+     pub fn has_configured_auth(&self, model: &Model) -> bool {
+         self.auth.has_auth(&model.provider)
+             || self.has_configured_provider_request_auth(&model.provider)
++            || model.provider == "opencode"
++            || model.provider == "opencode-zen"
++            || model.provider == "opencode_zen"
+     }
+ 
+     /// The provider's auth status without credential values: callers
+@@ -818,6 +821,11 @@ impl ModelRegistry {
+                 }
+             }
+         }
++        if api_key.is_none()
++            && (model.provider == "opencode" || model.provider == "opencode-zen" || model.provider == "opencode_zen")
++        {
++            api_key = Some("public".to_string());
++        }
+         let provider_headers = provider_config
+             .as_ref()
+             .and_then(|config| config.headers.clone());
 Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs

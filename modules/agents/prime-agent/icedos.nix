@@ -1239,11 +1239,15 @@
                     };
                   };
 
-                # opencode 429s unless identified as a client.
-                opencodeVersion = config.programs.opencode.package.version or pkgs.opencode.version;
+                # opencode 429s/403s unless identified as a client with inference endpoint.
+                opencodeVersion = config.programs.opencode.package.version or (pkgs.opencode.version or "2.0.29");
                 providerDefaults = {
-                  opencode.headers."User-Agent" = "opencode/${opencodeVersion}";
-                  opencode-go.headers."User-Agent" = "opencode/${opencodeVersion}";
+                  opencode = {
+                    baseUrl = "https://opencode.ai/inference/v1";
+                    headers."User-Agent" = "opencode/latest/${opencodeVersion}/cli";
+                  };
+
+                  opencode-go.headers."User-Agent" = "opencode/latest/${opencodeVersion}/cli";
                 };
 
                 # modelOverrides stays as-is for partial merge; models[] merges in
@@ -1305,7 +1309,7 @@
 
                   MODELS="${dataDir}/models.json"
                   if json_ok "$MODELS"; then
-                    "$JQ" -n --slurpfile a "$MODELS" --slurpfile b "${modelsFile}" '$a[0] * $b[0]' > "$MODELS.tmp" && commit_json "$MODELS.tmp" "$MODELS" 0644 || { rm -f "$MODELS.tmp"; echo "prime-agent: failed to merge $MODELS, left unchanged" >&2; }
+                    "$JQ" -n --slurpfile a "$MODELS" --slurpfile b "${modelsFile}" '($a[0] * $b[0]) | if .providers.opencode.headers["x-opencode-session"]? | test("^ses_") | not then del(.providers.opencode.headers["x-opencode-session"]) else . end' > "$MODELS.tmp" && commit_json "$MODELS.tmp" "$MODELS" 0644 || { rm -f "$MODELS.tmp"; echo "prime-agent: failed to merge $MODELS, left unchanged" >&2; }
                   else
                     [ -e "$MODELS" ] && echo "prime-agent: $MODELS unreadable, reseeding" >&2
                     rm -f "$MODELS.tmp"

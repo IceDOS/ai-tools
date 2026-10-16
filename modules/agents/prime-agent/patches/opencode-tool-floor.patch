@@ -106,7 +106,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_tools.rs
 ===================================================================
 --- /dev/null
 +++ prime-agent-src/crates/pa-ai/src/providers/opencode_tools.rs
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,280 @@
 +//! `OpenCode` Zen request shims shared by the Anthropic and `OpenAI` Completions providers.
 +
 +use serde_json::{json, Map, Value};
@@ -117,12 +117,15 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_tools.rs
 +
 +#[must_use]
 +pub fn is_opencode_provider(provider: &str) -> bool {
-+    provider == "opencode" || provider == "opencode-go"
++    provider == "opencode"
++        || provider == "opencode-go"
++        || provider == "opencode-zen"
++        || provider == "opencode_zen"
 +}
 +
 +// zen rejects a free-tier request whose tools omit opencode's own, so stubs for the
 +// missing names are appended. The model is told not to call them.
-+pub const OPENCODE_REQUIRED_TOOLS: [&str; 4] = ["bash", "grep", "glob", "read"];
++pub const OPENCODE_REQUIRED_TOOLS: [&str; 4] = ["read", "shell", "glob", "grep"];
 +
 +pub const OPENCODE_STUB_TOOL_DESCRIPTION: &str =
 +    "Unavailable in this environment. Use the ipython tool instead.";
@@ -133,6 +136,47 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_tools.rs
 +
 +pub const OPENCODE_TOOLLESS_SYSTEM_NOTE: &str =
 +    "No tools are available for this request. Reply with plain text only and never emit tool calls.";
++
++/// Parameter schema for an opencode stub tool so the inference gate passes.
++#[must_use]
++pub fn stub_tool_schema(name: &str) -> Value {
++    match name {
++        "read" => json!({
++            "type": "object",
++            "properties": {
++                "path": { "type": "string", "description": "The path to the file to read" }
++            },
++            "required": ["path"]
++        }),
++        "shell" | "bash" => json!({
++            "type": "object",
++            "properties": {
++                "command": { "type": "string", "description": "The shell command to execute" }
++            },
++            "required": ["command"]
++        }),
++        "glob" => json!({
++            "type": "object",
++            "properties": {
++                "pattern": { "type": "string", "description": "The glob pattern to match" }
++            },
++            "required": ["pattern"]
++        }),
++        "grep" => json!({
++            "type": "object",
++            "properties": {
++                "pattern": { "type": "string", "description": "The regular expression pattern to search for" }
++            },
++            "required": ["pattern"]
++        }),
++        _ => json!({
++            "type": "object",
++            "properties": {
++                "input": { "type": "string" }
++            }
++        }),
++    }
++}
 +
 +/// The required opencode tool names absent from `present`, in table order.
 +#[must_use]
@@ -187,7 +231,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_tools.rs
 +        json!({
 +            "name": name,
 +            "description": OPENCODE_STUB_TOOL_DESCRIPTION,
-+            "input_schema": { "type": "object", "properties": {} },
++            "input_schema": stub_tool_schema(name),
 +        })
 +    }));
 +    params.insert("tools".into(), Value::Array(tools));
@@ -224,7 +268,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_tools.rs
 +            "function": {
 +                "name": name,
 +                "description": description,
-+                "parameters": { "type": "object", "properties": {} },
++                "parameters": stub_tool_schema(name),
 +            },
 +        })
 +    }));
@@ -277,7 +321,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_tools.rs
 +        apply_anthropic_tool_floor(&mut params);
 +        assert_eq!(
 +            names(&params, "/name"),
-+            ["ipython", "read", "bash", "grep", "glob"]
++            ["ipython", "read", "shell", "glob", "grep"]
 +        );
 +        assert!(
 +            params.get("tool_choice").is_none(),
@@ -305,6 +349,10 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_tools.rs
 +            OPENCODE_TOOLLESS_STUB_DESCRIPTION
 +        );
 +        assert_eq!(
++            params["tools"][0]["function"]["parameters"]["properties"]["path"]["type"],
++            "string"
++        );
++        assert_eq!(
 +            params["messages"][0]["content"],
 +            format!("Be brief.\n\n{OPENCODE_TOOLLESS_SYSTEM_NOTE}")
 +        );
@@ -324,7 +372,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_tools.rs
 +    fn completions_floor_leaves_complete_tool_sets_alone() {
 +        let tools: Vec<Value> = OPENCODE_REQUIRED_TOOLS
 +            .iter()
-+            .map(|name| json!({ "type": "function", "function": { "name": name } }))
++            .map(|name| json!({ "type": "function", "function": { "name": name, "parameters": stub_tool_schema(name) } }))
 +            .collect();
 +        let mut params = Map::new();
 +        params.insert("tools".into(), Value::Array(tools.clone()));
