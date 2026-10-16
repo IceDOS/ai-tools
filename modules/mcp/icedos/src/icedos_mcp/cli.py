@@ -144,14 +144,30 @@ async def run_icedos_streaming(
     """
     bin_path = _find_icedos_bin()
     config_root = find_config_root()
-
-    proc = await asyncio.create_subprocess_exec(
+    return await run_streaming(
         bin_path, *args,
+        timeout=timeout,
+        on_line=on_line,
+        cwd=str(config_root),
+        env={**os.environ, "ICEDOS_CONFIG_DIR": str(config_root)},
+    )
+
+
+async def run_streaming(
+    *argv: str,
+    timeout: float = 300,
+    on_line=None,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
+    """Run any command with stderr merged into stdout, passing each line to on_line."""
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        cwd=str(config_root),
-        env={**os.environ, "ICEDOS_CONFIG_DIR": str(config_root)},
+        cwd=cwd,
+        env=env,
         start_new_session=True,
     )
 

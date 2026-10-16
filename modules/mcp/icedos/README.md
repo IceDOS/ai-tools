@@ -37,7 +37,7 @@ blank line between blocks to match the hand-written style.
 
 ## Capabilities
 
-### Tools (45)
+### Tools (48)
 
 **Config**. The user config is the merged set of `config.toml` and every `*.toml` under `icedos.system.extraConfigs` (default `configs/`), recursively and sorted by path, like core. Hidden `configs/.*.toml` load too but are gitignored. A file opts out with top-level `enable = false`. The server merges like core: tables recurse, arrays concatenate, and a scalar set in two files is an error. A broken TOML file is an error, not skipped. Every `extraConfigs` entry must be a relative dir inside the config root.
 
@@ -76,7 +76,7 @@ The config, module, query, repo explorer, state, input, `nix_eval`, `format_nix`
 - `sandbox_override_repo`: builds a configured repo from a local checkout inside a sandbox (`repo` url or name, `path` to the checkout, empty `path` clears). The server writes the override to `configs/.icedos-mcp-overrides.toml` in the sandbox, one entry per exact url the config uses for that repo. Core loads that file like any other config, while `sandbox_diff` and every config write skip it. An `overrideUrl` for the same url in a file that loads earlier still wins, and the result warns about it. Repos the config does not list are refused
 
 **System**
-- `rebuild`: `icedos rebuild --build`, which never switches; inside a sandbox it adds `--dir <sandbox>`, which skips hooks and generation records. Flags go through an allowlist: `--dry`/`-n`/`--dry-run`, `--genflake-only`, `--update*`, `--update-repos-select`, `--update-state-inputs`, `--update-except`, `--lock-only` (no `--build` added), `--build-vm`, `--builder`, `--github-token-path`. Live mode only: `--boot`, `--target`, `--update-hooks`, `--nh-args`, `--build-args`. Refused: `--dir`, `--run-vm`, `--ask`, `--github-token`. `logs=true` returns the full log with `--show-trace`. A successful build reports its store path. The build dir under `/tmp/icedos-build-*` keeps a `result` GC root until `icedos gc`
+- `rebuild`: `icedos rebuild --build`, which never switches; inside a sandbox it adds `--dir <sandbox>`, which skips hooks and generation records. Flags go through an allowlist: `--dry`/`-n`/`--dry-run`, `--genflake-only`, `--update*`, `--update-repos-select`, `--update-state-inputs`, `--update-except`, `--lock-only` (no `--build` added), `--build-vm`, `--github-token-path`. Live mode only: `--boot`, `--builder` (nh copies the result back, which needs a trusted remote user), `--target`, `--update-hooks`, `--nh-args`, `--build-args`. Refused: `--dir`, `--run-vm`, `--ask`, `--github-token`. `logs=true` returns the full log with `--show-trace`. A successful build reports its store path. The build dir under `/tmp/icedos-build-*` keeps a `result` GC root until `icedos gc`
 - `get_diff`: in a sandbox, its diff like `sandbox_diff`; live, how the config differs from the one that built the running system
 - `rollback`: roll back to a previous generation (`dry` for a plan-only run; live mode only otherwise)
 - `gc`: free disk: Nix store, home-manager profiles, temp build dirs and `.state/.cache` snapshots (`days`/`generations` retention overrides, `dry` preview); live mode only unless `dry`
@@ -90,6 +90,11 @@ The config, module, query, repo explorer, state, input, `nix_eval`, `format_nix`
 - `run_package`: `icedos pkgs run`, with `args` for the binary and `insecure` (blocking; `timeout` configurable)
 - `pkgs_build`: `icedos pkgs build --path <package.nix>`, returning the store path, or the output of `run=<binary>` with `args`
 - `format_nix`: `icedos nixf` on a file or dir; in sandbox mode it refuses paths inside the live config
+
+**Remote build hosts**. Hosts come from `icedos.ai-tools.mcp-server.build.hosts` (ssh destinations), with `minFreeGb` and `pressureLimit` as thresholds. The module writes them to a JSON file and passes its path in `ICEDOS_MCP_BUILD_CONFIG`. The remote users need not be trusted.
+- `build_hosts`: probes this PC (`nproc`, `/proc/loadavg`, `df /nix/store`, `/proc/pressure/{cpu,io}`) and each host over ssh with the same fixed command, then picks `local` or a host. This PC is busy when its 1 minute load exceeds its cores or a `some avg10` exceeds `pressureLimit`. A host qualifies when its load is below half its cores and it has `minFreeGb` plus `need_gb` free. Ties go to the host with the fewest running builds from any of this user's servers (lease files under `<sandbox dir>/.builds/`), then the lowest load per core
+- `nix_build`: `nix build --no-link --json <installable>`, locally or with `--eval-store auto --store ssh-ng://<host>`. `host` is `auto`, `local` or a configured host; other hosts are refused. Outputs of a remote build stay on the host. The server records every path the log shows arriving there (copied or substituted paths, built `.drv` files and their outputs), never paths the host already had
+- `remote_cleanup`: `nix store delete --store ssh-ng://<host>` on the recorded paths, retrying without any path still alive there. The server also runs it on exit
 
 **Repo explorer** (follows the active root's `path:` overrides, sandbox overrides included)
 - `explore_repo`: inspect a module repo (local override first, else GitHub API)
@@ -127,6 +132,7 @@ mcp-server/
       config_files.py # config file-set enumeration, strict merge, path location (mirrors core)
       config_path.py  # dotted-path tokenizer ([N], [], quoted keys)
       cli.py         # subprocess wrappers for the icedos CLI
+      build_hosts.py # remote build hosts: probe, pick, build, clean up
       modules.py     # repo/module exploration
       sandbox.py     # throwaway config copies for isolated edits and builds
       system.py      # system info & generations

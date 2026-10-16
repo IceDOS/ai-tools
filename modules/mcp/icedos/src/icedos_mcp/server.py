@@ -22,6 +22,7 @@ from urllib.parse import unquote
 import tomlkit
 from mcp.server.fastmcp import Context, FastMCP
 
+from . import build_hosts as remote
 from . import config_files
 from . import sandbox as sandboxes
 from .cli import (
@@ -809,10 +810,11 @@ _REBUILD_FLAGS = {
     "--update-repos", "--update-repos-only", "--update-repo-inputs-only", "--lock-only",
     "--genflake-only", "--build-vm",
 }
-_REBUILD_VALUE_FLAGS = {"--update-state-inputs", "--update-repos-select", "--update-except", "--builder", "--github-token-path"}
+_REBUILD_VALUE_FLAGS = {"--update-state-inputs", "--update-repos-select", "--update-except", "--github-token-path"}
 # Live only: they activate or deploy a system, run hooks, or forward raw args to nh/nix.
+# nh copies a --builder result back, which fails unless the remote user is trusted.
 _REBUILD_LIVE_FLAGS = {"--boot", "--update-hooks"}
-_REBUILD_LIVE_VALUE_FLAGS = {"--target"}
+_REBUILD_LIVE_VALUE_FLAGS = {"--target", "--builder"}
 _REBUILD_LIVE_REST_FLAGS = {"--nh-args", "--build-args"}
 _REBUILD_REJECT = {
     "--dir": "the server picks the config dir; use sandbox= instead",
@@ -831,7 +833,8 @@ def _check_rebuild_flags(extra: list[str], in_sandbox: bool) -> str | None:
             return f"{f} is not supported: {_REBUILD_REJECT[f]}"
         live_only = f in _REBUILD_LIVE_FLAGS | _REBUILD_LIVE_VALUE_FLAGS | _REBUILD_LIVE_REST_FLAGS
         if live_only and in_sandbox:
-            return f"{f} is not allowed in a sandbox rebuild"
+            hint = "; test-build on a remote host with nix_build instead" if f == "--builder" else ""
+            return f"{f} is not allowed in a sandbox rebuild{hint}"
         if f in _REBUILD_LIVE_REST_FLAGS:
             return None
         if f in _REBUILD_VALUE_FLAGS | _REBUILD_LIVE_VALUE_FLAGS:
@@ -1010,8 +1013,8 @@ async def rebuild(ctx: Context, flags: str = "", logs: bool = False) -> str:
                --update-repos-only, --update-repo-inputs-only,
                --update-repos-select "<urls>", --update-state-inputs "<inputs>",
                --update-except "<inputs>", --lock-only (with an --update flag),
-               --build-vm, --builder <host>, --github-token-path <file>.
-               Live mode only: --boot, --target <host>, --update-hooks,
+               --build-vm, --github-token-path <file>.
+               Live mode only: --boot, --builder <host>, --target <host>, --update-hooks,
                --nh-args ..., --build-args ...
                In a sandbox, --update* flags change only the sandbox's locks.
         logs: Return the full raw log instead of the condensed summary.
@@ -1025,27 +1028,8 @@ async def rebuild(ctx: Context, flags: str = "", logs: bool = False) -> str:
     if logs and "--logs" not in extra:
         extra.append("--logs")
 
-    ansi = _ANSI_RE
-    state = {"last": 0.0, "n": 0}
-
-    async def _progress(line: str) -> None:
-        # Throttle to one notification per 5s of meaningful output; skip nom's
-        # per-frame redraw spam (timer ticks / graph frames).
-        now = time.monotonic()
-        if now - state["last"] < 5.0:
-            return
-        msg = ansi.sub("", line).strip()
-        if not msg or _NOM_FRAME_RE.match(msg):
-            return
-        state["last"] = now
-        state["n"] += 1
-        try:
-            await ctx.report_progress(progress=state["n"], total=None, message=msg[:120])
-        except Exception:
-            pass
-
     try:
-        rc, stdout, stderr = await cli_rebuild(*extra, timeout=3600, on_line=_progress)
+        rc, stdout, stderr = await cli_rebuild(*extra, timeout=3600, on_line=_progress_reporter(ctx))
     except TimeoutError as e:
         partial = getattr(e, "partial_output", "")
         detail = str(e)
@@ -1200,6 +1184,117 @@ async def pkgs_build(path: str, run: str = "", args: list[str] | None = None, ti
         return _err("timeout", str(e))
     out = _ANSI_RE.sub("", stdout + (f"\n{stderr}" if stderr else "")).strip()
     return out if rc == 0 else f"Build failed (exit {rc}):\n{cli_summarize_log_tail(out)}"
+
+
+# --- REMOTE BUILD HOSTS ---
+
+@mcp.tool()
+async def build_hosts(need_gb: float = 0) -> str:
+    """Check whether a heavy build should run on this PC or a remote build host.
+
+    Probes this PC (load, CPU and IO pressure) and every host in
+    icedos.ai-tools.mcp-server.build.hosts over ssh (cores, load, free space on
+    /nix/store). This PC counts as busy when its 1 minute load is above its core
+    count or a `some avg10` pressure is above the limit. A host qualifies when its
+    load is below half its cores and it has the minimum free space plus need_gb.
+    Among qualifying hosts, the one with the fewest builds from any of this user's
+    MCP servers wins, then the lowest load per core.
+
+    Args:
+        need_gb: Extra free space the build needs on the host, in GB.
+
+    Returns JSON with `pick` ("local" or a host), `why`, and the probe of each machine.
+    """
+    return json.dumps(await remote.choose(need_gb), indent=2)
+
+
+def _progress_reporter(ctx: Context):
+    """Line callback that sends at most one progress notification per 5s of real output."""
+    state = {"last": 0.0, "n": 0}
+
+    async def report(line: str) -> None:
+        now = time.monotonic()
+        if now - state["last"] < 5.0:
+            return
+        msg = _ANSI_RE.sub("", line).strip()
+        if not msg or _NOM_FRAME_RE.match(msg):
+            return
+        state["last"] = now
+        state["n"] += 1
+        try:
+            await ctx.report_progress(progress=state["n"], total=None, message=msg[:120])
+        except Exception:
+            pass
+
+    return report
+
+
+@mcp.tool()
+async def nix_build(
+    ctx: Context, installable: str, host: str = "auto", need_gb: float = 0, timeout: int = 3600, logs: bool = False
+) -> str:
+    """Build a Nix installable on this PC or a remote build host, without a result link.
+
+    A remote build evaluates here and builds with `--eval-store auto --store
+    ssh-ng://<host>`. Its outputs stay in the host's store, because the remote
+    user is not trusted and cannot sign them for this PC. Inspect them over ssh.
+    The server records every path the build added to the host and deletes them
+    with remote_cleanup or when it exits. Never use this for IceDOS rebuilds;
+    those need the local store.
+
+    Args:
+        installable: Flake ref or store path, e.g. 'nixpkgs#hello' or
+                     '/abs/path/to/flake#packages.x86_64-linux.foo'. Use absolute
+                     paths; the server's working dir is not yours.
+        host: "auto" asks build_hosts, "local" builds here, or a configured host.
+              Keep small builds and evaluations on "local".
+        need_gb: Extra free space the build needs on the host, for "auto".
+        timeout: Max seconds (default 3600).
+        logs: Return the full log instead of its tail.
+    """
+    if not installable or installable.startswith("-"):
+        return _err("bad_args", "installable must be a flake ref or store path, not a flag")
+    hosts = remote.settings()["hosts"]
+    picked = None
+    if host == "auto":
+        picked = await remote.choose(need_gb)
+        host = picked["pick"]
+    elif host != "local" and host not in hosts:
+        return _err("bad_args", f"unknown host {host!r}; configured hosts: {', '.join(hosts) or 'none'}")
+    try:
+        rc, log, result = await remote.build(installable, host, timeout, on_line=_progress_reporter(ctx))
+    except TimeoutError as e:
+        partial = getattr(e, "partial_output", "")
+        if host != "local":
+            _ = remote.record(host, partial)
+        return _err("timeout", f"{e}\n--- last output ---\n{cli_summarize_log_tail(partial)}")
+    added = remote.record(host, log) if host != "local" else set()
+    clean = _ANSI_RE.sub("", log).strip()
+    out = clean if logs else cli_summarize_log_tail(clean)
+    where = f"on {host}" + (f" ({picked['why']})" if picked else "")
+    if rc != 0:
+        return f"Build failed {where} (exit {rc}):\n{out}"
+    paths = [p for r in result for p in r.get("outputs", {}).values()]
+    lines = [f"Build succeeded {where}.", *(f"output: {p}" for p in paths)]
+    if host != "local":
+        lines.append(f"The outputs live in {host}'s store; inspect them with ssh {host}. "
+                     f"{len(added)} new paths there are queued for remote_cleanup.")
+    return "\n".join(lines) + f"\n{out}"
+
+
+@mcp.tool()
+async def remote_cleanup(host: str = "") -> str:
+    """Delete the paths this server's nix_build runs added to a build host.
+
+    Deletes built outputs, their .drv files and every path copied or substituted
+    onto the host, never paths it already had. Paths something else still uses on
+    the host stay. The server also runs this when it exits.
+
+    Args:
+        host: One host, or empty for every host this server built on.
+    """
+    report = await asyncio.to_thread(remote.cleanup, host)
+    return json.dumps(report or {"note": "no remote builds recorded"}, indent=2)
 
 
 # --- REPO EXPLORER ---
@@ -1708,6 +1803,15 @@ def _drop_unused_default() -> None:
         logger.warning("could not clean default sandbox %s: %s", _default_name, e)
 
 
+def _on_exit() -> None:
+    _drop_unused_default()
+    try:
+        for host, msg in remote.cleanup(timeout=60).items():
+            logger.info("remote cleanup %s: %s", host, msg)
+    except Exception as e:
+        logger.warning("remote cleanup failed: %s", e)
+
+
 def main() -> None:
     """Entry point."""
     global _live
@@ -1719,10 +1823,10 @@ def main() -> None:
     )
     _live = _live or parser.parse_args().live
     logger.info("mode: %s", "live" if _live else "sandbox")
-    atexit.register(_drop_unused_default)
+    atexit.register(_on_exit)
     # sys.exit would hang on the stdio reader thread, so clean up and leave directly.
     for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, lambda *_: (_drop_unused_default(), os._exit(0)))
+        signal.signal(sig, lambda *_: (_on_exit(), os._exit(0)))
     mcp.run(transport="stdio")
 
 

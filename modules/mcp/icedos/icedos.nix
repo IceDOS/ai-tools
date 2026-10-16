@@ -12,6 +12,22 @@ in
       default = defaults.timeout;
     } 1000 86400000;
 
+    build = {
+      hosts = icedosLib.mkStrListOption { default = defaults.build.hosts; };
+
+      minFreeGb = icedosLib.mkIntBetweenOption {
+        path = "icedos.ai-tools.mcp-server.build.minFreeGb";
+        source = ./config.toml;
+        default = defaults.build.minFreeGb;
+      } 0 100000;
+
+      pressureLimit = icedosLib.mkIntBetweenOption {
+        path = "icedos.ai-tools.mcp-server.build.pressureLimit";
+        source = ./config.toml;
+        default = defaults.build.pressureLimit;
+      } 0 100;
+    };
+
     # Skills for this module (name = SKILL.md), loaded by every agent via icedos.ai-tools.skills.
     skills = icedosLib.mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
   };
@@ -55,6 +71,10 @@ in
 
             mainProgram = "icedos-mcp-server";
           };
+
+          buildConfig = pkgs.writeText "icedos-mcp-build.json" (
+            builtins.toJSON config.icedos.ai-tools.mcp-server.build
+          );
         in
         {
           # Skills for this module, added to the shared icedos.ai-tools.skills pool.
@@ -80,7 +100,7 @@ in
                 {
                   command = "serve";
                   help = "start the IceDOS MCP server (stdio); tools use a temp config copy unless --live";
-                  script = "ICEDOS_CONFIG_DIR=${config.icedos.configurationLocation}/.. exec ${icedosMcpServer}/bin/icedos-mcp-server \"$@\"";
+                  script = "ICEDOS_CONFIG_DIR=${config.icedos.configurationLocation}/.. ICEDOS_MCP_BUILD_CONFIG=${buildConfig} exec ${icedosMcpServer}/bin/icedos-mcp-server \"$@\"";
                   completion.files = false;
                 }
               ];

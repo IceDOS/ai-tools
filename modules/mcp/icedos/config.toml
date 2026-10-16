@@ -2,6 +2,16 @@
 # Tool-call timeout in milliseconds for agents that honour it. Rebuilds run long.
 timeout = 3600000
 
+# Remote Nix build hosts for build_hosts and nix_build, as ssh destinations
+# (e.g. "user@192.168.1.50"). The hosts need Nix with flakes; their users need
+# not be trusted.
+[icedos.ai-tools.mcp-server.build]
+hosts = []
+# Free space a host keeps on /nix/store after a build, in GB.
+minFreeGb = 20
+# This PC counts as busy above this CPU or IO `some avg10` pressure.
+pressureLimit = 20
+
 # Skills for this module, name = full SKILL.md content. Added to the shared
 # icedos.ai-tools.skills pool, so every agent loads them.
 [icedos.ai-tools.mcp-server.skills]
@@ -21,7 +31,7 @@ The server starts in sandbox mode. Every config, module, query, state, `nix_eval
 
 - A call without `sandbox=` uses this server's default sandbox. The server creates it on the first such call.
 - The copy lives in `$TMPDIR/icedos-sandboxes-<uid>/<name>`. It has every config file, the live `.state/flake.lock` (so builds use the same pinned inputs) and the option and module search index.
-- `rebuild` in a sandbox runs `icedos rebuild --dir <sandbox> --build`. It builds the closure, never activates it, runs no rebuild hooks and records no generation. `--boot`, `--target`, `--update-hooks`, `--nh-args` and `--build-args` need live mode. `--update*` flags in a sandbox change only the sandbox's locks; `sandbox_inputs_diff` shows what moved.
+- `rebuild` in a sandbox runs `icedos rebuild --dir <sandbox> --build`. It builds the closure, never activates it, runs no rebuild hooks and records no generation. `--boot`, `--builder`, `--target`, `--update-hooks`, `--nh-args` and `--build-args` need live mode. `--update*` flags in a sandbox change only the sandbox's locks; `sandbox_inputs_diff` shows what moved.
 - `rollback` and `gc` change the running system, so they only run with `dry=true` in sandbox mode.
 - Resources (`icedos://config` and the rest) read the same root as a call without `sandbox=`.
 - `nix_eval` reads the sandbox's generated flake, which is the live one until the sandbox's first full `rebuild` (`--dry` and `--genflake-only` keep nothing). `declared` shows sandbox edits at once; `config` needs that rebuild.
@@ -52,6 +62,17 @@ The server keeps overrides in its own file inside the sandbox. They never touch 
 
 Edit the checkout with your normal file tools, then `rebuild` the sandbox. The build copies the checkout into the store, so later edits need another `rebuild`. Use `nix_eval` to confirm the result, e.g. `config.icedos.ai-tools.skills`.
 
+## Remote build hosts
+
+For any heavy Nix build outside `rebuild` (compilers, kernels, browsers, VM tests, anything over a few minutes), use `nix_build` with `host="auto"`. Small builds and evaluations use `host="local"`.
+
+- `auto` calls `build_hosts`, which probes this PC and every host in `icedos.ai-tools.mcp-server.build.hosts`. It stays local unless this PC is busy, then picks the qualifying host with the fewest running builds. Call `build_hosts` yourself to see why. Pass `need_gb` when the build needs a lot of disk.
+- Pass absolute paths in the installable, e.g. `path:/abs/dir#pkg`. The server's working dir is not yours.
+- A remote build's outputs stay in the host's store, because the remote user is not trusted. Inspect them with `ssh <host>`, or copy files back with `scp`.
+- Call `remote_cleanup` once you are done with them. The server also cleans up on exit. It deletes only paths the build added to the host.
+- Never build IceDOS remotely. `rebuild` refuses `--builder` in a sandbox, and live rebuilds need the local store.
+- These are other people's PCs. Only touch the Nix store and files you created under `/tmp`.
+
 ## Parallel agents and subagents
 
 Every call can carry `sandbox=<name>`, and the override applies to that call only.
@@ -77,7 +98,7 @@ Sandbox-aware, all take `sandbox=`:
 
 Sandbox management: `sandbox_create`, `sandbox_list`, `sandbox_diff`, `sandbox_inputs_diff`, `sandbox_delete`, `sandbox_override_repo`.
 
-Always live and read-only or self-contained: `doctor`, `get_system_info_tool`, `get_generations_tool`, `diff_generations`, `config_history`, `list_packages`, `run_package` (`args`, `insecure`), `pkgs_build` (builds a package.nix against the system's pkgs), `explore_local_repo`.
+Always live and read-only or self-contained: `doctor`, `get_system_info_tool`, `get_generations_tool`, `diff_generations`, `config_history`, `list_packages`, `run_package` (`args`, `insecure`), `pkgs_build` (builds a package.nix against the system's pkgs), `explore_local_repo`, `build_hosts`, `nix_build`, `remote_cleanup`.
 
 Live mode only, unless `dry=true`: `rollback`, `gc`.
 
