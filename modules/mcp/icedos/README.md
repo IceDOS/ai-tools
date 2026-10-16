@@ -37,7 +37,7 @@ blank line between blocks to match the hand-written style.
 
 ## Capabilities
 
-### Tools (48)
+### Tools (50)
 
 **Config**. The user config is the merged set of `config.toml` and every `*.toml` under `icedos.system.extraConfigs` (default `configs/`), recursively and sorted by path, like core. Hidden `configs/.*.toml` load too but are gitignored. A file opts out with top-level `enable = false`. The server merges like core: tables recurse, arrays concatenate, and a scalar set in two files is an error. A broken TOML file is an error, not skipped. Every `extraConfigs` entry must be a relative dir inside the config root.
 
@@ -91,10 +91,15 @@ The config, module, query, repo explorer, state, input, `nix_eval`, `format_nix`
 - `pkgs_build`: `icedos pkgs build --path <package.nix>`, returning the store path, or the output of `run=<binary>` with `args`
 - `format_nix`: `icedos nixf` on a file or dir; in sandbox mode it refuses paths inside the live config
 
-**Remote build hosts**. Hosts come from `icedos.ai-tools.mcp-server.build.hosts` (ssh destinations), with `minFreeGb` and `pressureLimit` as thresholds. The module writes them to a JSON file and passes its path in `ICEDOS_MCP_BUILD_CONFIG`. The remote users need not be trusted.
+**Builds and storage**. Hosts come from `icedos.ai-tools.mcp-server.build.hosts` (ssh destinations), with `minFreeGb` and `pressureLimit` as thresholds. Drives come from `icedos.ai-tools.mcp-server.storage.drives` (mount = `random` or `sequential`), with `reserveGb`, `largeGb` and `maxFlakeCopyMb`. The module writes both sections to one JSON file and passes its path in `ICEDOS_MCP_SETTINGS`. The remote users need not be trusted. The server creates and deletes files only under `<mount>/ai-dump/`.
 - `build_hosts`: probes this PC (`nproc`, `/proc/loadavg`, `df /nix/store`, `/proc/pressure/{cpu,io}`) and each host over ssh with the same fixed command, then picks `local` or a host. This PC is busy when its 1 minute load exceeds its cores or a `some avg10` exceeds `pressureLimit`. A host qualifies when its load is below half its cores and it has `minFreeGb` plus `need_gb` free. Ties go to the host with the fewest running builds from any of this user's servers (lease files under `<sandbox dir>/.builds/`), then the lowest load per core
-- `nix_build`: `nix build --no-link --json <installable>`, locally or with `--eval-store auto --store ssh-ng://<host>`. `host` is `auto`, `local` or a configured host; other hosts are refused. Outputs of a remote build stay on the host. The server records every path the log shows arriving there (copied or substituted paths, built `.drv` files and their outputs), never paths the host already had
-- `remote_cleanup`: `nix store delete --store ssh-ng://<host>` on the recorded paths, retrying without any path still alive there. The server also runs it on exit
+- `nix_build`: `nix build --no-link --json <installable>`, locally, in a drive store (`--store <mount>/ai-dump/nix-store`) or with `--eval-store auto --store ssh-ng://<host>`. `host` is `auto`, `local` or a configured host; other hosts are refused. `store` (local builds only) is `auto`, `host` or a configured mount. `auto` keeps a build on the host store unless `need_gb` reaches `largeGb` or would leave `/` under `reserveGb`, then picks the SSD with room that already has a store, else the one with the most room. Outputs of a remote build stay on the host, and the server records every path the log shows arriving there (copied or substituted paths, built `.drv` files and their outputs), never paths the host already had. In a drive store it also records the result's own paths, and the result gives each output's on-disk path and a `nix shell --store` command. A local flake goes through `flake_preflight` first and is refused over `maxFlakeCopyMb` unless `allow_copy=true`; its source copy (from `nix flake metadata --json`) is recorded in the eval store, the drive store or the host store
+- `build_cleanup`: `nix store delete --store <store>` on the recorded paths of one host, one drive, `host` (flake source copies in the host store) or all of them, in rounds so a path goes after everything in the set that references it. A path still alive stays recorded for a later call. `gc=true` also runs `nix store gc` on the drive stores; it counts paths that running programs use from the host `/nix/store` as alive, because a drive store shares their names. The server also runs the delete on exit
+- `storage_pick`: the drive with `need_gb` free above `reserveGb`, preferring the asked `io` kind, then the most room; `project` creates `<mount>/ai-dump/<project>/`
+- `storage_status`: free space on `/` and every drive, and `du` of each `ai-dump` entry
+- `flake_preflight`: what evaluating a local flake copies into the store. A `path:` flake, or a dir outside git, copies the whole dir (`du --apparent-size` of its entries, symlinks skipped), and the result lists the largest and heavy entries (`node_modules`, `.direnv`, disk images, archives). A git flake copies the tracked files of the whole repo (`git ls-files`), and the result lists untracked files the flake cannot see. `verdict` is `refuse` over `maxFlakeCopyMb` or without a `flake.nix`
+- `gc_roots`: `nix-store --gc --print-roots` without `/proc`, `/run`, `/nix/var`, `/root`, profile, home-manager and `.cache/nix` roots, each with `kind` (`result`, `temp`, `direnv`, `other`), the closure size, and `removable` (only under home, `/tmp` or an `ai-dump` dir)
+- `nix_cleanup`: unlinks roots that `gc_roots` lists as removable, then runs `nix store delete` on targets no other root holds. `collect=true` runs `nix store gc` on the host store. It never deletes generations
 
 **Repo explorer** (follows the active root's `path:` overrides, sandbox overrides included)
 - `explore_repo`: inspect a module repo (local override first, else GitHub API)
@@ -132,7 +137,9 @@ mcp-server/
       config_files.py # config file-set enumeration, strict merge, path location (mirrors core)
       config_path.py  # dotted-path tokenizer ([N], [], quoted keys)
       cli.py         # subprocess wrappers for the icedos CLI
-      build_hosts.py # remote build hosts: probe, pick, build, clean up
+      build_hosts.py # Nix builds on remote hosts or drive stores: pick, build, clean up
+      storage.py     # secondary drives: pick one, drive stores, ai-dump sizes
+      settings.py    # build and storage settings from ICEDOS_MCP_SETTINGS
       modules.py     # repo/module exploration
       sandbox.py     # throwaway config copies for isolated edits and builds
       system.py      # system info & generations

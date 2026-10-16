@@ -1,4 +1,4 @@
-"""Remote Nix build hosts: probe load and disk, pick one, build there, clean up after."""
+"""Nix builds off the root store: pick a remote host or a drive store, build there, clean up after."""
 
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 from . import sandbox as sandboxes
+from . import settings as settings_file
 from .cli import run_streaming
 
-CONFIG_ENV = "ICEDOS_MCP_BUILD_CONFIG"
 SSH_OPTS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=5")
 
 # One fixed command for every host, so no tool input ever reaches a remote shell.
@@ -32,13 +32,8 @@ _LIVE_RE = re.compile(r"[Cc]annot delete path '(/nix/store/[^']+)'")
 
 
 def settings() -> dict[str, Any]:
-    """Hosts and thresholds from the JSON file the module points CONFIG_ENV at."""
-    cfg: dict[str, Any] = {"hosts": [], "minFreeGb": 20, "pressureLimit": 20}
-    path = os.environ.get(CONFIG_ENV)
-    if path:
-        with contextlib.suppress(OSError, ValueError):
-            cfg.update(json.loads(Path(path).read_text()))
-    return cfg
+    """Hosts and thresholds."""
+    return settings_file.load()["build"]
 
 
 def parse_probe(text: str) -> dict[str, Any]:
@@ -159,8 +154,12 @@ async def choose(need_gb: float = 0) -> dict[str, Any]:
     return {"pick": pick, "why": why, "local": local, "hosts": rows}
 
 
-# Paths each remote build added to its host, deleted by cleanup().
+# Paths this server's builds added, keyed by store URL (ssh-ng://host or a drive store dir).
 _created: dict[str, set[str]] = {}
+
+
+def remote_store(host: str) -> str:
+    return f"ssh-ng://{host}"
 
 
 def _outputs_of(drvs: list[str]) -> set[str]:
@@ -182,26 +181,41 @@ def _outputs_of(drvs: list[str]) -> set[str]:
     return paths
 
 
-def record(host: str, log: str) -> set[str]:
-    """Remember what a build put on host: built drvs and outputs, copied and substituted paths.
+def record(store: str, log: str, result: list[dict[str, Any]] | None = None) -> set[str]:
+    """Remember what a build put in store: built drvs and outputs, copied and substituted paths.
 
-    Only paths the log shows arriving count, so paths the host already had are never deleted.
+    On a host only paths the log shows arriving count, so paths it already had are never
+    deleted. A drive store holds only agent builds, so the result's own paths count too.
     """
     built = _BUILDING_RE.findall(log)
     paths = set(built) | set(_COPYING_RE.findall(log)) | _outputs_of(built)
-    _created.setdefault(host, set()).update(paths)
+    for r in result or []:
+        paths.add(r["drvPath"])
+        paths.update(r.get("outputs", {}).values())
+    _created.setdefault(store, set()).update(paths)
     return paths
 
 
-def build_argv(installable: str, host: str) -> list[str]:
-    store = [] if host == "local" else ["--eval-store", "auto", "--store", f"ssh-ng://{host}"]
-    return ["nix", "build", *store, "--no-link", "--json", installable]
+def add(store: str, paths: set[str]) -> set[str]:
+    _created.setdefault(store, set()).update(paths)
+    return paths
 
 
-async def build(installable: str, host: str, timeout: float, on_line=None) -> tuple[int, str, list[dict[str, Any]]]:
+def build_argv(installable: str, host: str, store: str = "") -> list[str]:
+    """`store` is a drive store dir for a local build; a remote host brings its own store."""
+    if host != "local":
+        flags = ["--eval-store", "auto", "--store", remote_store(host)]
+    else:
+        flags = ["--store", store] if store else []
+    return ["nix", "build", *flags, "--no-link", "--json", installable]
+
+
+async def build(
+    installable: str, host: str, timeout: float, on_line=None, store: str = ""
+) -> tuple[int, str, list[dict[str, Any]]]:
     """Run the build; the JSON result is the last stdout line that parses as a list."""
     with lease(host):
-        rc, log, _ = await run_streaming(*build_argv(installable, host), timeout=timeout, on_line=on_line)
+        rc, log, _ = await run_streaming(*build_argv(installable, host, store), timeout=timeout, on_line=on_line)
     result: list[dict[str, Any]] = []
     for line in reversed(log.splitlines()):
         if line.startswith("["):
@@ -211,33 +225,92 @@ async def build(installable: str, host: str, timeout: float, on_line=None) -> tu
     return rc, log, result
 
 
-def cleanup(host: str = "", timeout: float = 300) -> dict[str, str]:
-    """Delete what this server's builds added to host (all hosts when empty). Live paths stay."""
+def gc(store: str, timeout: float = 1800) -> str:
+    """Run `nix store gc` on a drive store, dropping every path nothing roots."""
+    proc = subprocess.run(["nix", "store", "gc", "--store", store], capture_output=True, text=True, timeout=timeout)
+    return gc_summary(proc)
+
+
+def _full(p: str) -> str:
+    return p if p.startswith("/") else f"/nix/store/{p}"
+
+
+def _references(store: str, paths: set[str], timeout: float) -> dict[str, set[str]] | None:
+    """References of each path still valid in store; None when the store cannot be queried."""
+    proc = subprocess.run(
+        ["nix", "path-info", "--json", "--store", store, *sorted(paths)],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    data = data.get("info", data) if isinstance(data, dict) else {}
+    return {_full(p): {_full(r) for r in info.get("references", [])} for p, info in data.items() if info}
+
+
+def _delete(store: str, paths: set[str], timeout: float) -> tuple[set[str], set[str], str]:
+    """One `nix store delete`, dropping paths it reports alive until the rest goes.
+
+    Returns (deleted, alive, error). Nix refuses the whole call over one live path.
+    """
+    pending, alive = set(paths), set()
+    while pending:
+        proc = subprocess.run(
+            ["nix", "store", "delete", "--store", store, *sorted(pending)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if proc.returncode == 0:
+            return pending, alive, ""
+        live = set(_LIVE_RE.findall(proc.stderr)) & pending
+        if not live:
+            return set(), alive | pending, proc.stderr.strip()[-500:]
+        alive |= live
+        pending -= live
+    return set(), alive, ""
+
+
+def cleanup(store: str = "", timeout: float = 300) -> dict[str, str]:
+    """Delete what this server's builds added to store (every store when empty). Live paths stay.
+
+    Deletes in rounds, paths nothing else in the set references first, since a path whose
+    referrer still exists counts as alive.
+    """
     report: dict[str, str] = {}
-    for h in [host] if host else list(_created):
-        paths = _created.get(h, set())
-        kept: list[str] = []
-        msg = "nothing to delete"
-        # A path another root still uses aborts the delete, so drop it and retry.
-        for _ in range(20):
-            if not paths:
+    for h in [store] if store else list(_created):
+        if not _created.get(h):
+            report[h] = "nothing to delete"
+            continue
+        refs = _references(h, _created[h], timeout)
+        if refs is None:
+            report[h] = "cannot query the store; paths kept for a later cleanup"
+            continue
+        remaining, kept, deleted, error = set(refs), set(), 0, ""
+        while remaining and not error:
+            leaves = {p for p in remaining if not any(p in refs[q] for q in remaining if q != p)}
+            if not leaves:
                 break
-            proc = subprocess.run(
-                ["nix", "store", "delete", "--store", f"ssh-ng://{h}", *sorted(paths)],
-                capture_output=True, text=True, timeout=timeout,
-            )
-            if proc.returncode == 0:
-                msg = f"deleted {len(paths)} paths"
-                paths = set()
-                break
-            live = set(_LIVE_RE.findall(proc.stderr)) & paths
-            if not live:
-                msg = proc.stderr.strip()[-500:]
-                break
-            kept += sorted(live)
-            paths -= live
-        _created[h] = paths
-        if not paths:
+            gone, alive, error = _delete(h, leaves, timeout)
+            deleted += len(gone)
+            kept |= alive
+            remaining -= leaves
+        kept |= remaining
+        if kept:
+            _created[h] = kept
+        else:
             _created.pop(h, None)
-        report[h] = msg + (f"; kept {len(kept)} live: {', '.join(kept[:5])}" if kept else "")
+        msg = f"deleted {deleted} paths"
+        if kept:
+            msg += f"; kept {len(kept)} live: {', '.join(sorted(kept)[:5])}"
+        report[h] = msg + (f"; error: {error}" if error else "")
     return report
+
+
+def gc_summary(proc: subprocess.CompletedProcess) -> str:
+    """The "N store paths deleted, X freed" line; Nix may print notes after it."""
+    out = (proc.stdout + proc.stderr).strip().splitlines()
+    if proc.returncode != 0:
+        return f"gc failed: {' '.join(out[-3:])}"
+    return next((line for line in reversed(out) if "freed" in line), out[-1] if out else "done")

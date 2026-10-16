@@ -24,7 +24,9 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from . import build_hosts as remote
 from . import config_files
+from . import leftovers
 from . import sandbox as sandboxes
+from . import storage
 from .cli import (
     _ANSI_RE,
     _NOM_FRAME_RE,
@@ -1231,29 +1233,58 @@ def _progress_reporter(ctx: Context):
 
 @mcp.tool()
 async def nix_build(
-    ctx: Context, installable: str, host: str = "auto", need_gb: float = 0, timeout: int = 3600, logs: bool = False
+    ctx: Context,
+    installable: str,
+    host: str = "auto",
+    store: str = "auto",
+    need_gb: float = 0,
+    timeout: int = 3600,
+    logs: bool = False,
+    allow_copy: bool = False,
 ) -> str:
-    """Build a Nix installable on this PC or a remote build host, without a result link.
+    """Build a Nix installable here, in a drive store or on a remote build host, without a result link.
 
     A remote build evaluates here and builds with `--eval-store auto --store
     ssh-ng://<host>`. Its outputs stay in the host's store, because the remote
     user is not trusted and cannot sign them for this PC. Inspect them over ssh.
-    The server records every path the build added to the host and deletes them
-    with remote_cleanup or when it exits. Never use this for IceDOS rebuilds;
-    those need the local store.
+
+    A local build goes to the host /nix/store or to a store on a secondary SSD
+    (`<mount>/ai-dump/nix-store`, see storage_status). Outputs in a drive store
+    print as /nix/store paths but live under that dir; the result names the
+    real path and a `nix shell --store` command to run them.
+
+    The server records the paths each build added to a host or drive store and
+    deletes them with build_cleanup or when it exits. Never use this for IceDOS
+    rebuilds; those need the host store.
+
+    A local flake first goes through flake_preflight. One that would copy more
+    than storage.maxFlakeCopyMb into the store is refused. The server records
+    the flake's source copy for build_cleanup too.
 
     Args:
         installable: Flake ref or store path, e.g. 'nixpkgs#hello' or
-                     '/abs/path/to/flake#packages.x86_64-linux.foo'. Use absolute
+                     'path:/abs/dir#packages.x86_64-linux.foo'. Use absolute
                      paths; the server's working dir is not yours.
         host: "auto" asks build_hosts, "local" builds here, or a configured host.
               Keep small builds and evaluations on "local".
-        need_gb: Extra free space the build needs on the host, for "auto".
+        store: For a local build: "auto" keeps small builds on the host store and
+               moves builds of storage.largeGb or more, or ones that would push /
+               below the reserve, to a drive store; "host"; or a configured mount.
+        need_gb: Disk the build needs, in GB. Drives both host and store choice,
+                 so pass an estimate for anything big.
         timeout: Max seconds (default 3600).
         logs: Return the full log instead of its tail.
+        allow_copy: Build a local flake that flake_preflight refuses. Only for a
+                    copy the task needs; fix the flake dir instead when you can.
     """
     if not installable or installable.startswith("-"):
         return _err("bad_args", "installable must be a flake ref or store path, not a flag")
+    try:
+        check = await asyncio.to_thread(leftovers.preflight, installable)
+    except ValueError as e:
+        return _err("bad_args", str(e))
+    if check and not check["ok"] and not (allow_copy and "copy_mb" in check):
+        return _err("flake_copy", f"{check['reason']}\n{json.dumps(check, indent=2)}")
     hosts = remote.settings()["hosts"]
     picked = None
     if host == "auto":
@@ -1261,40 +1292,180 @@ async def nix_build(
         host = picked["pick"]
     elif host != "local" and host not in hosts:
         return _err("bad_args", f"unknown host {host!r}; configured hosts: {', '.join(hosts) or 'none'}")
+    if host != "local" and store not in ("auto", "host"):
+        return _err("bad_args", f"store={store!r} needs a local build; {host} builds in its own store")
+    store_path, store_why = "", ""
+    if host == "local":
+        try:
+            store_path, store_why = storage.store_for(need_gb, store)
+        except ValueError as e:
+            return _err("storage", str(e))
+    target = remote.remote_store(host) if host != "local" else store_path
     try:
-        rc, log, result = await remote.build(installable, host, timeout, on_line=_progress_reporter(ctx))
+        rc, log, result = await remote.build(
+            installable, host, timeout, on_line=_progress_reporter(ctx), store=store_path
+        )
     except TimeoutError as e:
         partial = getattr(e, "partial_output", "")
-        if host != "local":
-            _ = remote.record(host, partial)
+        if target:
+            _ = remote.record(target, partial)
         return _err("timeout", f"{e}\n--- last output ---\n{cli_summarize_log_tail(partial)}")
-    added = remote.record(host, log) if host != "local" else set()
+    added = set()
+    if target:
+        added = remote.record(target, log, result if store_path else None)
+    if check:
+        # Eval copies the source into the eval store: a drive store, or the host store.
+        if src := await asyncio.to_thread(leftovers.source_path, installable, store_path):
+            added |= remote.add(store_path or leftovers.HOST_STORE, {src})
     clean = _ANSI_RE.sub("", log).strip()
     out = clean if logs else cli_summarize_log_tail(clean)
-    where = f"on {host}" + (f" ({picked['why']})" if picked else "")
+    why = "; ".join(w for w in (picked["why"] if picked else "", store_why) if w)
+    where = (f"on {host}" if host != "local" else f"in {store_path or 'the host store'}") + (f" ({why})" if why else "")
     if rc != 0:
         return f"Build failed {where} (exit {rc}):\n{out}"
     paths = [p for r in result for p in r.get("outputs", {}).values()]
-    lines = [f"Build succeeded {where}.", *(f"output: {p}" for p in paths)]
+    lines = [f"Build succeeded {where}."]
+    if store_path:
+        lines += [f"output: {p} (on disk: {store_path}{p})" for p in paths]
+        lines.append(f"Run it with: nix shell --store {store_path} {installable}")
+    else:
+        lines += [f"output: {p}" for p in paths]
     if host != "local":
-        lines.append(f"The outputs live in {host}'s store; inspect them with ssh {host}. "
-                     f"{len(added)} new paths there are queued for remote_cleanup.")
+        lines.append(f"The outputs live in {host}'s store; inspect them with ssh {host}.")
+    if added:
+        lines.append(f"{len(added)} paths there are queued for build_cleanup.")
     return "\n".join(lines) + f"\n{out}"
 
 
 @mcp.tool()
-async def remote_cleanup(host: str = "") -> str:
-    """Delete the paths this server's nix_build runs added to a build host.
+async def build_cleanup(target: str = "", gc: bool = False) -> str:
+    """Delete the paths this server's nix_build runs added to build hosts and drive stores.
 
-    Deletes built outputs, their .drv files and every path copied or substituted
-    onto the host, never paths it already had. Paths something else still uses on
-    the host stay. The server also runs this when it exits.
+    On a host it deletes built outputs, their .drv files and every path copied or
+    substituted there, never paths the host already had. Paths something else
+    still uses stay. The server also runs this when it exits.
 
     Args:
-        host: One host, or empty for every host this server built on.
+        target: A configured host, a drive mount, "host" for the flake source
+                copies in the host store, or empty for all of them.
+        gc: Also run `nix store gc` on the drive stores (the target's, or every
+            one when target is empty), dropping old builds of every agent.
     """
-    report = await asyncio.to_thread(remote.cleanup, host)
-    return json.dumps(report or {"note": "no remote builds recorded"}, indent=2)
+    hosts = remote.settings()["hosts"]
+    mounts = [r["mount"] for r in storage.drives()]
+    if target == "host":
+        stores = [leftovers.HOST_STORE]
+    elif target in hosts:
+        stores = [remote.remote_store(target)]
+    elif target.rstrip("/") in mounts:
+        stores = [storage.store_dir(target.rstrip("/"))]
+    elif target:
+        return _err("bad_args", f"target must be \"host\", a configured host ({', '.join(hosts) or 'none'}) "
+                                f"or drive ({', '.join(mounts) or 'none'})")
+    else:
+        stores = []
+    report: dict[str, str] = {}
+    for s in stores or [""]:
+        report.update(await asyncio.to_thread(remote.cleanup, s))
+    if gc:
+        for s in [x for x in stores if not x.startswith("ssh-ng://")] or (
+            [] if target else [storage.store_dir(m) for m in mounts]
+        ):
+            if Path(s).is_dir():
+                report[f"gc {s}"] = await asyncio.to_thread(remote.gc, s)
+    return json.dumps(report or {"note": "no builds recorded"}, indent=2)
+
+
+@mcp.tool()
+async def storage_pick(need_gb: float, io: str = "random", project: str = "") -> str:
+    """Pick a secondary drive for heavy files (datasets, VM images, archives, caches).
+
+    Keeps storage.reserveGb free on every drive. Prefers the asked I/O kind, then
+    the most room; `matches_io` is false when only the other kind had room.
+    Keep one task on one drive.
+
+    Args:
+        need_gb: Space the task needs, in GB.
+        io: "random" (SSD: builds, compiling, databases, VM disks, node_modules)
+            or "sequential" (HDD: archives, datasets, backups, parked files).
+        project: When set, creates and returns `<mount>/ai-dump/<project>/`.
+    """
+    try:
+        return json.dumps(storage.pick(need_gb, io, project), indent=2)
+    except (ValueError, OSError) as e:
+        return _err("storage", str(e))
+
+
+@mcp.tool()
+async def storage_status() -> str:
+    """Free space on / and every configured drive, and the size in MB of each ai-dump entry.
+
+    Use it to find leftover dumps and drive stores to clean up.
+    """
+    return json.dumps(await storage.status(), indent=2)
+
+
+@mcp.tool()
+async def flake_preflight(installable: str) -> str:
+    """Check what evaluating a local flake copies into the Nix store, before running it.
+
+    A flake in a dir without .git, or any `path:` flake, copies the whole dir on
+    every eval where it changed: node_modules, results, datasets, VM images and
+    .gitignore'd files too. A git flake copies the tracked files of the whole
+    repo, and new files stay invisible until `git add`. nix_build runs this
+    itself; call it before `nix run`, `nix develop` or `nix flake check` in Bash.
+
+    Args:
+        installable: An absolute local flake ref, e.g. '/abs/dir#pkg',
+                     'path:/abs/dir' or 'git+file:///abs/repo'.
+
+    Returns JSON with `verdict` ("ok" or "refuse"), `reason`, `mode`, `copy_mb`,
+    the largest and heavy entries of a path flake, and untracked files of a git flake.
+    """
+    try:
+        check = await asyncio.to_thread(leftovers.preflight, installable)
+    except ValueError as e:
+        return _err("bad_args", str(e))
+    if check is None:
+        return json.dumps({"verdict": "ok", "reason": "not a local flake; nothing local is copied"})
+    return json.dumps(check, indent=2)
+
+
+@mcp.tool()
+async def gc_roots(under: str = "", sizes: bool = True) -> str:
+    """List Nix GC roots that may be leftovers: result links, temp roots, direnv roots.
+
+    Leaves out system, profile, home-manager and Nix cache roots. `removable` is
+    true only for roots under home, /tmp or an ai-dump dir; nix_cleanup refuses
+    the rest. Delete only the roots your own task made.
+
+    Args:
+        under: Only roots whose link is inside this dir, e.g. a project or scratch dir.
+        sizes: Add each target's closure size in MB.
+    """
+    return json.dumps(await asyncio.to_thread(leftovers.roots, under, sizes), indent=2)
+
+
+@mcp.tool()
+async def nix_cleanup(links: list[str] | None = None, delete: bool = True, collect: bool = False) -> str:
+    """Remove GC root links your task made and free their store paths. Never removes generations.
+
+    Each link must be one gc_roots lists as removable. `delete` then runs
+    `nix store delete` on each target no other root holds; paths something
+    still uses stay. The target's dependencies stay until a collect.
+
+    Args:
+        links: Root link paths from gc_roots, e.g. '/abs/project/result'.
+        delete: Delete the targets after unlinking.
+        collect: Also run `nix store gc` on the host store, which drops every path
+                 nothing roots. It never deletes old generations, so rollbacks stay.
+    """
+    report: dict[str, Any] = {}
+    if links:
+        report = await asyncio.to_thread(leftovers.remove, links, delete)
+    if collect:
+        report["collect"] = await asyncio.to_thread(leftovers.collect)
+    return json.dumps(report or {"note": "nothing to do; pass links or collect=true"}, indent=2)
 
 
 # --- REPO EXPLORER ---
@@ -1806,10 +1977,10 @@ def _drop_unused_default() -> None:
 def _on_exit() -> None:
     _drop_unused_default()
     try:
-        for host, msg in remote.cleanup(timeout=60).items():
-            logger.info("remote cleanup %s: %s", host, msg)
+        for store, msg in remote.cleanup(timeout=60).items():
+            logger.info("build cleanup %s: %s", store, msg)
     except Exception as e:
-        logger.warning("remote cleanup failed: %s", e)
+        logger.warning("build cleanup failed: %s", e)
 
 
 def main() -> None:

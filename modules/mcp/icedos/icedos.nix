@@ -28,6 +28,33 @@ in
       } 0 100;
     };
 
+    storage = {
+      drives = icedosLib.mkAttrsOfOption { default = defaults.storage.drives; } (
+        lib.types.enum [
+          "random"
+          "sequential"
+        ]
+      );
+
+      reserveGb = icedosLib.mkIntBetweenOption {
+        path = "icedos.ai-tools.mcp-server.storage.reserveGb";
+        source = ./config.toml;
+        default = defaults.storage.reserveGb;
+      } 0 100000;
+
+      largeGb = icedosLib.mkIntBetweenOption {
+        path = "icedos.ai-tools.mcp-server.storage.largeGb";
+        source = ./config.toml;
+        default = defaults.storage.largeGb;
+      } 0 100000;
+
+      maxFlakeCopyMb = icedosLib.mkIntBetweenOption {
+        path = "icedos.ai-tools.mcp-server.storage.maxFlakeCopyMb";
+        source = ./config.toml;
+        default = defaults.storage.maxFlakeCopyMb;
+      } 0 1000000;
+    };
+
     # Skills for this module (name = SKILL.md), loaded by every agent via icedos.ai-tools.skills.
     skills = icedosLib.mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
   };
@@ -72,8 +99,8 @@ in
             mainProgram = "icedos-mcp-server";
           };
 
-          buildConfig = pkgs.writeText "icedos-mcp-build.json" (
-            builtins.toJSON config.icedos.ai-tools.mcp-server.build
+          settingsFile = pkgs.writeText "icedos-mcp-settings.json" (
+            builtins.toJSON { inherit (config.icedos.ai-tools.mcp-server) build storage; }
           );
         in
         {
@@ -100,7 +127,7 @@ in
                 {
                   command = "serve";
                   help = "start the IceDOS MCP server (stdio); tools use a temp config copy unless --live";
-                  script = "ICEDOS_CONFIG_DIR=${config.icedos.configurationLocation}/.. ICEDOS_MCP_BUILD_CONFIG=${buildConfig} exec ${icedosMcpServer}/bin/icedos-mcp-server \"$@\"";
+                  script = "ICEDOS_CONFIG_DIR=${config.icedos.configurationLocation}/.. ICEDOS_MCP_SETTINGS=${settingsFile} exec ${icedosMcpServer}/bin/icedos-mcp-server \"$@\"";
                   completion.files = false;
                 }
               ];

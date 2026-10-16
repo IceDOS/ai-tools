@@ -12,6 +12,19 @@ minFreeGb = 20
 # This PC counts as busy above this CPU or IO `some avg10` pressure.
 pressureLimit = 20
 
+# Secondary drives for storage_pick and drive Nix stores, mount = "random" (SSD)
+# or "sequential" (HDD). Dumps go in <mount>/ai-dump/<project>/, drive stores in
+# <mount>/ai-dump/nix-store.
+[icedos.ai-tools.mcp-server.storage]
+drives = {}
+# Free space every drive, / included, keeps after a task, in GB.
+reserveGb = 30
+# nix_build store="auto" moves local builds needing this many GB or more off /.
+largeGb = 5
+# nix_build refuses a local flake whose eval copies more than this into the
+# store, in MB. A path flake copies its whole dir, a git flake its tracked files.
+maxFlakeCopyMb = 200
+
 # Skills for this module, name = full SKILL.md content. Added to the shared
 # icedos.ai-tools.skills pool, so every agent loads them.
 [icedos.ai-tools.mcp-server.skills]
@@ -62,16 +75,30 @@ The server keeps overrides in its own file inside the sandbox. They never touch 
 
 Edit the checkout with your normal file tools, then `rebuild` the sandbox. The build copies the checkout into the store, so later edits need another `rebuild`. Use `nix_eval` to confirm the result, e.g. `config.icedos.ai-tools.skills`.
 
-## Remote build hosts
+## Builds off the root disk
 
-For any heavy Nix build outside `rebuild` (compilers, kernels, browsers, VM tests, anything over a few minutes), use `nix_build` with `host="auto"`. Small builds and evaluations use `host="local"`.
+For any heavy Nix build outside `rebuild` (compilers, kernels, browsers, VM tests, anything over a few minutes), use `nix_build` with `host="auto"` and a `need_gb` estimate. Small builds and evaluations use `host="local"`.
 
-- `auto` calls `build_hosts`, which probes this PC and every host in `icedos.ai-tools.mcp-server.build.hosts`. It stays local unless this PC is busy, then picks the qualifying host with the fewest running builds. Call `build_hosts` yourself to see why. Pass `need_gb` when the build needs a lot of disk.
+- `host="auto"` calls `build_hosts`, which probes this PC and every host in `icedos.ai-tools.mcp-server.build.hosts`. It stays local unless this PC is busy, then picks the qualifying host with the fewest running builds. Call `build_hosts` yourself to see why.
+- A local build picks its store with `store="auto"`: the host `/nix/store` for small builds, a store on a secondary SSD (`<mount>/ai-dump/nix-store`) for builds of `storage.largeGb` or more, or when `/` would drop below the reserve. Pass `store="host"` only when the system or user profile must reference the output.
+- `nix_build` runs `flake_preflight` on a local flake and refuses one that copies more than `storage.maxFlakeCopyMb` into the store. Fix the dir as the result says. Pass `allow_copy=true` only when the task needs that copy.
 - Pass absolute paths in the installable, e.g. `path:/abs/dir#pkg`. The server's working dir is not yours.
-- A remote build's outputs stay in the host's store, because the remote user is not trusted. Inspect them with `ssh <host>`, or copy files back with `scp`.
-- Call `remote_cleanup` once you are done with them. The server also cleans up on exit. It deletes only paths the build added to the host.
-- Never build IceDOS remotely. `rebuild` refuses `--builder` in a sandbox, and live rebuilds need the local store.
-- These are other people's PCs. Only touch the Nix store and files you created under `/tmp`.
+- A remote build's outputs stay in the host's store, because the remote user is not trusted. Inspect them with `ssh <host>`, or copy files back with `scp`. These are other people's PCs. Only touch the Nix store and files you created under `/tmp`.
+- A drive store's outputs print as `/nix/store/...` but live under the store dir. Run them with the `nix shell --store ...` command the result gives, not by the printed path.
+- Call `build_cleanup` once you are done with the outputs. It deletes only paths your builds added, and the server also runs it on exit. `gc=true` also collects the drive stores; paths that running programs use from the host `/nix/store` stay, because a drive store shares their names.
+- Never build IceDOS remotely or in a drive store. `rebuild` refuses `--builder` in a sandbox, and rebuilds need the host store.
+
+## Heavy files
+
+Before writing anything large (gigabytes: datasets, VM and disk images, model weights, archives, caches), call `storage_pick` with `need_gb`, the `io` kind and a `project` name. It keeps `storage.reserveGb` free on every drive and returns a created `<mount>/ai-dump/<project>/`. Use `random` for builds, databases, VM disks and `node_modules`, `sequential` for archives, datasets and backups. Keep one task on one drive. `storage_status` shows free space and the size of every `ai-dump` entry, for finding leftovers to delete.
+
+## Flake copies
+
+A flake in a dir without `.git`, or any `path:` flake, copies its whole dir into the store on every eval where it changed. That includes `node_modules`, results, datasets, VM images and `.gitignore`'d files. A git flake copies only tracked files, so new files need `git add` first. Before `nix run`, `nix develop` or `nix flake check` on a local flake in Bash, call `flake_preflight` with the absolute ref and follow its `reason`. `nix_build` checks this itself and records the source copy for `build_cleanup`.
+
+## Nix leftovers
+
+Before you finish, call `gc_roots` with `under=` set to each dir you worked in (project, scratch dir, `/tmp`). Pass the `result` links and other roots your task made to `nix_cleanup`. It unlinks them and deletes their targets unless something still holds them. `collect=true` then runs `nix store gc` for the dependencies. Never remove old generations (`nix-collect-garbage -d`, `--delete-older-than`) unless the user asks; `nix_cleanup` cannot. Leave roots you did not make alone, such as `.direnv` roots and roots under a project's own `.gcroots`.
 
 ## Parallel agents and subagents
 
@@ -98,7 +125,7 @@ Sandbox-aware, all take `sandbox=`:
 
 Sandbox management: `sandbox_create`, `sandbox_list`, `sandbox_diff`, `sandbox_inputs_diff`, `sandbox_delete`, `sandbox_override_repo`.
 
-Always live and read-only or self-contained: `doctor`, `get_system_info_tool`, `get_generations_tool`, `diff_generations`, `config_history`, `list_packages`, `run_package` (`args`, `insecure`), `pkgs_build` (builds a package.nix against the system's pkgs), `explore_local_repo`, `build_hosts`, `nix_build`, `remote_cleanup`.
+Always live and read-only or self-contained: `doctor`, `get_system_info_tool`, `get_generations_tool`, `diff_generations`, `config_history`, `list_packages`, `run_package` (`args`, `insecure`), `pkgs_build` (builds a package.nix against the system's pkgs), `explore_local_repo`, `build_hosts`, `nix_build`, `build_cleanup`, `storage_pick`, `storage_status`, `flake_preflight`, `gc_roots`, `nix_cleanup`.
 
 Live mode only, unless `dry=true`: `rollback`, `gc`.
 

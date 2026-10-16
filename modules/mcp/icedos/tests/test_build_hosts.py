@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from icedos_mcp import build_hosts, server
+from icedos_mcp import build_hosts, server, settings, storage
 
 PROBE_OUT = """{cores}
 {load} 1.00 1.00 1/500 1234
@@ -40,17 +40,34 @@ class _EnvMixin:
         sandboxes.mkdir(mode=0o700)
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
-        cfg = self.tmp / "build.json"
-        cfg.write_text(json.dumps({"hosts": ["a@h1", "b@h2"], "minFreeGb": 20, "pressureLimit": 20}))
+        self.ssd, self.ssd2, self.hdd = (str(self.tmp / n) for n in ("ssd", "ssd2", "hdd"))
+        for d in (self.ssd, self.ssd2, self.hdd):
+            Path(d).mkdir()
+        cfg = self.tmp / "settings.json"
+        cfg.write_text(json.dumps({
+            "build": {"hosts": ["a@h1", "b@h2"], "minFreeGb": 20, "pressureLimit": 20},
+            "storage": {
+                "drives": {self.ssd: "random", self.ssd2: "random", self.hdd: "sequential"},
+                "reserveGb": 30, "largeGb": 5,
+            },
+        }))
         self._env = mock.patch.dict(os.environ, {
             "ICEDOS_SANDBOX_DIR": str(sandboxes),
-            build_hosts.CONFIG_ENV: str(cfg),
+            settings.ENV: str(cfg),
             "PATH": f"{self.bin}:{os.environ['PATH']}",
         })
         self._env.start()
+        # Free GB per mount; tests change it to steer drive choice.
+        self.free = {"/": 100.0, self.ssd: 100.0, self.ssd2: 60.0, self.hdd: 500.0}
+        self._space = mock.patch.object(storage, "_space", lambda p: (self.free[p], 1000.0))
+        self._mount = mock.patch.object(storage.os.path, "ismount", lambda p: p in self.free)
+        self._space.start()
+        self._mount.start()
         build_hosts._created.clear()
 
     def tearDown(self) -> None:
+        self._space.stop()
+        self._mount.stop()
         self._env.stop()
         build_hosts._created.clear()
         self._tmp.cleanup()
@@ -156,7 +173,7 @@ echo '[{{"drvPath":"/nix/store/ddd-top.drv","outputs":{{"out":"/nix/store/eee-to
         self.assertIn("output: /nix/store/eee-top", out)
         self.assertIn("--store ssh-ng://a@h1", log.read_text())
         # The top output may have existed already, so only logged arrivals count.
-        self.assertEqual(build_hosts._created["a@h1"],
+        self.assertEqual(build_hosts._created["ssh-ng://a@h1"],
                          {"/nix/store/ccc-src", "/nix/store/aaa-dep.drv", "/nix/store/bbb-dep"})
         self.assertEqual(build_hosts.active_builds(), {})
 
@@ -168,24 +185,132 @@ echo '[{{"drvPath":"/nix/store/ddd-top.drv","outputs":{{"out":"/nix/store/eee-to
         out = json.loads(asyncio.run(server.nix_build(mock.MagicMock(), "--impure", host="local")))
         self.assertEqual(out["error"]["kind"], "bad_args")
 
-    def test_cleanup_skips_live_paths(self) -> None:
+    def fake_store(self, refs: dict[str, list[str]], live: frozenset[str] | set[str] = frozenset()) -> Path:
+        """Fake nix whose path-info answers refs and whose delete refuses live paths or alive referrers."""
         calls = self.tmp / "calls"
+        info = {p: {"references": r} for p, r in refs.items()}
+        (self.tmp / "info.json").write_text(json.dumps(info))
+        # A path is alive while it is live or something not being deleted in this call references it.
+        checks = "\n".join(
+            f'  [ "$a" = {p} ] && echo "error: Cannot delete path \'{p}\' since it is still alive." >&2 && exit 1'
+            for p in sorted(live)
+        )
+        referrers = "\n".join(
+            f'  [ "$a" = {d} ] && ! printf "%s\\n" "$@" | grep -qx {q} && grep -qx {q} {self.tmp}/valid '
+            f'&& echo "error: Cannot delete path \'{d}\' since it is still alive." >&2 && exit 1'
+            for q, ds in refs.items() for d in ds if d != q
+        )
+        (self.tmp / "valid").write_text("\n".join(refs) + "\n")
         self.fake("nix", f"""
 echo "$*" >> {calls}
-for a in "$@"; do
-  if [ "$a" = /nix/store/live ]; then
-    echo "error: Cannot delete path '/nix/store/live' since it is still alive." >&2
-    exit 1
-  fi
-done
+if [ "$1" = path-info ]; then cat {self.tmp}/info.json; exit 0; fi
+if [ "$1 $2" = "store delete" ]; then
+  for a in "$@"; do
+{checks or "    :"}
+{referrers or "    :"}
+  done
+  for a in "$@"; do sed -i "\\|^$a$|d" {self.tmp}/valid; done
+fi
 """)
-        build_hosts._created["a@h1"] = {"/nix/store/live", "/nix/store/dead"}
+        return calls
+
+    def test_cleanup_skips_live_paths(self) -> None:
+        calls = self.fake_store({"/nix/store/live": [], "/nix/store/dead": []}, live={"/nix/store/live"})
+        build_hosts._created["ssh-ng://a@h1"] = {"/nix/store/live", "/nix/store/dead"}
         report = build_hosts.cleanup()
-        self.assertIn("deleted 1 paths", report["a@h1"])
-        self.assertIn("kept 1 live", report["a@h1"])
-        self.assertEqual(build_hosts._created, {})
+        self.assertIn("deleted 1 paths", report["ssh-ng://a@h1"])
+        self.assertIn("kept 1 live", report["ssh-ng://a@h1"])
+        # Kept paths stay recorded for a later cleanup.
+        self.assertEqual(build_hosts._created, {"ssh-ng://a@h1": {"/nix/store/live"}})
         last = calls.read_text().splitlines()[-1]
         self.assertEqual(last, "store delete --store ssh-ng://a@h1 /nix/store/dead")
+
+    def test_cleanup_deletes_referrers_first(self) -> None:
+        top, lib, libc = "/nix/store/top", "/nix/store/lib", "/nix/store/libc"
+        calls = self.fake_store({top: [lib, libc, top], lib: [libc], libc: []})
+        build_hosts._created["ssh-ng://a@h1"] = {top, lib, libc}
+        report = build_hosts.cleanup()
+        self.assertEqual(report["ssh-ng://a@h1"], "deleted 3 paths")
+        deletes = [c.split()[-1] for c in calls.read_text().splitlines() if c.startswith("store delete")]
+        self.assertEqual(deletes, [top, lib, libc])
+
+
+class StorageTest(_EnvMixin, unittest.TestCase):
+    def test_pick_prefers_io_then_room(self) -> None:
+        r = storage.pick(20, "random", "proj")
+        self.assertEqual(r["mount"], self.ssd)
+        self.assertTrue(Path(r["dir"]).is_dir())
+        self.assertEqual(storage.pick(20, "sequential")["mount"], self.hdd)
+
+    def test_pick_falls_back_and_keeps_reserve(self) -> None:
+        self.free.update({self.ssd: 40.0, self.ssd2: 40.0})
+        r = storage.pick(20, "random")
+        self.assertEqual(r["mount"], self.hdd)
+        self.assertFalse(r["matches_io"])
+        with self.assertRaises(ValueError):
+            storage.pick(1000)
+
+    def test_pick_rejects_bad_project(self) -> None:
+        for bad in ("../x", ".hidden", "a/b"):
+            with self.assertRaises(ValueError):
+                storage.pick(1, project=bad)
+
+    def test_store_for(self) -> None:
+        self.assertEqual(storage.store_for(1)[0], "")
+        # Large builds go to an SSD, preferring one that already has a store.
+        Path(storage.store_dir(self.ssd2)).mkdir(parents=True)
+        self.assertEqual(storage.store_for(10)[0], storage.store_dir(self.ssd2))
+        # A small build that would eat into the root reserve moves too.
+        self.free["/"] = 31.0
+        self.assertEqual(storage.store_for(2)[0], storage.store_dir(self.ssd2))
+        self.assertEqual(storage.store_for(10, "host")[0], "")
+        self.assertEqual(storage.store_for(1, self.hdd)[0], storage.store_dir(self.hdd))
+        with self.assertRaises(ValueError):
+            storage.store_for(1, "/mnt/elsewhere")
+        self.free.update({self.ssd: 10.0, self.ssd2: 10.0})
+        with self.assertRaises(ValueError):
+            storage.store_for(10)
+
+    def test_drive_store_build_and_cleanup(self) -> None:
+        argv = self.tmp / "argv"
+        self.fake("nix", f"""
+echo "$*" >> {argv}
+if [ "$1" = path-info ]; then
+  echo '{{"/nix/store/ddd-top.drv":{{"references":[]}},"/nix/store/eee-top":{{"references":[]}}}}'
+fi
+if [ "$1" = build ]; then
+  mkdir -p "$3"
+  echo '[{{"drvPath":"/nix/store/ddd-top.drv","outputs":{{"out":"/nix/store/eee-top"}}}}]'
+fi
+""")
+        store = storage.store_dir(self.ssd)
+        out = asyncio.run(server.nix_build(mock.MagicMock(), "nixpkgs#hello", host="local", need_gb=10))
+        self.assertIn(f"on disk: {store}/nix/store/eee-top", out)
+        self.assertIn(f"nix shell --store {store} nixpkgs#hello", out)
+        self.assertIn(f"build --store {store} --no-link", argv.read_text())
+        # Everything in a drive store came from agents, so the result's paths count.
+        self.assertEqual(build_hosts._created[store], {"/nix/store/ddd-top.drv", "/nix/store/eee-top"})
+        report = json.loads(asyncio.run(server.build_cleanup(self.ssd, gc=True)))
+        self.assertIn("deleted 2 paths", report[store])
+        self.assertIn(f"gc {store}", report)
+        self.assertIn(f"store gc --store {store}", argv.read_text())
+
+    def test_store_needs_local_build(self) -> None:
+        out = json.loads(asyncio.run(server.nix_build(mock.MagicMock(), "x#y", host="a@h1", store=self.ssd)))
+        self.assertEqual(out["error"]["kind"], "bad_args")
+
+    def test_cleanup_rejects_unknown_target(self) -> None:
+        out = json.loads(asyncio.run(server.build_cleanup("/mnt/games")))
+        self.assertEqual(out["error"]["kind"], "bad_args")
+
+    def test_status_sizes_dumps(self) -> None:
+        d = Path(self.hdd) / "ai-dump" / "proj"
+        d.mkdir(parents=True)
+        (d / "f").write_bytes(b"x" * 3 * 1024 * 1024)
+        r = asyncio.run(storage.status())
+        hdd = next(x for x in r["drives"] if x["mount"] == self.hdd)
+        self.assertGreaterEqual(hdd["ai_dump_mb"]["proj"], 3)
+        self.assertEqual(r["root"]["room_gb"], 70.0)
 
 
 class RebuildFlagTest(unittest.TestCase):
