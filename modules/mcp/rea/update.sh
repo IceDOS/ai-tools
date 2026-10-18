@@ -43,7 +43,7 @@ main() {
 
   # Same trim as postPatch in package.nix; keep the two jq filters identical.
   info "  Regenerating package-lock.json..."
-  local work
+  # Global so the EXIT trap can still refer to it.
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
   curl -sfL "$url" | tar -xz -C "$work"
