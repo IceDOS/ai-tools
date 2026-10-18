@@ -1489,7 +1489,7 @@
               "Models running on your own graphics card are priced by the electricity they use."
             ]
             ++ lib.optionals prime-agent.settings.speed [
-              "The TUI footer shows output tok/s per response and a session average; /speed on/off toggles it."
+              "The prime-agent footer shows output tok/s per response and a session average; /speed on/off toggles it."
             ]
             ++ lib.optionals prime-agent.includeInIcedosGc [
               "icedos gc also clears out old prime-agent sessions and logs."
