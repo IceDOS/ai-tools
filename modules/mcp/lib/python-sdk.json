@@ -1,13 +1,13 @@
 {
   "httpcore2": {
-    "version": "2.13.1",
-    "url": "https://files.pythonhosted.org/packages/09/ba/a4568248771ce81957bfb7cc600264a40fbcda092391ee1c415c50be4bea/httpcore2-2.13.1-py3-none-any.whl",
-    "hash": "sha256-4eBdTyX319SWv7lnSPb0tnZXsD2gabOmjDYGnz23PQo="
+    "version": "2.14.0",
+    "url": "https://files.pythonhosted.org/packages/02/06/a8d6a8f90d11b76d9086242b6bb0ee4b503473bfc8be34c2d5b067275c22/httpcore2-2.14.0-py3-none-any.whl",
+    "hash": "sha256-TE9k9LVEr+t3jELA/7WUGynmcRV+kO0/bceHxLypDNE="
   },
   "httpx2": {
-    "version": "2.13.1",
-    "url": "https://files.pythonhosted.org/packages/d8/9c/6fe8931fd9f381042a9e4c7d5a7b4cbf7016b252bec0c99a49fce42c3326/httpx2-2.13.1-py3-none-any.whl",
-    "hash": "sha256-bf9Q+rwnDuX9JdhF0LB47SBWRXl0TW2WKFCXWZbS+aQ="
+    "version": "2.14.0",
+    "url": "https://files.pythonhosted.org/packages/69/5a/469616aa8c2cbb0bb9dd67a3c18d07c01ab604cc0b236ee1c47d260c7f6e/httpx2-2.14.0-py3-none-any.whl",
+    "hash": "sha256-nSDBOhC64Xc6C+Ow8eW+60vdVJvDoroY76Mol8ZUA+Q="
   },
   "mcp-types": {
     "version": "2.3.0",
