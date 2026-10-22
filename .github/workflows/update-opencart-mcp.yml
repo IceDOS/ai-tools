@@ -1,0 +1,18 @@
+name: Update opencart-mcp
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "10 3 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: opencart-mcp
+      paths: modules/mcp/opencart
+      command: nix-shell modules/mcp/opencart/update.sh
+      version-file: modules/mcp/opencart/source.json
+    secrets: inherit

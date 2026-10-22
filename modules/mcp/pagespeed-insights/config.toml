@@ -1,0 +1,10 @@
+[icedos.ai-tools.pagespeed-insights-mcp]
+# File outside the Nix store holding the Google API key.
+apiKeyFile = "~/.config/secrets/google-api-key"
+
+# Tool-call timeout in milliseconds for agents that honour it.
+timeout = 600000
+
+# Skills for this module, name = full SKILL.md content. Added to the shared
+# icedos.ai-tools.skills pool.
+[icedos.ai-tools.pagespeed-insights-mcp.skills]

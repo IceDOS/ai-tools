@@ -1,0 +1,15 @@
+[icedos.ai-tools.opencart-mcp]
+# KEY=value file outside the Nix store for secrets such as OPENCART_DB_PASS.
+# "" reads none.
+envFile = ""
+
+# Tool-call timeout in milliseconds for agents that honour it.
+timeout = 600000
+
+# Plain OPENCART_* settings passed to the server, e.g. OPENCART_SSH_HOST = "ddev"
+# for a local DDEV project. Keep secrets in envFile.
+[icedos.ai-tools.opencart-mcp.env]
+
+# Skills for this module, name = full SKILL.md content. Added to the shared
+# icedos.ai-tools.skills pool.
+[icedos.ai-tools.opencart-mcp.skills]

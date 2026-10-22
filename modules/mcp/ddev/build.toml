@@ -1,0 +1,7 @@
+[[icedos.repositories]]
+url = "github:icedos/ai-tools"
+fetchDependencies = false
+modules = ["ddev-mcp"]
+
+[icedos.system]
+version = "26.05"

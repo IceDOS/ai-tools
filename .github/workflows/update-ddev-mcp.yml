@@ -1,0 +1,18 @@
+name: Update ddev-mcp
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: ddev-mcp
+      paths: modules/mcp/ddev
+      command: nix-shell modules/mcp/ddev/update.sh
+      version-file: modules/mcp/ddev/source.json
+    secrets: inherit
