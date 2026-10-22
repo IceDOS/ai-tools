@@ -1,0 +1,18 @@
+name: Update plesk-mcp
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: plesk-mcp
+      paths: modules/mcp/plesk
+      command: nix-shell modules/mcp/plesk/update.sh
+      version-file: modules/mcp/plesk/source.json
+    secrets: inherit

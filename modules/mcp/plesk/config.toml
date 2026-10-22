@@ -1,0 +1,11 @@
+[icedos.ai-tools.plesk-mcp]
+# Plesk servers, one MCP server named "plesk-<name>" each. Each entry:
+# host = base URL, port included (https://plesk.example.net:8443),
+# envFile = KEY=value file outside the Nix store with PLESK_API_KEY, or
+# PLESK_USERNAME and PLESK_PASSWORD ("" = ~/.config/secrets/plesk-<name>.env),
+# insecure = skip TLS checks and allow http://, timeout = API timeout in seconds.
+[icedos.ai-tools.plesk-mcp.servers]
+
+# Skills for this module, name = full SKILL.md content. Added to the shared
+# icedos.ai-tools.skills pool.
+[icedos.ai-tools.plesk-mcp.skills]

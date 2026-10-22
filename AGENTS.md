@@ -17,7 +17,7 @@
 AI agents, local model servers and their glue: `claude-code`, `antigravity`, `opencode`, `prime-agent`
 (agents), `llamacpp`, `ollama` (model servers), `peon-ping` (agent-event audio),
 `mcp-server` (`icedos mcp serve`), one module per MCP server (`basic-memory-mcp`,
-`chrome-devtools-mcp`, `context7-mcp`, `kwin-mcp`, `nixos-mcp`, `rea-mcp`,
+`chrome-devtools-mcp`, `context7-mcp`, `kwin-mcp`, `nixos-mcp`, `plesk-mcp`, `rea-mcp`,
 `signal-mcp`), `alimit` (usage limits for every agent and provider),
 `ai-accounts` (several accounts per agent), `agent-launch` (fzf agent picker) and
 `code-intelligence` (per-language LSP skills).
@@ -31,7 +31,7 @@ attrset per module (`icedos.ai-tools.prime-agent`, ...).
 `icedosLib.scanModules { path = ./modules; filename = "icedos.nix"; }`, which recurses, and
 `meta.name` (not the folder) names the module. The categories are `agents` (antigravity,
 claude-code, opencode, prime-agent), `models` (llamacpp, ollama), `mcp` (one folder per MCP server: icedos-mcp, whose module name is `mcp-server`, and
-basic-memory, chrome-devtools, context7, kwin, nixos, rea, signal, each named
+basic-memory, chrome-devtools, context7, kwin, nixos, plesk, rea, signal, each named
 `<folder>-mcp` except `kwin-mcp`; `mcp/lib` holds their shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence, peon-ping).
 `modules/default` loads whenever the repo is listed and owns the shared options.
 
@@ -59,7 +59,8 @@ basic-memory, chrome-devtools, context7, kwin, nixos, rea, signal, each named
 - Each one packages its server as a real derivation, puts it on the system PATH, registers it
   in `mcp-servers` under the server name agents already use (`basic-memory`, `chrome-devtools`,
   `context7`, `icedos`, `kwin-mcp`, `nixos`, `rea`, `signal-mcp`) and ships
-  its skills.
+  its skills. `plesk-mcp` instead registers one `plesk-<name>` entry per `servers.<name>`, and its
+  wrapper sources the credentials from `PLESK_ENV_FILE`, so they stay out of the store.
 - Skills that upstream ships come from the package source: `upstreamSkills` lists the names,
   `lib/upstream-skills.nix` reads `SKILL.md` and appends `references/*.md`. They read
   `${package.src}` (`pkgs.context7-mcp.src` for context7), an IFD that only needs the fetch,

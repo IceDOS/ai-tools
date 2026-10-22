@@ -1,0 +1,10 @@
+[[icedos.repositories]]
+url = "github:icedos/ai-tools"
+fetchDependencies = false
+modules = ["plesk-mcp"]
+
+[icedos.ai-tools.plesk-mcp.servers.example]
+host = "https://plesk.example.net:8443"
+
+[icedos.system]
+version = "26.05"
