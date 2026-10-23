@@ -1,15 +1,15 @@
 {
-  "version": "0.23.2",
-  "rev": "v0.23.2",
-  "hash": "sha256-etL0RHkSNFzT00p3yCBtH92XDaqwakDO8Eurf+dS3ug=",
+  "version": "0.24.1",
+  "rev": "v0.24.1",
+  "hash": "sha256-yHtCT3WQlSvYIptRxwUiAQJrVWK4EJTuiaLd+0FR0mE=",
   "fastmcp-slim": {
-    "version": "4.0.0b1",
-    "url": "https://files.pythonhosted.org/packages/90/5d/fbe192d2ab50bb31b284fd0eb6c72d4347df7a57d836bee4f1973ffd1d7d/fastmcp_slim-4.0.0b1-py3-none-any.whl",
-    "hash": "sha256-3ZB6PbWi9HnKlYwwFX4ie097NApW0zPrkd6VcZJUWXo="
+    "version": "4.1.3",
+    "url": "https://files.pythonhosted.org/packages/4e/ff/a7feaeb130a2003700789ce32e933b4c2ae00fc7c264642e57ab12e4684f/fastmcp_slim-4.1.3-py3-none-any.whl",
+    "hash": "sha256-ga+GmTMcM9Q4yvhbaUfzbfbi8EEY5vMYygA3T9mv6po="
   },
   "fastmcp": {
-    "version": "4.0.0b1",
-    "url": "https://files.pythonhosted.org/packages/2c/66/41b503ef852eff83f3f0c04f46cd1fc738c5374fd509384fc6b96e45918f/fastmcp-4.0.0b1-py3-none-any.whl",
-    "hash": "sha256-1m63sHY///KuD8Vzd46iVgTct+WXaeWvr5hRqAbrESk="
+    "version": "4.1.3",
+    "url": "https://files.pythonhosted.org/packages/97/7f/27c501d98b5681ca4f6c21a7d741b3e732e962c5e4c3b4db6dd1ffdf4fd8/fastmcp-4.1.3-py3-none-any.whl",
+    "hash": "sha256-uYPYrMRKsRQ+DIb9bahD8lBD7grrZKuYOzbFJ70dM+k="
   }
 }
