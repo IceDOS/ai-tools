@@ -61,6 +61,29 @@ let
         inherit (source.fastmcp) version url hash;
         dependencies = [ final.fastmcp-slim ];
       };
+
+      # Exact upstream pin: the read cache uses get_flat_dependant, gone in 0.141.
+      fastapi = prev.fastapi.overridePythonAttrs {
+        inherit (source.fastapi) version;
+        src = prev.fastapi.src.override {
+          tag = source.fastapi.version;
+          inherit (source.fastapi) hash;
+        };
+        doCheck = false;
+      };
+
+      # Not in nixpkgs; imported as redis_fastapi by the API app.
+      fastapi-redis-sdk = final.mkWheel {
+        pname = "fastapi-redis-sdk";
+        inherit (source.fastapi-redis-sdk) version url hash;
+        dependencies = with final; [
+          anyio
+          fastapi
+          pydantic
+          pydantic-settings
+          redis
+        ];
+      };
     };
   };
 
@@ -80,6 +103,12 @@ let
     # uv-dynamic-versioning reads git tags, which the fetched source lacks.
     env.UV_DYNAMIC_VERSIONING_BYPASS = version;
 
+    # typer._click exists only in Typer 0.26+; nixpkgs Typer still uses plain Click.
+    postPatch = ''
+      substituteInPlace src/basic_memory/cli/commands/man.py \
+        --replace-fail "from typer._click.core import" "from click.core import"
+    '';
+
     build-system = with python.pkgs; [
       hatchling
       uv-dynamic-versioning
@@ -95,6 +124,7 @@ let
         asyncpg
         dateparser
         fastapi
+        fastapi-redis-sdk
         fastembed
         fastmcp
         filelock
@@ -139,10 +169,11 @@ let
       "pytest-aio"
       "pytest-asyncio"
     ];
-    # nixpkgs is ahead of upstream's pins (litellm <1.92 is only a Python 3.14 wheel concern).
+    # nixpkgs differs from upstream's exact pins (litellm <1.92 is only a Python 3.14 wheel concern).
     pythonRelaxDeps = [
       "litellm"
       "psycopg"
+      "pyjwt"
     ];
 
     pythonImportsCheck = [ "basic_memory" ];

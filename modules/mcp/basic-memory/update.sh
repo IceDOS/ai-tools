@@ -62,13 +62,27 @@ main() {
   slim="${slim:-$fastmcp}"
   info "  fastmcp: $fastmcp, fastmcp-slim: $slim"
 
-  local fastmcpWheel slimWheel
+  local redisSdk
+  redisSdk=$(grep -oP '"fastapi-redis-sdk==\K[^"]+' <<<"$pyproject" | head -1 || true)
+  [ -n "$redisSdk" ] || error "pyproject no longer pins fastapi-redis-sdk exactly; update package.nix by hand"
+  info "  fastapi-redis-sdk: $redisSdk"
+
+  local fastapi fastapiHash
+  fastapi=$(grep -oP '"fastapi\[standard\]==\K[^"]+' <<<"$pyproject" | head -1 || true)
+  [ -n "$fastapi" ] || error "pyproject no longer pins fastapi exactly; update package.nix by hand"
+  fastapiHash=$(prefetch_github tiangolo fastapi "$fastapi" || echo "")
+  require_nonempty fastapi "$fastapi" "$fastapiHash"
+  info "  fastapi: $fastapi"
+
+  local fastmcpWheel slimWheel redisSdkWheel
   fastmcpWheel=$(pypi_wheel fastmcp "$fastmcp")
   slimWheel=$(pypi_wheel fastmcp-slim "$slim")
+  redisSdkWheel=$(pypi_wheel fastapi-redis-sdk "$redisSdk")
 
   jq -n --arg version "$version" --arg rev "$tag" --arg hash "$hash" \
-    --argjson fastmcp "$fastmcpWheel" --argjson slim "$slimWheel" \
-    '{version: $version, rev: $rev, hash: $hash, "fastmcp-slim": $slim, fastmcp: $fastmcp}' |
+    --argjson fastmcp "$fastmcpWheel" --argjson slim "$slimWheel" --argjson redisSdk "$redisSdkWheel" \
+    --arg fastapi "$fastapi" --arg fastapiHash "$fastapiHash" \
+    '{version: $version, rev: $rev, hash: $hash, "fastmcp-slim": $slim, fastmcp: $fastmcp, "fastapi-redis-sdk": $redisSdk, fastapi: {version: $fastapi, hash: $fastapiHash}}' |
     write_pin "$PIN"
 
   info "  Updated: $version"
