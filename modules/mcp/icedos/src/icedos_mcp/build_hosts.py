@@ -31,9 +31,19 @@ _COPYING_RE = re.compile(r"copying path '(/nix/store/[^']+)'")
 _LIVE_RE = re.compile(r"[Cc]annot delete path '(/nix/store/[^']+)'")
 
 
+LOCAL = "local"
+
+
 def settings() -> dict[str, Any]:
-    """Hosts and thresholds."""
-    return settings_file.load()["build"]
+    """Hosts and thresholds. `hosts` holds only remote hosts; `order` is the whole list by priority.
+
+    A "local" entry in the list places this PC; without one it comes first.
+    """
+    cfg = settings_file.load()["build"]
+    order = list(cfg["hosts"])
+    if LOCAL not in order:
+        order.insert(0, LOCAL)
+    return {**cfg, "hosts": [h for h in order if h != LOCAL], "order": order}
 
 
 def parse_probe(text: str) -> dict[str, Any]:
@@ -143,15 +153,22 @@ async def choose(need_gb: float = 0) -> dict[str, Any]:
             row.update(ok=True, reason="qualifies")
         rows.append(row)
 
-    # Fewest running builds first spreads parallel agents, then the lowest load per core.
-    ok = sorted((r for r in rows if r["ok"]), key=lambda r: (r["active_builds"], r["load1"] / r["cores"]))
+    # Fewer running builds first spreads parallel agents, then list order. This PC's own
+    # builds already show in its load.
+    rank = {h: i for i, h in enumerate(cfg["order"])}
+    ok = [r for r in rows if r["ok"]]
     if not local.get("busy", False):
-        pick, why = "local", "this PC is not busy"
-    elif ok:
+        ok.append({"host": LOCAL, "active_builds": 0})
+    ok.sort(key=lambda r: (r["active_builds"], rank[r["host"]]))
+    if not ok:
+        pick, why = LOCAL, "this PC is busy but no host qualifies"
+    elif ok[0]["host"] == LOCAL:
+        pick, why = LOCAL, "this PC is not busy"
+    elif local.get("busy", False):
         pick, why = ok[0]["host"], f"this PC is busy ({local['reason']})"
     else:
-        pick, why = "local", "this PC is busy but no host qualifies"
-    return {"pick": pick, "why": why, "local": local, "hosts": rows}
+        pick, why = ok[0]["host"], "host comes before this PC in build.hosts"
+    return {"pick": pick, "why": why, "order": cfg["order"], "local": local, "hosts": rows}
 
 
 # Paths this server's builds added, keyed by store URL (ssh-ng://host or a drive store dir).

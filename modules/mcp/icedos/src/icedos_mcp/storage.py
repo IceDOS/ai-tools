@@ -46,13 +46,31 @@ def root() -> dict[str, Any]:
     return row
 
 
+HOST = "host"
+
+
+def rank() -> dict[str, int]:
+    """Position of each mount, and "host" for the host store, in storage.priority.
+
+    Unlisted mounts share the slot after the list. Without a "host" entry the host store comes first.
+    """
+    order = [m.rstrip("/") or "/" for m in settings()["priority"]]
+    if HOST not in order:
+        order.insert(0, HOST)
+    return {m: i for i, m in reversed(list(enumerate(order)))}
+
+
+def _rank_of(ranks: dict[str, int], mount: str) -> int:
+    return ranks.get(mount, len(ranks))
+
+
 def drives() -> list[dict[str, Any]]:
     cfg = settings()
     return [_row(m, io, float(cfg["reserveGb"])) for m, io in cfg["drives"].items()]
 
 
 def pick(need_gb: float, io: str = "random", project: str = "") -> dict[str, Any]:
-    """Drive with room for need_gb above the reserve, preferring the asked I/O kind, then most room."""
+    """Drive with room for need_gb above the reserve, preferring the asked I/O kind, then priority, then most room."""
     if io not in ("random", "sequential"):
         raise ValueError("io must be 'random' or 'sequential'")
     if project and not _NAME_RE.match(project):
@@ -60,7 +78,8 @@ def pick(need_gb: float, io: str = "random", project: str = "") -> dict[str, Any
     rows = [r for r in drives() if r["mounted"] and r["room_gb"] >= need_gb]
     if not rows:
         raise ValueError(f"no configured drive has {need_gb:g} GB free above the {settings()['reserveGb']} GB reserve")
-    rows.sort(key=lambda r: (r["io"] != io, -r["room_gb"]))
+    ranks = rank()
+    rows.sort(key=lambda r: (r["io"] != io, _rank_of(ranks, r["mount"]), -r["room_gb"]))
     best = rows[0]
     out = {k: best[k] for k in ("mount", "io", "free_gb", "room_gb")}
     out["matches_io"] = best["io"] == io
@@ -74,9 +93,10 @@ def pick(need_gb: float, io: str = "random", project: str = "") -> dict[str, Any
 def store_for(need_gb: float, choice: str = "auto") -> tuple[str, str]:
     """Store dir for a local build ("" is the host store) and why it was picked.
 
-    `auto` keeps small builds on the host store, where their dependencies already are.
-    A build of largeGb or more, or one that would push / below the reserve, goes to the
-    SSD with room that already has a store, else the one with the most room.
+    `auto` takes the first fit in storage.priority. The host store fits a build under largeGb
+    that keeps / above the reserve; an SSD fits when it has room. Among SSDs of one rank,
+    one that already has a store wins, then the most room. With no SSD room, the host
+    store takes any build / has room for.
     """
     cfg = settings()
     rows = [r for r in drives() if r["mounted"]]
@@ -91,14 +111,21 @@ def store_for(need_gb: float, choice: str = "auto") -> tuple[str, str]:
     reserve = float(cfg["reserveGb"])
     root_ok = _space("/")[0] - need_gb >= reserve
     large = need_gb >= float(cfg["largeGb"])
-    if root_ok and not large:
-        return "", "small build, host store has room"
+    ranks = rank()
     ssds = sorted(
         (r for r in rows if r["io"] == "random" and r["room_gb"] >= need_gb),
-        key=lambda r: (not r["nix_store"], -r["room_gb"]),
+        key=lambda r: (_rank_of(ranks, r["mount"]), not r["nix_store"], -r["room_gb"]),
     )
+    host_fits = root_ok and not large
+    if host_fits and (not ssds or ranks[HOST] < _rank_of(ranks, ssds[0]["mount"])):
+        return "", "small build, host store has room"
     if ssds:
-        why = f"{need_gb:g} GB build" if large else f"/ would drop below the {reserve:g} GB reserve"
+        if host_fits:
+            why = "drive comes before the host store in storage.priority"
+        elif large:
+            why = f"{need_gb:g} GB build"
+        else:
+            why = f"/ would drop below the {reserve:g} GB reserve"
         return _prepare(ssds[0]["mount"]), f"{why}; store on {ssds[0]['mount']}"
     if root_ok:
         return "", "no SSD has room, host store has"

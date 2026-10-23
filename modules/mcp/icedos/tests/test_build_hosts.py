@@ -43,7 +43,7 @@ class _EnvMixin:
         self.ssd, self.ssd2, self.hdd = (str(self.tmp / n) for n in ("ssd", "ssd2", "hdd"))
         for d in (self.ssd, self.ssd2, self.hdd):
             Path(d).mkdir()
-        cfg = self.tmp / "settings.json"
+        self.cfg = cfg = self.tmp / "settings.json"
         cfg.write_text(json.dumps({
             "build": {"hosts": ["a@h1", "b@h2"], "minFreeGb": 20, "pressureLimit": 20},
             "storage": {
@@ -71,6 +71,11 @@ class _EnvMixin:
         self._env.stop()
         build_hosts._created.clear()
         self._tmp.cleanup()
+
+    def configure(self, section: str, **values) -> None:
+        data = json.loads(self.cfg.read_text())
+        data[section].update(values)
+        self.cfg.write_text(json.dumps(data))
 
     def fake(self, name: str, body: str) -> None:
         exe = self.bin / name
@@ -106,9 +111,20 @@ class ChooseTest(_EnvMixin, unittest.TestCase):
         self.assertEqual(r["pick"], "local")
         self.assertFalse(r["local"]["busy"])
 
-    def test_busy_pc_picks_idlest_host(self) -> None:
+    def test_busy_pc_picks_first_listed_host(self) -> None:
         r = self.choose(probe(load=13), probe(cores=16, load=4), probe(cores=12, load=1))
+        self.assertEqual(r["pick"], "a@h1")
+        self.assertEqual(r["order"], ["local", "a@h1", "b@h2"])
+
+    def test_local_entry_sets_priority(self) -> None:
+        self.configure("build", hosts=["b@h2", "a@h1", "local"])
+        r = self.choose(probe(load=1), probe(), probe())
         self.assertEqual(r["pick"], "b@h2")
+        self.assertIn("before this PC", r["why"])
+        self.assertEqual(build_hosts.settings()["hosts"], ["b@h2", "a@h1"])
+        r = self.choose(probe(load=1), probe(load=8), None)
+        self.assertEqual(r["pick"], "local")
+        self.assertEqual(r["why"], "this PC is not busy")
 
     def test_pressure_counts_as_busy(self) -> None:
         r = self.choose(probe(load=1, io=25), probe(cores=16), None)
@@ -249,6 +265,22 @@ class StorageTest(_EnvMixin, unittest.TestCase):
         self.assertFalse(r["matches_io"])
         with self.assertRaises(ValueError):
             storage.pick(1000)
+
+    def test_pick_follows_priority(self) -> None:
+        self.configure("storage", priority=[self.ssd2 + "/", self.hdd])
+        self.assertEqual(storage.pick(20, "random")["mount"], self.ssd2)
+        self.free[self.ssd2] = 40.0
+        self.assertEqual(storage.pick(20, "random")["mount"], self.ssd)
+
+    def test_store_for_host_last(self) -> None:
+        self.configure("storage", priority=[self.ssd2, "host"])
+        path, why = storage.store_for(1)
+        self.assertEqual(path, storage.store_dir(self.ssd2))
+        self.assertIn("before the host store", why)
+        # Unlisted mounts rank after every listed entry, the host store included.
+        self.free[self.ssd2] = 10.0
+        self.assertEqual(storage.store_for(1)[0], "")
+        self.assertEqual(storage.store_for(10)[0], storage.store_dir(self.ssd))
 
     def test_pick_rejects_bad_project(self) -> None:
         for bad in ("../x", ".hidden", "a/b"):

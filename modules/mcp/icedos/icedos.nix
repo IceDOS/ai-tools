@@ -36,6 +36,8 @@ in
         ]
       );
 
+      priority = icedosLib.mkStrListOption { default = defaults.storage.priority; };
+
       reserveGb = icedosLib.mkIntBetweenOption {
         path = "icedos.ai-tools.mcp-server.storage.reserveGb";
         source = ./config.toml;

@@ -3,8 +3,9 @@
 timeout = 3600000
 
 # Remote Nix build hosts for build_hosts and nix_build, as ssh destinations
-# (e.g. "user@192.168.1.50"). The hosts need Nix with flakes; their users need
-# not be trusted.
+# (e.g. "user@192.168.1.50"), in priority order. "local" places this PC in that
+# order; without it this PC comes first. The hosts need Nix with flakes; their
+# users need not be trusted.
 [icedos.ai-tools.mcp-server.build]
 hosts = []
 # Free space a host keeps on /nix/store after a build, in GB.
@@ -17,6 +18,10 @@ pressureLimit = 20
 # <mount>/ai-dump/nix-store.
 [icedos.ai-tools.mcp-server.storage]
 drives = {}
+# Drive order for storage_pick and nix_build store="auto": mounts, plus "host"
+# for the host /nix/store. Unlisted mounts come after the listed ones; without
+# "host" the host store comes first.
+priority = []
 # Free space every drive, / included, keeps after a task, in GB.
 reserveGb = 30
 # nix_build store="auto" moves local builds needing this many GB or more off /.
@@ -79,8 +84,8 @@ Edit the checkout with your normal file tools, then `rebuild` the sandbox. The b
 
 For any heavy Nix build outside `rebuild` (compilers, kernels, browsers, VM tests, anything over a few minutes), use `nix_build` with `host="auto"` and a `need_gb` estimate. Small builds and evaluations use `host="local"`.
 
-- `host="auto"` calls `build_hosts`, which probes this PC and every host in `icedos.ai-tools.mcp-server.build.hosts`. It stays local unless this PC is busy, then picks the qualifying host with the fewest running builds. Call `build_hosts` yourself to see why.
-- A local build picks its store with `store="auto"`: the host `/nix/store` for small builds, a store on a secondary SSD (`<mount>/ai-dump/nix-store`) for builds of `storage.largeGb` or more, or when `/` would drop below the reserve. Pass `store="host"` only when the system or user profile must reference the output.
+- `host="auto"` calls `build_hosts`, which probes this PC and every host in `icedos.ai-tools.mcp-server.build.hosts`. That list is in priority order, and a `"local"` entry places this PC (first when absent). It picks the qualifying entry with the fewest running builds, then the earliest in the list. This PC qualifies when it is not busy. Call `build_hosts` yourself to see why.
+- A local build picks its store with `store="auto"`: the first fit in `storage.priority` (mounts plus `"host"` for the host `/nix/store`, host first when absent). The host store fits builds under `storage.largeGb` that keep `/` above the reserve; a secondary SSD store (`<mount>/ai-dump/nix-store`) fits when it has room. Pass `store="host"` only when the system or user profile must reference the output.
 - `nix_build` runs `flake_preflight` on a local flake and refuses one that copies more than `storage.maxFlakeCopyMb` into the store. Fix the dir as the result says. Pass `allow_copy=true` only when the task needs that copy.
 - Pass absolute paths in the installable, e.g. `path:/abs/dir#pkg`. The server's working dir is not yours.
 - A remote build's outputs stay in the host's store, because the remote user is not trusted. Inspect them with `ssh <host>`, or copy files back with `scp`. These are other people's PCs. Only touch the Nix store and files you created under `/tmp`.
@@ -90,7 +95,7 @@ For any heavy Nix build outside `rebuild` (compilers, kernels, browsers, VM test
 
 ## Heavy files
 
-Before writing anything large (gigabytes: datasets, VM and disk images, model weights, archives, caches), call `storage_pick` with `need_gb`, the `io` kind and a `project` name. It keeps `storage.reserveGb` free on every drive and returns a created `<mount>/ai-dump/<project>/`. Use `random` for builds, databases, VM disks and `node_modules`, `sequential` for archives, datasets and backups. Keep one task on one drive. `storage_status` shows free space and the size of every `ai-dump` entry, for finding leftovers to delete.
+Before writing anything large (gigabytes: datasets, VM and disk images, model weights, archives, caches), call `storage_pick` with `need_gb`, the `io` kind and a `project` name. It keeps `storage.reserveGb` free on every drive, prefers the `io` kind, then `storage.priority`, and returns a created `<mount>/ai-dump/<project>/`. Use `random` for builds, databases, VM disks and `node_modules`, `sequential` for archives, datasets and backups. Keep one task on one drive. `storage_status` shows free space and the size of every `ai-dump` entry, for finding leftovers to delete.
 
 ## Flake copies
 

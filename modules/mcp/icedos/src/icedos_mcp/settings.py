@@ -12,7 +12,7 @@ ENV = "ICEDOS_MCP_SETTINGS"
 
 DEFAULTS: dict[str, dict[str, Any]] = {
     "build": {"hosts": [], "minFreeGb": 20, "pressureLimit": 20},
-    "storage": {"drives": {}, "reserveGb": 30, "largeGb": 5, "maxFlakeCopyMb": 200},
+    "storage": {"drives": {}, "priority": [], "reserveGb": 30, "largeGb": 5, "maxFlakeCopyMb": 200},
 }
 
 

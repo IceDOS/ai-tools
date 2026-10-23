@@ -1199,13 +1199,14 @@ async def build_hosts(need_gb: float = 0) -> str:
     /nix/store). This PC counts as busy when its 1 minute load is above its core
     count or a `some avg10` pressure is above the limit. A host qualifies when its
     load is below half its cores and it has the minimum free space plus need_gb.
-    Among qualifying hosts, the one with the fewest builds from any of this user's
-    MCP servers wins, then the lowest load per core.
+    This PC qualifies when it is not busy. Among qualifying machines, the one with
+    the fewest builds from any of this user's MCP servers wins, then the earliest
+    in build.hosts, where a "local" entry places this PC (first when absent).
 
     Args:
         need_gb: Extra free space the build needs on the host, in GB.
 
-    Returns JSON with `pick` ("local" or a host), `why`, and the probe of each machine.
+    Returns JSON with `pick` ("local" or a host), `why`, `order`, and the probe of each machine.
     """
     return json.dumps(await remote.choose(need_gb), indent=2)
 
@@ -1267,9 +1268,9 @@ async def nix_build(
                      paths; the server's working dir is not yours.
         host: "auto" asks build_hosts, "local" builds here, or a configured host.
               Keep small builds and evaluations on "local".
-        store: For a local build: "auto" keeps small builds on the host store and
-               moves builds of storage.largeGb or more, or ones that would push /
-               below the reserve, to a drive store; "host"; or a configured mount.
+        store: For a local build: "auto" takes the first fit in storage.priority
+               (the host store fits builds under storage.largeGb that keep / above
+               the reserve, an SSD fits when it has room); "host"; or a configured mount.
         need_gb: Disk the build needs, in GB. Drives both host and store choice,
                  so pass an estimate for anything big.
         timeout: Max seconds (default 3600).
@@ -1381,7 +1382,8 @@ async def storage_pick(need_gb: float, io: str = "random", project: str = "") ->
     """Pick a secondary drive for heavy files (datasets, VM images, archives, caches).
 
     Keeps storage.reserveGb free on every drive. Prefers the asked I/O kind, then
-    the most room; `matches_io` is false when only the other kind had room.
+    storage.priority, then the most room; `matches_io` is false when only the
+    other kind had room.
     Keep one task on one drive.
 
     Args:
