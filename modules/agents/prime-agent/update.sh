@@ -50,9 +50,9 @@ main() {
   cargoHash=$(nix build --no-link --impure --expr "
     let pkgs = import <nixpkgs> { }; in
     pkgs.rustPlatform.fetchCargoVendor {
-      src = pkgs.fetchFromGitHub { owner = "PrimeIntellect-ai"; repo = "prime-agent"; tag = "$tag"; hash = "$hash"; };
+      src = pkgs.fetchFromGitHub { owner = \"PrimeIntellect-ai\"; repo = \"prime-agent\"; tag = \"$tag\"; hash = \"$hash\"; };
       hash = pkgs.lib.fakeHash;
-    }" 2>&1 | sed -n 's/.*got: *\(sha256-[A-Za-z0-9+/=]*\).*/\1/p' | head -1)
+    }" 2>&1 | sed -n 's/.*got: *\(sha256-[A-Za-z0-9+/=]*\).*/\1/p' | head -1 || true)
   require_nonempty prime-agent-cargo "$version" "$tag" "$cargoHash"
   info "  cargoHash: $cargoHash"
 
@@ -72,7 +72,7 @@ main() {
   clm_pkg_json=$(curl -s "https://registry.npmjs.org/@lolipopshock/pi-clm/latest")
   clm_version=$(echo "$clm_pkg_json" | jq -r ".version")
   clm_tar="https://registry.npmjs.org/@lolipopshock/pi-clm/-/pi-clm-${clm_version}.tgz"
-  clm_hash=$(nix-prefetch-url --unpack "$clm_tar" 2>/dev/null | tail -1 || nix-prefetch-url "$clm_tar" 2>/dev/null)
+  clm_hash=$(nix-prefetch-url "$clm_tar" 2>/dev/null | tail -1)
   if [ -f "$SCRIPT_DIR/extensions/pi-clm.nix" ]; then
     sed -i "s/version = \"[^\"]*\";/version = \"$clm_version\";/" "$SCRIPT_DIR/extensions/pi-clm.nix" 2>/dev/null || true
     sed -i "s|url = \"[^\"]*pi-clm[^\"]*\";|url = \"$clm_tar\";|" "$SCRIPT_DIR/extensions/pi-clm.nix" 2>/dev/null || true
