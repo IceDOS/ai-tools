@@ -62,15 +62,18 @@ let
         dependencies = [ final.fastmcp-slim ];
       };
 
-      # Exact upstream pin: the read cache uses get_flat_dependant, gone in 0.141.
-      fastapi = prev.fastapi.overridePythonAttrs {
+      # Exact upstream pin; 0.162 adds a telemetry module that needs opentelemetry-api.
+      fastapi = prev.fastapi.overridePythonAttrs (old: {
         inherit (source.fastapi) version;
         src = prev.fastapi.src.override {
           tag = source.fastapi.version;
           inherit (source.fastapi) hash;
         };
+        dependencies = old.dependencies ++ [ final.opentelemetry-api ];
+        # Wants >=1.44; nixpkgs has 1.43, which has every API the module imports.
+        pythonRelaxDeps = (old.pythonRelaxDeps or [ ]) ++ [ "opentelemetry-api" ];
         doCheck = false;
-      };
+      });
 
       # Not in nixpkgs; imported as redis_fastapi by the API app.
       fastapi-redis-sdk = final.mkWheel {
@@ -130,7 +133,6 @@ let
         filelock
         greenlet
         httpx
-        litellm
         logfire
         loguru
         markdown-it-py
@@ -138,8 +140,8 @@ let
         mdformat
         mdformat-frontmatter
         mdformat-gfm
-        nest-asyncio
         openai
+        pathspec
         pillow
         psutil
         psycopg
@@ -169,9 +171,8 @@ let
       "pytest-aio"
       "pytest-asyncio"
     ];
-    # nixpkgs differs from upstream's exact pins (litellm <1.92 is only a Python 3.14 wheel concern).
+    # nixpkgs differs from upstream's exact pins.
     pythonRelaxDeps = [
-      "litellm"
       "psycopg"
       "pyjwt"
     ];
