@@ -1,7 +1,7 @@
 {
-  "version": "0.24.1",
-  "rev": "v0.24.1",
-  "hash": "sha256-yHtCT3WQlSvYIptRxwUiAQJrVWK4EJTuiaLd+0FR0mE=",
+  "version": "1.0.0",
+  "rev": "v1.0.0",
+  "hash": "sha256-ClSY1QB11+KmohBZSrjA0IwuWmj813ayKY6zDOT4YNw=",
   "fastmcp-slim": {
     "version": "4.1.3",
     "url": "https://files.pythonhosted.org/packages/4e/ff/a7feaeb130a2003700789ce32e933b4c2ae00fc7c264642e57ab12e4684f/fastmcp_slim-4.1.3-py3-none-any.whl",
@@ -18,7 +18,7 @@
     "hash": "sha256-wO10mDnOYh3onMj1S7Mwv4pJGK8kVyxjlIDF0tRifJ4="
   },
   "fastapi": {
-    "version": "0.139.0",
-    "hash": "sha256-c4balkkmBv7zKRQnYRpRohVjP23m0HvtdiVrJtgNKYo="
+    "version": "0.162.0",
+    "hash": "sha256-SGTilW+Y6KZ+xHHdpeZbL3dFX5WfecD5yPDmX+K0UA8="
   }
 }
