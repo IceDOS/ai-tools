@@ -12,11 +12,10 @@ Index: prime-agent-src/crates/pa-core/src/models/registry.rs
          self.apply_subscription_model_adaptations();
      }
  
-@@ -574,6 +575,22 @@ impl ModelRegistry {
-             })
+@@ -575,6 +576,22 @@ impl ModelRegistry {
              .collect()
      }
-+
+ 
 +    /// `modelOverrides` also apply to models defined in `models[]`, so a cap such as
 +    /// `contextWindow` holds for custom providers too.
 +    fn apply_custom_model_overrides(custom: &CustomModelsResult) -> Vec<Model> {
@@ -32,17 +31,19 @@ Index: prime-agent-src/crates/pa-core/src/models/registry.rs
 +            })
 +            .collect()
 +    }
- 
++
      /// Custom models win on provider+id conflicts.
      fn merge_custom_models(mut built_in: Vec<Model>, custom: Vec<Model>) -> Vec<Model> {
+         for custom_model in custom {
 Index: prime-agent-src/crates/pa-core/src/models/registry/tests.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/models/registry/tests.rs
 +++ prime-agent-src/crates/pa-core/src/models/registry/tests.rs
-@@ -130,6 +130,38 @@ fn models_json_custom_models_and_auth_he
+@@ -129,6 +129,38 @@ fn models_json_custom_models_and_auth_header() {
+     );
  }
  
- #[test]
++#[test]
 +fn models_json_model_overrides_apply_to_custom_models() {
 +    let dir = tempfile::tempdir().unwrap();
 +    let models_path = dir.path().join("models.json");
@@ -74,7 +75,6 @@ Index: prime-agent-src/crates/pa-core/src/models/registry/tests.rs
 +    assert_eq!(find("other").context_window, 128_000);
 +}
 +
-+#[test]
+ #[test]
  fn models_json_error_keeps_built_ins() {
      let dir = tempfile::tempdir().unwrap();
-     let models_path = dir.path().join("models.json");

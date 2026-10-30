@@ -2,7 +2,7 @@ Index: prime-agent-src/crates/pa-tui/src/daemon_client.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/daemon_client.rs
 +++ prime-agent-src/crates/pa-tui/src/daemon_client.rs
-@@ -282,6 +282,26 @@ pub struct DaemonClient {
+@@ -322,6 +322,26 @@ pub struct DaemonClient {
  }
  
  impl DaemonClient {
@@ -41,7 +41,7 @@ Index: prime-agent-src/crates/pa-tui/src/exit_restore.rs
          let _ = crate::enhanced_keys::disable(&mut out);
          // The unconditional leave: the restore must not trust the ownership flag
          // — a desynced flag would keep the alt buffer up past the process death.
-@@ -109,6 +110,7 @@ pub(crate) fn terminal_release_tail(out:
+@@ -109,6 +110,7 @@ pub(crate) fn terminal_release_tail(out: &mut Stdout) {
      // inside the alt screen, never lands on the relay's stack (see
      // enhanced_keys::pop_stale_levels).
      crate::enhanced_keys::pop_stale_levels(out);
@@ -53,7 +53,7 @@ Index: prime-agent-src/crates/pa-tui/src/interactive/run.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/interactive/run.rs
 +++ prime-agent-src/crates/pa-tui/src/interactive/run.rs
-@@ -821,6 +821,8 @@ async fn run_interactive_surface(
+@@ -834,6 +834,8 @@ async fn run_interactive_surface(
      // worker); it re-attaches through the supervisor so the respawned worker serves the session
      // again.
      let mut session_reconnect: Option<SessionReconnect> = None;
@@ -61,8 +61,8 @@ Index: prime-agent-src/crates/pa-tui/src/interactive/run.rs
 +        .map(|config| crate::terminal_title::TitleState::new(config, Instant::now()));
  
      'run: while running {
-         if enhanced_keys_pending {
-@@ -1014,6 +1016,9 @@ async fn run_interactive_surface(
+         if !session.dirty {
+@@ -1041,6 +1043,9 @@ async fn run_interactive_surface(
                                      let _ = renderer.resume();
                                  }
                              }
@@ -72,7 +72,7 @@ Index: prime-agent-src/crates/pa-tui/src/interactive/run.rs
                          }
                          // Hand the terminal to the editor, then resume. The input reader would
                          // steal the editor's keys, so it stops (flag + join) and respawns after the
-@@ -1073,6 +1078,9 @@ async fn run_interactive_surface(
+@@ -1100,6 +1105,9 @@ async fn run_interactive_surface(
                                  }
                                  spawn_session_reader(ui_tx, exit_guard);
                                  session.apply_external_editor_outcome(outcome, &mut view);
@@ -82,7 +82,7 @@ Index: prime-agent-src/crates/pa-tui/src/interactive/run.rs
                              }
                          }
                          // The `/mcp` view resolved to an auth request: mount the inline auth panel
-@@ -1936,6 +1944,23 @@ async fn run_interactive_surface(
+@@ -1964,6 +1972,23 @@ async fn run_interactive_surface(
              last_pulse_phase = usize::MAX;
          }
  
@@ -110,7 +110,7 @@ Index: prime-agent-src/crates/pa-tui/src/lib.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/lib.rs
 +++ prime-agent-src/crates/pa-tui/src/lib.rs
-@@ -105,6 +105,7 @@ pub mod snapshot;
+@@ -107,6 +107,7 @@ pub mod snapshot;
  pub mod subagents;
  mod suspend;
  mod terminal_image;
@@ -122,7 +122,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui.rs
-@@ -139,6 +139,8 @@ pub(crate) struct SessionUi {
+@@ -164,6 +164,8 @@ pub(crate) struct SessionUi {
      /// nothing — its collapsed empty/zero key could alias across attaches of the same entry count.
      pub(crate) attach_cursor_present: bool,
      session_name: Option<String>,
@@ -131,7 +131,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
      cwd: PathBuf,
      session_dir: Option<PathBuf>,
      script_path: Option<PathBuf>,
-@@ -482,6 +484,14 @@ impl SessionUi {
+@@ -514,6 +516,14 @@ impl SessionUi {
              .unwrap_or_else(|| crate::chrome::display_name(&self.cwd.to_string_lossy()))
      }
  
@@ -150,7 +150,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/apply.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
-@@ -379,6 +379,9 @@ impl SessionUi {
+@@ -355,6 +355,9 @@ impl SessionUi {
                  self.start_loader(view);
              }
              TurnUpdate::UserMessage(text) => {
@@ -160,7 +160,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
                  match crate::custom_message::skill_invocation_entries(&text) {
                      Some(entries) => {
                          for entry in entries {
-@@ -944,3 +947,25 @@ impl SessionUi {
+@@ -920,3 +923,25 @@ impl SessionUi {
          }
      }
  }
@@ -190,7 +190,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/lifecycle.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
-@@ -61,6 +61,7 @@ impl SessionUi {
+@@ -62,6 +62,7 @@ impl SessionUi {
              last_event_sequence: 0,
              attach_cursor_present: false,
              session_name: None,
@@ -198,7 +198,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
              cwd: options.cwd.clone(),
              session_dir: options.session_dir.clone(),
              script_path: options.script_path.clone(),
-@@ -216,6 +217,176 @@ impl SessionUi {
+@@ -221,6 +222,180 @@ impl SessionUi {
          Ok(session)
      }
  
@@ -334,7 +334,6 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
 +            prompt_orders: orders_tx,
 +            input_submission_generation: 0,
 +            prompt_in_flight: 0,
-+            transcript_stale: false,
 +            telemetry: None,
 +            scroll_adoption_emitted: false,
 +            exit_reason: "daemon_closed",
@@ -369,13 +368,18 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
 +            opened_urls: Vec::new(),
 +            pressed_click: None,
 +            click_adoption_emitted: false,
++            compaction_settled: false,
++            page_notes: mpsc::unbounded_channel().0,
++            panel_returns_to_agents_view: false,
++            pending_model_fallback_message: None,
++            window: super::window::TranscriptWindow::default(),
 +        }
 +    }
 +
      /// Spec §10.2-§10.5: reattach after a restart — the fresh client replaces the dead one, the
      /// attach goes by DURABLE session id. `kind` names the driver: the update restart paints its
      /// §10.5 banner, a lost or announced-shutdown window reports the restart version-honestly.
-@@ -425,6 +596,10 @@ impl SessionUi {
+@@ -426,6 +601,10 @@ impl SessionUi {
          // stop must not route into a stale shutdown recovery's reconnect hang.
          self.daemon_closing_notice = None;
          self.session_name.clone_from(&reconstructed.session_name);
@@ -384,8 +388,8 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
 +            _ => None,
 +        });
          self.service_tier.clone_from(&reconstructed.service_tier);
+         self.pending_model_fallback_message = reconstructed.model_fallback_message;
          self.session_file = attach
-             .snapshot
 Index: prime-agent-src/crates/pa-tui/src/terminal_title.rs
 ===================================================================
 --- /dev/null

@@ -1,560 +1,3 @@
-Index: prime-agent-src/crates/pa-types/src/clm_view.rs
-===================================================================
---- /dev/null
-+++ prime-agent-src/crates/pa-types/src/clm_view.rs
-@@ -0,0 +1,111 @@
-+//! Wire shape of the `/clm` panel (`get_clm_view` reply).
-+
-+use serde::{Deserialize, Serialize};
-+
-+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-+#[serde(rename_all = "camelCase")]
-+pub struct ClmView {
-+    pub status: ClmStatus,
-+    pub settings: Vec<ClmSetting>,
-+    /// Revisions with an accepted edit, oldest first.
-+    pub revisions: Vec<u64>,
-+    /// The revision `edits` belongs to.
-+    pub revision: Option<u64>,
-+    pub edits: Vec<ClmEditMessage>,
-+    /// Why `edits` is empty although `revision` is set.
-+    pub note: Option<String>,
-+}
-+
-+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-+#[serde(rename_all = "camelCase")]
-+pub struct ClmStatus {
-+    pub enabled: bool,
-+    pub estimate: u64,
-+    pub budget: Option<u64>,
-+    pub observed: Option<u64>,
-+    pub revision: u64,
-+    pub edit_count: usize,
-+}
-+
-+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-+#[serde(rename_all = "lowercase")]
-+pub enum ClmSettingKind {
-+    Bool,
-+    Choice,
-+    Number,
-+}
-+
-+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-+#[serde(rename_all = "camelCase")]
-+pub struct ClmSetting {
-+    pub key: String,
-+    pub label: String,
-+    pub value: String,
-+    pub default: String,
-+    pub kind: ClmSettingKind,
-+    pub choices: Vec<String>,
-+}
-+
-+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-+#[serde(rename_all = "lowercase")]
-+pub enum ClmSegmentKind {
-+    Same,
-+    Del,
-+    Add,
-+}
-+
-+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-+pub struct ClmSegment {
-+    pub kind: ClmSegmentKind,
-+    pub text: String,
-+}
-+
-+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-+#[serde(rename_all = "camelCase")]
-+pub struct ClmEditMessage {
-+    pub role: String,
-+    pub changed: bool,
-+    pub segments: Vec<ClmSegment>,
-+}
-+
-+impl ClmEditMessage {
-+    /// Text before (`Del` and `Same`) or after (`Add` and `Same`) the edit.
-+    #[must_use]
-+    pub fn side(&self, after: bool) -> String {
-+        let skip = if after { ClmSegmentKind::Del } else { ClmSegmentKind::Add };
-+        self.segments
-+            .iter()
-+            .filter(|segment| segment.kind != skip)
-+            .map(|segment| segment.text.as_str())
-+            .collect()
-+    }
-+}
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+
-+    #[test]
-+    fn view_round_trips_in_camel_case() {
-+        let view = ClmView {
-+            status: ClmStatus { enabled: true, edit_count: 1, ..ClmStatus::default() },
-+            revision: Some(1),
-+            edits: vec![ClmEditMessage {
-+                role: "user".into(),
-+                changed: true,
-+                segments: vec![
-+                    ClmSegment { kind: ClmSegmentKind::Same, text: "a ".into() },
-+                    ClmSegment { kind: ClmSegmentKind::Del, text: "b".into() },
-+                    ClmSegment { kind: ClmSegmentKind::Add, text: "c".into() },
-+                ],
-+            }],
-+            ..ClmView::default()
-+        };
-+        let value = serde_json::to_value(&view).unwrap();
-+        assert_eq!(value["status"]["editCount"], 1);
-+        assert_eq!(value["edits"][0]["segments"][1]["kind"], "del");
-+        assert_eq!(serde_json::from_value::<ClmView>(value).unwrap(), view);
-+        assert_eq!(view.edits[0].side(false), "a b");
-+        assert_eq!(view.edits[0].side(true), "a c");
-+    }
-+}
-Index: prime-agent-src/crates/pa-types/src/daemon/command.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-types/src/daemon/command.rs
-+++ prime-agent-src/crates/pa-types/src/daemon/command.rs
-@@ -616,6 +616,28 @@ pub enum DaemonCommand {
-         #[serde(flatten)]
-         rest: JsonMap,
-     },
-+    GetClmView {
-+        #[serde(default, skip_serializing_if = "Option::is_none")]
-+        id: Option<String>,
-+        active_session_id: String,
-+        #[serde(default, skip_serializing_if = "Option::is_none")]
-+        revision: Option<u64>,
-+        #[serde(flatten)]
-+        rest: JsonMap,
-+    },
-+    ClmConfigure {
-+        #[serde(default, skip_serializing_if = "Option::is_none")]
-+        id: Option<String>,
-+        active_session_id: String,
-+        /// `on`, `off`, `reset`, `set` (with `key` and `value`) or `reset_settings`.
-+        action: String,
-+        #[serde(default, skip_serializing_if = "Option::is_none")]
-+        key: Option<String>,
-+        #[serde(default, skip_serializing_if = "Option::is_none")]
-+        value: Option<String>,
-+        #[serde(flatten)]
-+        rest: JsonMap,
-+    },
-     GetContextTree {
-         #[serde(default, skip_serializing_if = "Option::is_none")]
-         id: Option<String>,
-@@ -1262,4 +1284,18 @@ mod tests {
-     fn mark_anthropic_warning_shown_roundtrip() {
-         rt::<DaemonCommand>(r#"{"type":"mark_anthropic_warning_shown","activeSessionId":"s1"}"#);
-     }
-+
-+    #[test]
-+    fn clm_commands_use_their_wire_names() {
-+        let view: crate::daemon::DaemonCommand = serde_json::from_str(
-+            r#"{"type":"get_clm_view","activeSessionId":"s","revision":2}"#,
-+        )
-+        .unwrap();
-+        assert!(matches!(view, crate::daemon::DaemonCommand::GetClmView { revision: Some(2), .. }));
-+        let set: crate::daemon::DaemonCommand = serde_json::from_str(
-+            r#"{"type":"clm_configure","activeSessionId":"s","action":"set","key":"budget","value":"64000"}"#,
-+        )
-+        .unwrap();
-+        assert!(matches!(set, crate::daemon::DaemonCommand::ClmConfigure { ref action, .. } if action == "set"));
-+    }
- }
-Index: prime-agent-src/crates/pa-types/src/daemon/plane.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-types/src/daemon/plane.rs
-+++ prime-agent-src/crates/pa-types/src/daemon/plane.rs
-@@ -48,6 +48,8 @@ pub fn command_plane(command_type: &str)
-         | "get_messages"
-         | "get_rlm_children"
-         | "get_session_stats"
-+        | "get_clm_view"
-+        | "clm_configure"
-         | "get_context_tree"
-         | "get_commands"
-         | "get_resource_snapshot"
-@@ -129,6 +131,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str]
-     "get_messages",
-     "get_rlm_children",
-     "get_session_stats",
-+    "get_clm_view",
-     "get_context_tree",
-     "get_commands",
-     "get_resource_snapshot",
-Index: prime-agent-src/crates/pa-types/src/lib.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-types/src/lib.rs
-+++ prime-agent-src/crates/pa-types/src/lib.rs
-@@ -7,6 +7,7 @@
- //! survive a parse/serialize round trip: the re-parsed JSON must equal the original.
- 
- pub mod ai;
-+pub mod clm_view;
- pub mod daemon;
- pub mod goal;
- pub mod incident;
-Index: prime-agent-src/crates/pa-types/src/slash_commands.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-types/src/slash_commands.rs
-+++ prime-agent-src/crates/pa-types/src/slash_commands.rs
-@@ -77,6 +77,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS:
-     BuiltinSlashCommand { name: "heartbeat", description: "Set or view a persistent heartbeat; delivery defaults to steer, use --follow-up to queue; supports pause, resume, stop, and clear", execution: SlashCommandExecution::Client, argument_hint: Some("[status|pause|resume|stop|[every <duration>] [--steer|--follow-up] <instruction>]"), aliases: &[], takes_argument: true },
-     BuiltinSlashCommand { name: "heartbeats", description: "View and manage all user and agent heartbeats", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
-     BuiltinSlashCommand { name: "factory", description: "Show or set the agent factory opt-in gate (off by default)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off|status]"), aliases: &[], takes_argument: true },
-+    BuiltinSlashCommand { name: "clm", description: "Context Language Models: edits, settings and status for this session", execution: SlashCommandExecution::Client, argument_hint: Some("[edits|settings|status|config <key> <value>|config reset|on|off|reset]"), aliases: &[], takes_argument: true },
-     BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
-     BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
-     BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
-Index: prime-agent-src/crates/pa-core/src/clm/edits.rs
-===================================================================
---- /dev/null
-+++ prime-agent-src/crates/pa-core/src/clm/edits.rs
-@@ -0,0 +1,195 @@
-+//! Word-level diff of an accepted edit, over the jsdiff line port.
-+
-+use pa_types::clm_view::{ClmEditMessage, ClmSegment, ClmSegmentKind};
-+use serde_json::Value;
-+
-+use super::document::render_message;
-+use crate::tools::jsdiff::diff_lines;
-+
-+// Tokens become diff lines, so newlines inside them are swapped out and back.
-+const NEWLINE: char = '\u{1}';
-+
-+fn tokens(text: &str) -> Vec<String> {
-+    let mut out: Vec<String> = Vec::new();
-+    for ch in text.chars() {
-+        match out.last_mut() {
-+            Some(last)
-+                if last
-+                    .chars()
-+                    .last()
-+                    .is_some_and(|prev| prev.is_whitespace() == ch.is_whitespace()) =>
-+            {
-+                last.push(ch);
-+            }
-+            _ => out.push(ch.to_string()),
-+        }
-+    }
-+    out
-+}
-+
-+fn as_lines(tokens: &[String]) -> String {
-+    let mut out = String::new();
-+    for token in tokens {
-+        out.push_str(&token.replace('\n', &NEWLINE.to_string()));
-+        out.push('\n');
-+    }
-+    out
-+}
-+
-+fn push(out: &mut Vec<ClmSegment>, kind: ClmSegmentKind, text: String) {
-+    if text.is_empty() {
-+        return;
-+    }
-+    match out.last_mut() {
-+        Some(last) if last.kind == kind => last.text.push_str(&text),
-+        _ => out.push(ClmSegment { kind, text }),
-+    }
-+}
-+
-+#[must_use]
-+pub fn word_segments(old: &str, new: &str) -> Vec<ClmSegment> {
-+    let mut out = Vec::new();
-+    for part in diff_lines(&as_lines(&tokens(old)), &as_lines(&tokens(new))) {
-+        let kind = if part.added {
-+            ClmSegmentKind::Add
-+        } else if part.removed {
-+            ClmSegmentKind::Del
-+        } else {
-+            ClmSegmentKind::Same
-+        };
-+        let text: String = part
-+            .value
-+            .split_terminator('\n')
-+            .map(|token| token.replace(NEWLINE, "\n"))
-+            .collect();
-+        push(&mut out, kind, text);
-+    }
-+    out
-+}
-+
-+fn label(message: &Value) -> String {
-+    message["details"]["contextRole"]
-+        .as_str()
-+        .or_else(|| message["role"].as_str())
-+        .unwrap_or("")
-+        .to_string()
-+}
-+
-+fn key(message: &Value) -> String {
-+    format!(
-+        "{}{NEWLINE}{}\n",
-+        label(message),
-+        render_message(message).replace('\n', &NEWLINE.to_string())
-+    )
-+}
-+
-+fn whole(message: &Value, kind: ClmSegmentKind) -> ClmEditMessage {
-+    ClmEditMessage {
-+        role: label(message),
-+        changed: kind != ClmSegmentKind::Same,
-+        segments: vec![ClmSegment {
-+            kind,
-+            text: render_message(message),
-+        }],
-+    }
-+}
-+
-+/// One row per message: unchanged, rewritten (paired in order inside a changed
-+/// run), deleted or added.
-+#[must_use]
-+pub fn message_edits(before: &[Value], after: &[Value]) -> Vec<ClmEditMessage> {
-+    let old: String = before.iter().map(key).collect();
-+    let new: String = after.iter().map(key).collect();
-+    let parts = diff_lines(&old, &new);
-+    let (mut out, mut i, mut j, mut k) = (Vec::new(), 0, 0, 0);
-+    while k < parts.len() {
-+        if !parts[k].added && !parts[k].removed {
-+            for _ in 0..parts[k].count {
-+                out.push(whole(&after[j], ClmSegmentKind::Same));
-+                i += 1;
-+                j += 1;
-+            }
-+            k += 1;
-+            continue;
-+        }
-+        let (mut removed, mut added) = (0, 0);
-+        while k < parts.len() && (parts[k].added || parts[k].removed) {
-+            if parts[k].added {
-+                added += parts[k].count;
-+            } else {
-+                removed += parts[k].count;
-+            }
-+            k += 1;
-+        }
-+        for n in 0..removed.max(added) {
-+            out.push(match (n < removed, n < added) {
-+                (true, true) => ClmEditMessage {
-+                    role: label(&after[j + n]),
-+                    changed: true,
-+                    segments: word_segments(
-+                        &render_message(&before[i + n]),
-+                        &render_message(&after[j + n]),
-+                    ),
-+                },
-+                (true, false) => whole(&before[i + n], ClmSegmentKind::Del),
-+                _ => whole(&after[j + n], ClmSegmentKind::Add),
-+            });
-+        }
-+        i += removed;
-+        j += added;
-+    }
-+    out
-+}
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+    use serde_json::json;
-+
-+    fn seg(kind: ClmSegmentKind, text: &str) -> ClmSegment {
-+        ClmSegment {
-+            kind,
-+            text: text.into(),
-+        }
-+    }
-+
-+    #[test]
-+    fn words_diff_keeps_spacing_and_newlines() {
-+        assert_eq!(
-+            word_segments("fix the old bug\nnow", "fix the new bug\nnow"),
-+            vec![
-+                seg(ClmSegmentKind::Same, "fix the "),
-+                seg(ClmSegmentKind::Del, "old"),
-+                seg(ClmSegmentKind::Add, "new"),
-+                seg(ClmSegmentKind::Same, " bug\nnow"),
-+            ]
-+        );
-+        assert_eq!(
-+            word_segments("", "added"),
-+            vec![seg(ClmSegmentKind::Add, "added")]
-+        );
-+    }
-+
-+    #[test]
-+    fn messages_pair_rewrites_and_mark_deletes_and_adds() {
-+        let user = json!({ "role": "user", "content": "task: fix a.py", "timestamp": 1 });
-+        let long = json!({ "role": "assistant", "content": [{ "type": "text", "text": "a very long read" }], "timestamp": 2 });
-+        let short = json!({ "role": "assistant", "content": [{ "type": "text", "text": "a short read" }], "timestamp": 2 });
-+        let gone = json!({ "role": "user", "content": "noise", "timestamp": 3 });
-+        let note = json!({
-+            "role": "custom",
-+            "customType": "live-context-projection",
-+            "content": "[context role=notes]\nplan",
-+            "details": { "contextRole": "notes" },
-+            "timestamp": 4
-+        });
-+        let rows = message_edits(&[user.clone(), long, gone], &[user, short, note]);
-+        assert_eq!(rows.len(), 3);
-+        assert!(!rows[0].changed);
-+        assert_eq!(rows[1].side(false), "a very long read");
-+        assert_eq!(rows[1].side(true), "a short read");
-+        assert_eq!(rows[2].role, "notes");
-+        assert_eq!(rows[2].side(true), "plan");
-+        assert_eq!(rows[2].side(false), "noise");
-+    }
-+}
-Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-core/src/clm/mod.rs
-+++ prime-agent-src/crates/pa-core/src/clm/mod.rs
-@@ -5,7 +5,9 @@
- 
- pub mod annotations;
- pub mod budget;
-+pub mod control;
- pub mod document;
-+pub mod edits;
- pub mod guard;
- pub mod host;
- pub mod projection;
-@@ -250,6 +252,12 @@ pub struct ClmRuntime {
-     pending_checkpoint: Option<Checkpoint>,
-     annotations: Vec<annotations::ActiveAnnotation>,
-     continuity_warned: bool,
-+    seed: ContextLanguageModelsSettings,
-+    overrides: control::Overrides,
-+    paused: bool,
-+    last_raw: Vec<Value>,
-+    last_context_window: u64,
-+    last_observed: Option<u64>,
- }
- 
- impl ClmRuntime {
-@@ -275,6 +283,12 @@ impl ClmRuntime {
-             pending_checkpoint: None,
-             annotations: Vec::new(),
-             continuity_warned: false,
-+            seed: ContextLanguageModelsSettings::default(),
-+            overrides: control::Overrides::default(),
-+            paused: false,
-+            last_raw: Vec::new(),
-+            last_context_window: 0,
-+            last_observed: None,
-         })
-     }
- 
-@@ -321,6 +335,37 @@ impl ClmRuntime {
-         self.recovery_tried = false;
-     }
- 
-+    pub fn set_seed(&mut self, seed: ContextLanguageModelsSettings) {
-+        self.seed = seed;
-+    }
-+
-+    /// Re-validate the seed with `overrides` on top; on error nothing changes.
-+    ///
-+    /// # Errors
-+    /// Returns an error if the combined settings fail validation.
-+    pub fn apply_overrides(&mut self, overrides: control::Overrides) -> Result<(), String> {
-+        let config = ClmConfig::from_settings(&control::merged(&self.seed, &overrides)?)?;
-+        if config.estimate_factor != self.config.estimate_factor {
-+            self.calibrator = EstimateCalibrator::new(config.estimate_factor);
-+        }
-+        self.config = config;
-+        self.paused = overrides.enabled == Some(false);
-+        self.overrides = overrides;
-+        Ok(())
-+    }
-+
-+    /// `/clm reset`: back to the raw context; older checkpoints stop matching.
-+    pub fn reset_projection(&mut self) {
-+        self.checkpoint = None;
-+        self.history.clear();
-+        self.baseline = None;
-+        self.edit_raw_len = None;
-+        self.pending_checkpoint = None;
-+        self.tracker.reset();
-+        self.pending_notices
-+            .push("Projection reset by the user; the context is the raw session again.".into());
-+    }
-+
-     /// Newest checkpoint that matches once retry error rows are skipped, rebased
-     /// onto the raw context as it is now.
-     fn recover_after_retry_errors(&mut self, raw: &[Value]) -> Option<Checkpoint> {
-@@ -386,6 +431,9 @@ impl ClmRuntime {
-         system_prompt_tokens: u64,
-         context_window: u64,
-     ) -> Vec<Value> {
-+        if self.paused {
-+            return raw.to_vec();
-+        }
-         let mut projection = apply_projection(raw, self.checkpoint.as_ref());
-         if let Projection::Invalid(reason) = &projection {
-             self.pending_notices
-@@ -420,6 +468,9 @@ impl ClmRuntime {
-         }
-         let conv = conversation_rows(raw);
-         let observed = last_provider_reported(&conv);
-+        self.last_observed = observed.map(|(tokens, _)| tokens);
-+        self.last_context_window = context_window;
-+        self.last_raw = raw.to_vec();
-         self.calibrator.observe(observed);
-         let resolved = self.config.budget.resolve(context_window);
- 
-@@ -523,6 +574,10 @@ impl ClmRuntime {
-     /// The turn-end commit. Returns a new checkpoint for the caller to persist as
-     /// a `clm-state` custom entry.
-     pub fn commit_turn(&mut self) -> Option<Checkpoint> {
-+        if self.paused {
-+            self.baseline = None;
-+            return None;
-+        }
-         let baseline = self.baseline.take()?;
-         let edited = match std::fs::read_to_string(self.mirror_path()) {
-             Ok(text) => text,
-@@ -919,4 +974,34 @@ mod tests {
-         let again = runtime.transform(&raw, 0, 100_000);
-         assert_eq!(again.len(), raw.len() + 1, "the size warning is shown once");
-     }
-+
-+    #[test]
-+    fn overrides_pause_and_reset_change_the_live_runtime() {
-+        let seed: ContextLanguageModelsSettings = settings(json!({ "enabled": true }));
-+        let mut runtime = ClmRuntime::new(ClmConfig::from_settings(&seed).unwrap(), "s").unwrap();
-+        runtime.set_seed(seed);
-+        let mut overrides = control::Overrides::default();
-+        overrides.values.insert("sizeTrailer".into(), json!(true));
-+        overrides.values.insert("budget".into(), json!(50_000));
-+        runtime.apply_overrides(overrides.clone()).unwrap();
-+        assert!(runtime.size_trailer("x", 100_000).unwrap().contains("of 50000 tokens"));
-+
-+        overrides.values.insert("reserve".into(), json!(60_000));
-+        assert!(runtime.apply_overrides(overrides).is_err());
-+        assert!(runtime.size_trailer("x", 100_000).is_some(), "a rejected override changes nothing");
-+
-+        let raw = conversation(10);
-+        runtime.transform(&raw, 0, 100_000);
-+        std::fs::write(runtime.mirror_path(), "short").unwrap();
-+        assert!(runtime.commit_turn().is_some());
-+        runtime.reset_projection();
-+        let output = runtime.transform(&raw, 0, 100_000);
-+        assert_eq!(output[0]["content"], "fix the bug", "reset drops the projection");
-+
-+        runtime.apply_overrides(control::Overrides { enabled: Some(false), ..Default::default() }).unwrap();
-+        assert_eq!(runtime.transform(&raw, 0, 100_000), raw, "paused passes raw through");
-+        std::fs::write(runtime.mirror_path(), "ignored while paused").unwrap();
-+        assert!(runtime.commit_turn().is_none());
-+    }
- }
-+
 Index: prime-agent-src/crates/pa-core/src/clm/control.rs
 ===================================================================
 --- /dev/null
@@ -895,11 +338,664 @@ Index: prime-agent-src/crates/pa-core/src/clm/control.rs
 +    }
 +}
 +
+Index: prime-agent-src/crates/pa-core/src/clm/edits.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/edits.rs
+@@ -0,0 +1,195 @@
++//! Word-level diff of an accepted edit, over the jsdiff line port.
++
++use pa_types::clm_view::{ClmEditMessage, ClmSegment, ClmSegmentKind};
++use serde_json::Value;
++
++use super::document::render_message;
++use super::jsdiff::diff_lines;
++
++// Tokens become diff lines, so newlines inside them are swapped out and back.
++const NEWLINE: char = '\u{1}';
++
++fn tokens(text: &str) -> Vec<String> {
++    let mut out: Vec<String> = Vec::new();
++    for ch in text.chars() {
++        match out.last_mut() {
++            Some(last)
++                if last
++                    .chars()
++                    .last()
++                    .is_some_and(|prev| prev.is_whitespace() == ch.is_whitespace()) =>
++            {
++                last.push(ch);
++            }
++            _ => out.push(ch.to_string()),
++        }
++    }
++    out
++}
++
++fn as_lines(tokens: &[String]) -> String {
++    let mut out = String::new();
++    for token in tokens {
++        out.push_str(&token.replace('\n', &NEWLINE.to_string()));
++        out.push('\n');
++    }
++    out
++}
++
++fn push(out: &mut Vec<ClmSegment>, kind: ClmSegmentKind, text: String) {
++    if text.is_empty() {
++        return;
++    }
++    match out.last_mut() {
++        Some(last) if last.kind == kind => last.text.push_str(&text),
++        _ => out.push(ClmSegment { kind, text }),
++    }
++}
++
++#[must_use]
++pub fn word_segments(old: &str, new: &str) -> Vec<ClmSegment> {
++    let mut out = Vec::new();
++    for part in diff_lines(&as_lines(&tokens(old)), &as_lines(&tokens(new))) {
++        let kind = if part.added {
++            ClmSegmentKind::Add
++        } else if part.removed {
++            ClmSegmentKind::Del
++        } else {
++            ClmSegmentKind::Same
++        };
++        let text: String = part
++            .value
++            .split_terminator('\n')
++            .map(|token| token.replace(NEWLINE, "\n"))
++            .collect();
++        push(&mut out, kind, text);
++    }
++    out
++}
++
++fn label(message: &Value) -> String {
++    message["details"]["contextRole"]
++        .as_str()
++        .or_else(|| message["role"].as_str())
++        .unwrap_or("")
++        .to_string()
++}
++
++fn key(message: &Value) -> String {
++    format!(
++        "{}{NEWLINE}{}\n",
++        label(message),
++        render_message(message).replace('\n', &NEWLINE.to_string())
++    )
++}
++
++fn whole(message: &Value, kind: ClmSegmentKind) -> ClmEditMessage {
++    ClmEditMessage {
++        role: label(message),
++        changed: kind != ClmSegmentKind::Same,
++        segments: vec![ClmSegment {
++            kind,
++            text: render_message(message),
++        }],
++    }
++}
++
++/// One row per message: unchanged, rewritten (paired in order inside a changed
++/// run), deleted or added.
++#[must_use]
++pub fn message_edits(before: &[Value], after: &[Value]) -> Vec<ClmEditMessage> {
++    let old: String = before.iter().map(key).collect();
++    let new: String = after.iter().map(key).collect();
++    let parts = diff_lines(&old, &new);
++    let (mut out, mut i, mut j, mut k) = (Vec::new(), 0, 0, 0);
++    while k < parts.len() {
++        if !parts[k].added && !parts[k].removed {
++            for _ in 0..parts[k].count {
++                out.push(whole(&after[j], ClmSegmentKind::Same));
++                i += 1;
++                j += 1;
++            }
++            k += 1;
++            continue;
++        }
++        let (mut removed, mut added) = (0, 0);
++        while k < parts.len() && (parts[k].added || parts[k].removed) {
++            if parts[k].added {
++                added += parts[k].count;
++            } else {
++                removed += parts[k].count;
++            }
++            k += 1;
++        }
++        for n in 0..removed.max(added) {
++            out.push(match (n < removed, n < added) {
++                (true, true) => ClmEditMessage {
++                    role: label(&after[j + n]),
++                    changed: true,
++                    segments: word_segments(
++                        &render_message(&before[i + n]),
++                        &render_message(&after[j + n]),
++                    ),
++                },
++                (true, false) => whole(&before[i + n], ClmSegmentKind::Del),
++                _ => whole(&after[j + n], ClmSegmentKind::Add),
++            });
++        }
++        i += removed;
++        j += added;
++    }
++    out
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn seg(kind: ClmSegmentKind, text: &str) -> ClmSegment {
++        ClmSegment {
++            kind,
++            text: text.into(),
++        }
++    }
++
++    #[test]
++    fn words_diff_keeps_spacing_and_newlines() {
++        assert_eq!(
++            word_segments("fix the old bug\nnow", "fix the new bug\nnow"),
++            vec![
++                seg(ClmSegmentKind::Same, "fix the "),
++                seg(ClmSegmentKind::Del, "old"),
++                seg(ClmSegmentKind::Add, "new"),
++                seg(ClmSegmentKind::Same, " bug\nnow"),
++            ]
++        );
++        assert_eq!(
++            word_segments("", "added"),
++            vec![seg(ClmSegmentKind::Add, "added")]
++        );
++    }
++
++    #[test]
++    fn messages_pair_rewrites_and_mark_deletes_and_adds() {
++        let user = json!({ "role": "user", "content": "task: fix a.py", "timestamp": 1 });
++        let long = json!({ "role": "assistant", "content": [{ "type": "text", "text": "a very long read" }], "timestamp": 2 });
++        let short = json!({ "role": "assistant", "content": [{ "type": "text", "text": "a short read" }], "timestamp": 2 });
++        let gone = json!({ "role": "user", "content": "noise", "timestamp": 3 });
++        let note = json!({
++            "role": "custom",
++            "customType": "live-context-projection",
++            "content": "[context role=notes]\nplan",
++            "details": { "contextRole": "notes" },
++            "timestamp": 4
++        });
++        let rows = message_edits(&[user.clone(), long, gone], &[user, short, note]);
++        assert_eq!(rows.len(), 3);
++        assert!(!rows[0].changed);
++        assert_eq!(rows[1].side(false), "a very long read");
++        assert_eq!(rows[1].side(true), "a short read");
++        assert_eq!(rows[2].role, "notes");
++        assert_eq!(rows[2].side(true), "plan");
++        assert_eq!(rows[2].side(false), "noise");
++    }
++}
+Index: prime-agent-src/crates/pa-core/src/clm/jsdiff.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-core/src/clm/jsdiff.rs
+@@ -0,0 +1,301 @@
++//! Faithful port of jsdiff v9 `diffLines` (Myers O(ND) with the diagonal-bounds
++//! optimization) as the TS product vendors it (`Diff.diffLines`): diffs here must
++//! match the TypeScript product byte for byte; the golden corpus pins them.
++
++/// Tokenize a string the way jsdiff's `diffLines` does: split keeping `\n` / `\r\n` separators,
++/// drop a trailing empty element, and merge each newline into the preceding line token.
++fn jsdiff_line_tokenize(value: &str) -> Vec<String> {
++    let mut parts: Vec<String> = Vec::new();
++    let mut current = String::new();
++    let mut chars = value.chars().peekable();
++    while let Some(c) = chars.next() {
++        if c == '\n' {
++            parts.push(std::mem::take(&mut current));
++            parts.push("\n".to_string());
++        } else if c == '\r' && chars.peek() == Some(&'\n') {
++            chars.next();
++            parts.push(std::mem::take(&mut current));
++            parts.push("\r\n".to_string());
++        } else {
++            current.push(c);
++        }
++    }
++    parts.push(current);
++    // Ignore the final empty token that occurs if the string ends with a newline.
++    if parts.last().is_some_and(String::is_empty) {
++        parts.pop();
++    }
++    // Merge the content and line separators into single tokens.
++    let mut ret_lines: Vec<String> = Vec::new();
++    for (i, part) in parts.into_iter().enumerate() {
++        if i % 2 == 1 {
++            if let Some(last) = ret_lines.last_mut() {
++                last.push_str(&part);
++            }
++        } else {
++            ret_lines.push(part);
++        }
++    }
++    ret_lines
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct DiffPart {
++    pub value: String,
++    pub added: bool,
++    pub removed: bool,
++    pub count: usize,
++}
++
++#[derive(Debug, Clone, Copy)]
++struct Component {
++    count: usize,
++    added: bool,
++    removed: bool,
++    previous: Option<usize>,
++}
++
++#[derive(Debug, Clone, Copy)]
++struct PathEntry {
++    old_pos: isize,
++    last_component: Option<usize>,
++}
++
++struct DiffEngine<'a> {
++    old_tokens: &'a [String],
++    new_tokens: &'a [String],
++    components: Vec<Component>,
++}
++
++impl DiffEngine<'_> {
++    fn equals(left: &str, right: &str) -> bool {
++        left == right
++    }
++
++    fn add_to_path(
++        &mut self,
++        path: &PathEntry,
++        added: bool,
++        removed: bool,
++        old_pos_inc: isize,
++    ) -> PathEntry {
++        if let Some(last_idx) = path.last_component {
++            let last = self.components[last_idx];
++            if last.added == added && last.removed == removed {
++                let idx = self.components.len();
++                self.components.push(Component {
++                    count: last.count + 1,
++                    added,
++                    removed,
++                    previous: last.previous,
++                });
++                return PathEntry {
++                    old_pos: path.old_pos + old_pos_inc,
++                    last_component: Some(idx),
++                };
++            }
++        }
++        let idx = self.components.len();
++        self.components.push(Component {
++            count: 1,
++            added,
++            removed,
++            previous: path.last_component,
++        });
++        PathEntry {
++            old_pos: path.old_pos + old_pos_inc,
++            last_component: Some(idx),
++        }
++    }
++
++    fn extract_common(&mut self, base_path: &mut PathEntry, diagonal_path: isize) -> isize {
++        let new_len = self.new_tokens.len() as isize;
++        let old_len = self.old_tokens.len() as isize;
++        let mut old_pos = base_path.old_pos;
++        let mut new_pos = old_pos - diagonal_path;
++        let mut common_count = 0usize;
++        while new_pos + 1 < new_len
++            && old_pos + 1 < old_len
++            && Self::equals(
++                &self.old_tokens[(old_pos + 1) as usize],
++                &self.new_tokens[(new_pos + 1) as usize],
++            )
++        {
++            new_pos += 1;
++            old_pos += 1;
++            common_count += 1;
++        }
++        if common_count > 0 {
++            let idx = self.components.len();
++            self.components.push(Component {
++                count: common_count,
++                added: false,
++                removed: false,
++                previous: base_path.last_component,
++            });
++            base_path.last_component = Some(idx);
++        }
++        base_path.old_pos = old_pos;
++        new_pos
++    }
++
++    fn build_values(&mut self, last_component: Option<usize>) -> Vec<DiffPart> {
++        // Convert the linked list of components to an ordered array.
++        let mut component_indices: Vec<usize> = Vec::new();
++        let mut next = last_component;
++        while let Some(idx) = next {
++            component_indices.push(idx);
++            next = self.components[idx].previous;
++        }
++        component_indices.reverse();
++
++        let mut parts: Vec<DiffPart> = Vec::with_capacity(component_indices.len());
++        let mut new_pos = 0usize;
++        let mut old_pos = 0usize;
++        for idx in component_indices {
++            let component = self.components[idx];
++            if component.removed {
++                let slice: Vec<String> =
++                    self.old_tokens[old_pos..(old_pos + component.count)].to_vec();
++                let value = slice.join("");
++                old_pos += component.count;
++                parts.push(DiffPart {
++                    value,
++                    added: component.added,
++                    removed: component.removed,
++                    count: component.count,
++                });
++            } else {
++                let slice: Vec<String> =
++                    self.new_tokens[new_pos..(new_pos + component.count)].to_vec();
++                let value = slice.join("");
++                new_pos += component.count;
++                if !component.added {
++                    old_pos += component.count;
++                }
++                parts.push(DiffPart {
++                    value,
++                    added: component.added,
++                    removed: component.removed,
++                    count: component.count,
++                });
++            }
++        }
++        parts
++    }
++
++    /// Port of jsdiff `Diff.diffWithOptionsObj` (no options, sync).
++    fn run(&mut self) -> Vec<DiffPart> {
++        let new_len = self.new_tokens.len() as isize;
++        let old_len = self.old_tokens.len() as isize;
++        let mut edit_length: isize = 1;
++        let max_edit_length = new_len + old_len;
++
++        // jsdiff stores best-path entries in a JS array/object indexed by the
++        // (possibly negative) diagonal path; emulate that with a map so
++        // negative indices work exactly like in JavaScript.
++        let mut best_path: std::collections::HashMap<isize, PathEntry> =
++            std::collections::HashMap::new();
++        best_path.insert(
++            0,
++            PathEntry {
++                old_pos: -1,
++                last_component: None,
++            },
++        );
++        // Seed editLength = 0, i.e. the content starts with the same values.
++        let mut base = *best_path.get(&0).expect("seeded");
++        let mut new_pos = self.extract_common(&mut base, 0);
++        best_path.insert(0, base);
++        if base.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
++            let last = base.last_component;
++            return self.build_values(last);
++        }
++
++        let mut min_diagonal_to_consider: isize = isize::MIN;
++        let mut max_diagonal_to_consider: isize = isize::MAX;
++
++        while edit_length <= max_edit_length {
++            let mut done: Option<Vec<DiffPart>> = None;
++            let diag_start = min_diagonal_to_consider.max(-edit_length);
++            let diag_end = max_diagonal_to_consider.min(edit_length);
++
++            let mut diagonal_path = diag_start;
++            while diagonal_path <= diag_end {
++                let remove_path = best_path.get(&(diagonal_path - 1)).copied();
++                let add_path = best_path.get(&(diagonal_path + 1)).copied();
++
++                let mut can_add = false;
++                if let Some(add) = add_path {
++                    let add_path_new_pos = add.old_pos - diagonal_path;
++                    can_add = 0 <= add_path_new_pos && add_path_new_pos < new_len;
++                }
++                let can_remove = remove_path.is_some_and(|remove| remove.old_pos + 1 < old_len);
++
++                if !can_add && !can_remove {
++                    // If this path is a terminal then prune.
++                    best_path.remove(&diagonal_path);
++                    diagonal_path += 2;
++                    continue;
++                }
++
++                let mut base_path = if !can_remove
++                    || (can_add
++                        && remove_path.is_some_and(|remove| {
++                            add_path.is_some_and(|add| remove.old_pos < add.old_pos)
++                        })) {
++                    self.add_to_path(&add_path.unwrap(), true, false, 0)
++                } else {
++                    self.add_to_path(&remove_path.unwrap(), false, true, 1)
++                };
++
++                new_pos = self.extract_common(&mut base_path, diagonal_path);
++                if base_path.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
++                    // If we have hit the end of both strings, then we are done.
++                    done = Some(self.build_values(base_path.last_component));
++                    break;
++                }
++                best_path.insert(diagonal_path, base_path);
++                if base_path.old_pos + 1 >= old_len {
++                    max_diagonal_to_consider = max_diagonal_to_consider.min(diagonal_path - 1);
++                }
++                if new_pos + 1 >= new_len {
++                    min_diagonal_to_consider = min_diagonal_to_consider.max(diagonal_path + 1);
++                }
++                diagonal_path += 2;
++            }
++
++            if let Some(parts) = done {
++                return parts;
++            }
++            edit_length += 1;
++        }
++
++        // The loop always terminates via the done path for well-formed input (maxEditLength =
++        // newLen + oldLen bounds the Myers search), but the seed is kept as a safe terminal answer.
++        self.build_values(
++            best_path
++                .get(&(-max_edit_length))
++                .and_then(|p| p.last_component),
++        )
++    }
++}
++
++/// jsdiff `diffLines` with default options (case-sensitive, newlines merged
++/// into line tokens). Returns the change parts in order.
++pub(crate) fn diff_lines(old_str: &str, new_str: &str) -> Vec<DiffPart> {
++    let mut old_tokens = jsdiff_line_tokenize(old_str);
++    let mut new_tokens = jsdiff_line_tokenize(new_str);
++    // removeEmpty: drop empty tokens.
++    old_tokens.retain(|t| !t.is_empty());
++    new_tokens.retain(|t| !t.is_empty());
++
++    let mut engine = DiffEngine {
++        old_tokens: &old_tokens,
++        new_tokens: &new_tokens,
++        components: Vec::new(),
++    };
++    engine.run()
++}
++
++// Diff string generation
+Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/clm/mod.rs
++++ prime-agent-src/crates/pa-core/src/clm/mod.rs
+@@ -5,9 +5,12 @@
+ 
+ pub mod annotations;
+ pub mod budget;
++pub mod control;
+ pub mod document;
++pub mod edits;
+ pub mod guard;
+ pub mod host;
++mod jsdiff;
+ pub mod projection;
+ 
+ use std::path::{Path, PathBuf};
+@@ -250,6 +253,12 @@ pub struct ClmRuntime {
+     pending_checkpoint: Option<Checkpoint>,
+     annotations: Vec<annotations::ActiveAnnotation>,
+     continuity_warned: bool,
++    seed: ContextLanguageModelsSettings,
++    overrides: control::Overrides,
++    paused: bool,
++    last_raw: Vec<Value>,
++    last_context_window: u64,
++    last_observed: Option<u64>,
+ }
+ 
+ impl ClmRuntime {
+@@ -275,6 +284,12 @@ impl ClmRuntime {
+             pending_checkpoint: None,
+             annotations: Vec::new(),
+             continuity_warned: false,
++            seed: ContextLanguageModelsSettings::default(),
++            overrides: control::Overrides::default(),
++            paused: false,
++            last_raw: Vec::new(),
++            last_context_window: 0,
++            last_observed: None,
+         })
+     }
+ 
+@@ -321,6 +336,37 @@ impl ClmRuntime {
+         self.recovery_tried = false;
+     }
+ 
++    pub fn set_seed(&mut self, seed: ContextLanguageModelsSettings) {
++        self.seed = seed;
++    }
++
++    /// Re-validate the seed with `overrides` on top; on error nothing changes.
++    ///
++    /// # Errors
++    /// Returns an error if the combined settings fail validation.
++    pub fn apply_overrides(&mut self, overrides: control::Overrides) -> Result<(), String> {
++        let config = ClmConfig::from_settings(&control::merged(&self.seed, &overrides)?)?;
++        if config.estimate_factor != self.config.estimate_factor {
++            self.calibrator = EstimateCalibrator::new(config.estimate_factor);
++        }
++        self.config = config;
++        self.paused = overrides.enabled == Some(false);
++        self.overrides = overrides;
++        Ok(())
++    }
++
++    /// `/clm reset`: back to the raw context; older checkpoints stop matching.
++    pub fn reset_projection(&mut self) {
++        self.checkpoint = None;
++        self.history.clear();
++        self.baseline = None;
++        self.edit_raw_len = None;
++        self.pending_checkpoint = None;
++        self.tracker.reset();
++        self.pending_notices
++            .push("Projection reset by the user; the context is the raw session again.".into());
++    }
++
+     /// Newest checkpoint that matches once retry error rows are skipped, rebased
+     /// onto the raw context as it is now.
+     fn recover_after_retry_errors(&mut self, raw: &[Value]) -> Option<Checkpoint> {
+@@ -386,6 +432,9 @@ impl ClmRuntime {
+         system_prompt_tokens: u64,
+         context_window: u64,
+     ) -> Vec<Value> {
++        if self.paused {
++            return raw.to_vec();
++        }
+         let mut projection = apply_projection(raw, self.checkpoint.as_ref());
+         if let Projection::Invalid(reason) = &projection {
+             self.pending_notices
+@@ -420,6 +469,9 @@ impl ClmRuntime {
+         }
+         let conv = conversation_rows(raw);
+         let observed = last_provider_reported(&conv);
++        self.last_observed = observed.map(|(tokens, _)| tokens);
++        self.last_context_window = context_window;
++        self.last_raw = raw.to_vec();
+         self.calibrator.observe(observed);
+         let resolved = self.config.budget.resolve(context_window);
+ 
+@@ -523,6 +575,10 @@ impl ClmRuntime {
+     /// The turn-end commit. Returns a new checkpoint for the caller to persist as
+     /// a `clm-state` custom entry.
+     pub fn commit_turn(&mut self) -> Option<Checkpoint> {
++        if self.paused {
++            self.baseline = None;
++            return None;
++        }
+         let baseline = self.baseline.take()?;
+         let edited = match std::fs::read_to_string(self.mirror_path()) {
+             Ok(text) => text,
+@@ -919,4 +975,34 @@ mod tests {
+         let again = runtime.transform(&raw, 0, 100_000);
+         assert_eq!(again.len(), raw.len() + 1, "the size warning is shown once");
+     }
++
++    #[test]
++    fn overrides_pause_and_reset_change_the_live_runtime() {
++        let seed: ContextLanguageModelsSettings = settings(json!({ "enabled": true }));
++        let mut runtime = ClmRuntime::new(ClmConfig::from_settings(&seed).unwrap(), "s").unwrap();
++        runtime.set_seed(seed);
++        let mut overrides = control::Overrides::default();
++        overrides.values.insert("sizeTrailer".into(), json!(true));
++        overrides.values.insert("budget".into(), json!(50_000));
++        runtime.apply_overrides(overrides.clone()).unwrap();
++        assert!(runtime.size_trailer("x", 100_000).unwrap().contains("of 50000 tokens"));
++
++        overrides.values.insert("reserve".into(), json!(60_000));
++        assert!(runtime.apply_overrides(overrides).is_err());
++        assert!(runtime.size_trailer("x", 100_000).is_some(), "a rejected override changes nothing");
++
++        let raw = conversation(10);
++        runtime.transform(&raw, 0, 100_000);
++        std::fs::write(runtime.mirror_path(), "short").unwrap();
++        assert!(runtime.commit_turn().is_some());
++        runtime.reset_projection();
++        let output = runtime.transform(&raw, 0, 100_000);
++        assert_eq!(output[0]["content"], "fix the bug", "reset drops the projection");
++
++        runtime.apply_overrides(control::Overrides { enabled: Some(false), ..Default::default() }).unwrap();
++        assert_eq!(runtime.transform(&raw, 0, 100_000), raw, "paused passes raw through");
++        std::fs::write(runtime.mirror_path(), "ignored while paused").unwrap();
++        assert!(runtime.commit_turn().is_none());
++    }
+ }
++
 Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs
 +++ prime-agent-src/crates/pa-core/src/session_engine/engine.rs
-@@ -233,9 +233,8 @@ pub async fn create_session(mut config:
+@@ -277,9 +277,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
      let lifecycle_hooks = settings
          .get_lifecycle_hooks()
          .map(|hooks| super::lifecycle_hooks::LifecycleHooks::from_settings(&hooks));
@@ -911,7 +1007,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
      let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
          mcp_gating(&settings, config.agent_dir.clone()).await?;
      let mcp_manager = config
-@@ -305,22 +304,33 @@ pub async fn create_session(mut config:
+@@ -348,22 +347,33 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
          _ => None,
      };
      if let Some(clm) = &clm {
@@ -964,7 +1060,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/session_engine/engine/tests.rs
 +++ prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
-@@ -735,4 +735,101 @@ async fn clm_projection_survives_repeate
+@@ -1279,4 +1279,101 @@ async fn clm_projection_survives_repeated_resume_with_harness_state() {
      assert!(!req2.contains("dropme"), "projection lost on resume 2: {req2}");
  }
  
@@ -1070,7 +1166,7 @@ Index: prime-agent-src/crates/pa-daemon/src/agent_engine/lifecycle.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/agent_engine/lifecycle.rs
 +++ prime-agent-src/crates/pa-daemon/src/agent_engine/lifecycle.rs
-@@ -715,6 +715,53 @@ impl AgentSessionEngine {
+@@ -886,6 +886,53 @@ impl AgentSessionEngine {
              .await
      }
  
@@ -1269,16 +1365,16 @@ Index: prime-agent-src/crates/pa-daemon/src/protocol.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/protocol.rs
 +++ prime-agent-src/crates/pa-daemon/src/protocol.rs
-@@ -165,6 +165,8 @@ pub const KNOWN_COMMAND_TYPES: &[&str] =
-     "set_mcp_static_token",
-     "remove_mcp_connection",
-     "mark_anthropic_warning_shown",
+@@ -168,6 +168,8 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
+     "list_persistent_shells",
+     "tail_persistent_shell",
+     "kill_persistent_shell",
 +    "get_clm_view",
 +    "clm_configure",
  ];
  
  /// Parsed client command envelope.
-@@ -707,6 +709,12 @@ pub fn command_active_session_id(command
+@@ -712,6 +714,12 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
          | DaemonCommand::GetSessionStats {
              active_session_id, ..
          }
@@ -1291,7 +1387,7 @@ Index: prime-agent-src/crates/pa-daemon/src/protocol.rs
          | DaemonCommand::GetContextTree {
              active_session_id, ..
          }
-@@ -984,6 +992,8 @@ pub fn command_type_name(command: &Daemo
+@@ -995,6 +1003,8 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
          DaemonCommand::GetMessages { .. } => "get_messages",
          DaemonCommand::GetRlmChildren { .. } => "get_rlm_children",
          DaemonCommand::GetSessionStats { .. } => "get_session_stats",
@@ -1304,7 +1400,7 @@ Index: prime-agent-src/crates/pa-daemon/src/worker/commands.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/worker/commands.rs
 +++ prime-agent-src/crates/pa-daemon/src/worker/commands.rs
-@@ -150,6 +150,8 @@ impl Worker {
+@@ -154,6 +154,8 @@ impl Worker {
              "mutate_queued_message" => self.handle_mutate_queued_message(payload),
              "resume_queue" => self.handle_resume_queue(),
              "factory_activity" => self.handle_factory_activity(payload).await,
@@ -1312,24 +1408,24 @@ Index: prime-agent-src/crates/pa-daemon/src/worker/commands.rs
 +            "clm_configure" => self.handle_clm_configure(payload).await,
              "execute_bash" => self.handle_execute_bash(payload),
              "execute_bash_and_wait" => self.handle_execute_bash_and_wait(payload).await,
-             "abort_bash" => self.handle_abort_bash().await,
+             "abort_bash" => self.handle_abort_bash(),
 Index: prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/tests/command_breadth.rs
 +++ prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
-@@ -520,6 +520,8 @@ const WIRE_FIXTURES: &[(&str, &str)] = &
-         "mark_anthropic_warning_shown",
-         r#"{"type": "mark_anthropic_warning_shown", "activeSessionId": "sess"}"#,
+@@ -532,6 +532,8 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
+         "kill_persistent_shell",
+         r#"{"type": "kill_persistent_shell", "shellId": "s"}"#,
      ),
 +    ("get_clm_view", r#"{"type": "get_clm_view", "activeSessionId": "sess"}"#),
 +    ("clm_configure", r#"{"type": "clm_configure", "activeSessionId": "sess", "action": "on"}"#),
  ];
  
  /// The accept list is the TS list, in TS order, then the Rust-native supervisor/worker frames.
-@@ -548,6 +550,8 @@ fn known_command_types_match_the_ts_list
-                     | "tail_kernel_bash"
-                     | "kill_kernel_bash"
-                     | "mark_anthropic_warning_shown"
+@@ -563,6 +565,8 @@ fn known_command_types_match_the_ts_list() {
+                     | "list_persistent_shells"
+                     | "tail_persistent_shell"
+                     | "kill_persistent_shell"
 +                    | "get_clm_view"
 +                    | "clm_configure"
              ),
@@ -1764,7 +1860,7 @@ Index: prime-agent-src/crates/pa-tui/src/lib.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/lib.rs
 +++ prime-agent-src/crates/pa-tui/src/lib.rs
-@@ -61,6 +61,7 @@ pub mod exit_guard;
+@@ -62,6 +62,7 @@ pub mod exit_guard;
  pub(crate) mod exit_restore;
  pub mod export_share;
  mod external_editor;
@@ -1972,7 +2068,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/commands.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
-@@ -456,6 +456,7 @@ impl SessionUi {
+@@ -487,6 +487,7 @@ impl SessionUi {
                      _ => self.error_row("Usage: /factory [on|off|status]", view),
                  }
              }
@@ -1992,7 +2088,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/keys.rs
              || view.onboarding.is_some();
          let left = event.button == crate::mouse::BUTTON_LEFT;
          let release_was_drag = left && !event.press && self.left_mouse_dragged;
-@@ -351,6 +352,9 @@ impl SessionUi {
+@@ -359,6 +360,9 @@ impl SessionUi {
          if view.factory_view.is_some() {
              return self.handle_factory_view_key(key, view).await;
          }
@@ -2006,7 +2102,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/lifecycle.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
-@@ -787,6 +787,7 @@ impl SessionUi {
+@@ -811,6 +811,7 @@ impl SessionUi {
              // owning the frame over the rebind with stale content.
              view.goal_panel = None;
              view.info_panel = None;
@@ -2018,7 +2114,7 @@ Index: prime-agent-src/crates/pa-tui/src/view.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/view.rs
 +++ prime-agent-src/crates/pa-tui/src/view.rs
-@@ -93,6 +93,7 @@ pub struct AgentView {
+@@ -96,6 +96,7 @@ pub struct AgentView {
      /// inline pickers (one panel per live factory run) — the activity
      /// dock's factory group's destination.
      pub factory_view: Option<crate::factory_view::FactoryView>,
@@ -2026,8 +2122,8 @@ Index: prime-agent-src/crates/pa-tui/src/view.rs
      /// The `/heartbeats` inline management view (TS
      /// `HeartbeatManagerComponent`, inline-picker style): while set, it
      /// owns the editor dock like the `/model` and `/effort` pickers.
-@@ -306,6 +307,7 @@ impl AgentView {
-             effort_picker: None,
+@@ -308,6 +309,7 @@ impl AgentView {
+             choice_picker: None,
              mcp_view: None,
              factory_view: None,
 +            clm_view: None,
@@ -2061,7 +2157,7 @@ Index: prime-agent-src/crates/pa-tui/src/view/tests.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/view/tests.rs
 +++ prime-agent-src/crates/pa-tui/src/view/tests.rs
-@@ -35,6 +35,22 @@ fn the_factory_page_suppresses_the_stale
+@@ -71,6 +71,22 @@ fn the_factory_page_suppresses_the_stale_editor_cursor() {
      assert_eq!(v.frame_cursor(), Some((11, 3)));
  }
  
@@ -2084,3 +2180,216 @@ Index: prime-agent-src/crates/pa-tui/src/view/tests.rs
  /// A paste never reaches the editor behind an overlay (the key
  /// dispatch's frame owners): the input-bearing pickers take it, the
  /// input-less overlays consume it, and only the bare dock's editor
+Index: prime-agent-src/crates/pa-types/src/clm_view.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-types/src/clm_view.rs
+@@ -0,0 +1,111 @@
++//! Wire shape of the `/clm` panel (`get_clm_view` reply).
++
++use serde::{Deserialize, Serialize};
++
++#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ClmView {
++    pub status: ClmStatus,
++    pub settings: Vec<ClmSetting>,
++    /// Revisions with an accepted edit, oldest first.
++    pub revisions: Vec<u64>,
++    /// The revision `edits` belongs to.
++    pub revision: Option<u64>,
++    pub edits: Vec<ClmEditMessage>,
++    /// Why `edits` is empty although `revision` is set.
++    pub note: Option<String>,
++}
++
++#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ClmStatus {
++    pub enabled: bool,
++    pub estimate: u64,
++    pub budget: Option<u64>,
++    pub observed: Option<u64>,
++    pub revision: u64,
++    pub edit_count: usize,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "lowercase")]
++pub enum ClmSettingKind {
++    Bool,
++    Choice,
++    Number,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ClmSetting {
++    pub key: String,
++    pub label: String,
++    pub value: String,
++    pub default: String,
++    pub kind: ClmSettingKind,
++    pub choices: Vec<String>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "lowercase")]
++pub enum ClmSegmentKind {
++    Same,
++    Del,
++    Add,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ClmSegment {
++    pub kind: ClmSegmentKind,
++    pub text: String,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ClmEditMessage {
++    pub role: String,
++    pub changed: bool,
++    pub segments: Vec<ClmSegment>,
++}
++
++impl ClmEditMessage {
++    /// Text before (`Del` and `Same`) or after (`Add` and `Same`) the edit.
++    #[must_use]
++    pub fn side(&self, after: bool) -> String {
++        let skip = if after { ClmSegmentKind::Del } else { ClmSegmentKind::Add };
++        self.segments
++            .iter()
++            .filter(|segment| segment.kind != skip)
++            .map(|segment| segment.text.as_str())
++            .collect()
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn view_round_trips_in_camel_case() {
++        let view = ClmView {
++            status: ClmStatus { enabled: true, edit_count: 1, ..ClmStatus::default() },
++            revision: Some(1),
++            edits: vec![ClmEditMessage {
++                role: "user".into(),
++                changed: true,
++                segments: vec![
++                    ClmSegment { kind: ClmSegmentKind::Same, text: "a ".into() },
++                    ClmSegment { kind: ClmSegmentKind::Del, text: "b".into() },
++                    ClmSegment { kind: ClmSegmentKind::Add, text: "c".into() },
++                ],
++            }],
++            ..ClmView::default()
++        };
++        let value = serde_json::to_value(&view).unwrap();
++        assert_eq!(value["status"]["editCount"], 1);
++        assert_eq!(value["edits"][0]["segments"][1]["kind"], "del");
++        assert_eq!(serde_json::from_value::<ClmView>(value).unwrap(), view);
++        assert_eq!(view.edits[0].side(false), "a b");
++        assert_eq!(view.edits[0].side(true), "a c");
++    }
++}
+Index: prime-agent-src/crates/pa-types/src/daemon/command.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/daemon/command.rs
++++ prime-agent-src/crates/pa-types/src/daemon/command.rs
+@@ -679,6 +679,28 @@ pub enum DaemonCommand {
+         #[serde(flatten)]
+         rest: JsonMap,
+     },
++    GetClmView {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<String>,
++        active_session_id: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        revision: Option<u64>,
++        #[serde(flatten)]
++        rest: JsonMap,
++    },
++    ClmConfigure {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<String>,
++        active_session_id: String,
++        /// `on`, `off`, `reset`, `set` (with `key` and `value`) or `reset_settings`.
++        action: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        key: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        value: Option<String>,
++        #[serde(flatten)]
++        rest: JsonMap,
++    },
+     GetContextTree {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         id: Option<String>,
+@@ -1325,4 +1347,18 @@ mod tests {
+     fn mark_anthropic_warning_shown_roundtrip() {
+         rt::<DaemonCommand>(r#"{"type":"mark_anthropic_warning_shown","activeSessionId":"s1"}"#);
+     }
++
++    #[test]
++    fn clm_commands_use_their_wire_names() {
++        let view: crate::daemon::DaemonCommand = serde_json::from_str(
++            r#"{"type":"get_clm_view","activeSessionId":"s","revision":2}"#,
++        )
++        .unwrap();
++        assert!(matches!(view, crate::daemon::DaemonCommand::GetClmView { revision: Some(2), .. }));
++        let set: crate::daemon::DaemonCommand = serde_json::from_str(
++            r#"{"type":"clm_configure","activeSessionId":"s","action":"set","key":"budget","value":"64000"}"#,
++        )
++        .unwrap();
++        assert!(matches!(set, crate::daemon::DaemonCommand::ClmConfigure { ref action, .. } if action == "set"));
++    }
+ }
+Index: prime-agent-src/crates/pa-types/src/daemon/plane.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/daemon/plane.rs
++++ prime-agent-src/crates/pa-types/src/daemon/plane.rs
+@@ -48,6 +48,8 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
+         | "get_messages"
+         | "get_rlm_children"
+         | "get_session_stats"
++        | "get_clm_view"
++        | "clm_configure"
+         | "get_context_tree"
+         | "get_commands"
+         | "get_resource_snapshot"
+@@ -131,6 +133,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
+     "get_messages",
+     "get_rlm_children",
+     "get_session_stats",
++    "get_clm_view",
+     "get_context_tree",
+     "get_commands",
+     "get_resource_snapshot",
+Index: prime-agent-src/crates/pa-types/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/lib.rs
++++ prime-agent-src/crates/pa-types/src/lib.rs
+@@ -7,6 +7,7 @@
+ //! survive a parse/serialize round trip: the re-parsed JSON must equal the original.
+ 
+ pub mod ai;
++pub mod clm_view;
+ pub mod compaction;
+ pub mod daemon;
+ pub mod goal;
+Index: prime-agent-src/crates/pa-types/src/slash_commands.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/slash_commands.rs
++++ prime-agent-src/crates/pa-types/src/slash_commands.rs
+@@ -76,6 +76,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
+     BuiltinSlashCommand { name: "heartbeat", description: "Set or view a persistent heartbeat; delivery defaults to steer, use --follow-up to queue; supports pause, resume, stop, and clear", execution: SlashCommandExecution::Client, argument_hint: Some("[status|pause|resume|stop|[every <duration>] [--steer|--follow-up] <instruction>]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "heartbeats", description: "View and manage all user and agent heartbeats", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+     BuiltinSlashCommand { name: "factory", description: "Show or set the agent factory opt-in gate (off by default)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off|status]"), aliases: &[], takes_argument: true },
++    BuiltinSlashCommand { name: "clm", description: "Context Language Models: edits, settings and status for this session", execution: SlashCommandExecution::Client, argument_hint: Some("[edits|settings|status|config <key> <value>|config reset|on|off|reset]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
+     BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+     BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },

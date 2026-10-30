@@ -1,13 +1,10 @@
 remove-uv-python-install.patch
 nix-managed-update-refusal.patch
-append-system-file.patch
 speed-session-default.patch
 model-overrides-custom-models.patch
 opencode-upstream-retry.patch
 opencode-tool-floor.patch
 refinement-json-retry.patch
-rlm-child-provider-error.patch
-google-system-instruction.patch
 lifecycle-hooks.patch
 opencode-session-header.patch
 context-window-percent.patch

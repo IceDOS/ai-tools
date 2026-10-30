@@ -205,7 +205,7 @@ Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
  pub mod control;
  pub mod document;
  pub mod edits;
-@@ -51,6 +52,7 @@ pub struct ClmConfig {
+@@ -52,6 +53,7 @@ pub struct ClmConfig {
      pub size_trailer: bool,
      pub native_compaction: NativeCompaction,
      pub steering: Option<PathBuf>,
@@ -213,7 +213,7 @@ Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
  }
  
  impl ClmConfig {
-@@ -126,6 +128,12 @@ impl ClmConfig {
+@@ -127,6 +129,12 @@ impl ClmConfig {
                  .as_deref()
                  .filter(|path| !matches!(*path, "" | "none" | "off"))
                  .map(PathBuf::from),
@@ -226,7 +226,7 @@ Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
          })
      }
  }
-@@ -297,6 +305,27 @@ impl ClmRuntime {
+@@ -298,6 +306,27 @@ impl ClmRuntime {
          self.mirror_dir.path().join(MIRROR_FILE)
      }
  
@@ -255,9 +255,10 @@ Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
      pub fn config(&self) -> &ClmConfig {
          &self.config
 @@ -764,6 +793,32 @@ mod tests {
+         assert!(!quiet.budget.remind_at_reserve);
      }
  
-     #[test]
++    #[test]
 +    fn compact_prompt_setting_keeps_pi_clm_default_words() {
 +        for word in ["", "default", "None", "OFF"] {
 +            let config = ClmConfig::from_settings(&settings(json!({ "compactPrompt": word }))).unwrap();
@@ -283,15 +284,14 @@ Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
 +        assert!(runtime.compact_prompt("").unwrap_err().contains("CLM is off"));
 +    }
 +
-+    #[test]
+     #[test]
      fn transform_writes_the_mirror_and_an_edit_becomes_the_next_context() {
          let config = ClmConfig::from_settings(&settings(json!({ "budget": 1_000_000 }))).unwrap();
-         let mut runtime = ClmRuntime::new(config, "0199-session").unwrap();
 Index: prime-agent-src/crates/pa-core/src/session_engine/admission.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/session_engine/admission.rs
 +++ prime-agent-src/crates/pa-core/src/session_engine/admission.rs
-@@ -65,6 +65,18 @@ impl AgentSession {
+@@ -66,6 +66,18 @@ impl AgentSession {
          parse_session_command(&self.slash_commands, &normalized)
      }
  
@@ -310,7 +310,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/admission.rs
      /// Prompt with images attached (the ACP prompt-capability path). Busy
      /// sessions queue the text and images together as one follow-up batch,
      /// so an admitted prompt never loses its images to a queue race.
-@@ -80,6 +92,8 @@ impl AgentSession {
+@@ -81,6 +93,8 @@ impl AgentSession {
          options: PromptOptions,
      ) -> anyhow::Result<PromptOutcome> {
          let expand = options.expand_prompt_templates.unwrap_or(true);
@@ -323,7 +323,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/session_engine/engine/tests.rs
 +++ prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
-@@ -833,3 +833,64 @@ async fn clm_restore_handles_settings_an
+@@ -1377,3 +1377,64 @@ async fn clm_restore_handles_settings_and_reset_entries() {
  
  
  
@@ -392,7 +392,7 @@ Index: prime-agent-src/crates/pa-core/src/settings/types.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/settings/types.rs
 +++ prime-agent-src/crates/pa-core/src/settings/types.rs
-@@ -298,6 +298,8 @@ pub struct ContextLanguageModelsSettings
+@@ -310,6 +310,8 @@ pub struct ContextLanguageModelsSettings {
      pub size_trailer: Option<bool>,
      // "auto" (default), "off" or "on".
      pub native_compaction: Option<String>,
@@ -405,7 +405,7 @@ Index: prime-agent-src/crates/pa-types/src/slash_commands.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-types/src/slash_commands.rs
 +++ prime-agent-src/crates/pa-types/src/slash_commands.rs
-@@ -78,6 +78,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS:
+@@ -77,6 +77,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
      BuiltinSlashCommand { name: "heartbeats", description: "View and manage all user and agent heartbeats", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
      BuiltinSlashCommand { name: "factory", description: "Show or set the agent factory opt-in gate (off by default)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off|status]"), aliases: &[], takes_argument: true },
      BuiltinSlashCommand { name: "clm", description: "Context Language Models: edits, settings and status for this session", execution: SlashCommandExecution::Client, argument_hint: Some("[edits|settings|status|config <key> <value>|config reset|on|off|reset]"), aliases: &[], takes_argument: true },

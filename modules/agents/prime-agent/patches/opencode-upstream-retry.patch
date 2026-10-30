@@ -2,7 +2,7 @@ Index: prime-agent-src/crates/pa-ai/src/utils_inner/stream_failure.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/utils_inner/stream_failure.rs
 +++ prime-agent-src/crates/pa-ai/src/utils_inner/stream_failure.rs
-@@ -740,6 +740,17 @@ fn extract_parts_from_http(error: &Provi
+@@ -740,6 +740,17 @@ fn extract_parts_from_http(error: &ProviderHttpError) -> ExtractedParts {
      {
          kind = classify_stream_failure(None, error.status);
      }

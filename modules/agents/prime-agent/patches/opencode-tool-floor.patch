@@ -2,7 +2,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/anthropic/params.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/anthropic/params.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/anthropic/params.rs
-@@ -144,5 +144,9 @@ pub(crate) fn build_params(
+@@ -144,6 +144,10 @@ pub(crate) fn build_params(
          params.insert("tool_choice".into(), tool_choice.to_json());
      }
  
@@ -12,14 +12,15 @@ Index: prime-agent-src/crates/pa-ai/src/providers/anthropic/params.rs
 +
      Value::Object(params)
  }
+ 
 Index: prime-agent-src/crates/pa-ai/src/providers/mod.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/mod.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/mod.rs
-@@ -15,5 +15,6 @@ pub mod openai_responses;
- pub mod openai_responses_hooks;
+@@ -16,5 +16,6 @@ pub mod openai_responses_hooks;
  pub mod openai_responses_shared;
  pub mod openai_responses_stream;
+ mod opencode_headers;
 +pub mod opencode_tools;
  pub mod simple_options;
  pub mod transform_messages;
@@ -42,7 +43,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/stream.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/stream.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/stream.rs
-@@ -701,6 +701,17 @@ async fn run_stream(
+@@ -710,6 +710,17 @@ async fn run_stream(
                  .unwrap_or_else(|| "Provider returned an error stop reason".to_string()),
          ));
      }
@@ -60,7 +61,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/stream.rs
      // The drop: the provider ended the stream without its terminal marker —
      // no stop signal (`finish_reason`), no `[DONE]`, no error frame. A
      // healthy completion always carries one; an end without one means the
-@@ -928,4 +939,41 @@ mod tests {
+@@ -942,4 +953,41 @@ mod tests {
          assert!((message.usage.cost.input.as_f64() - 0.1015).abs() < 1e-9);
          assert!((message.usage.cost.output.as_f64() - 0.1015).abs() < 1e-9);
      }

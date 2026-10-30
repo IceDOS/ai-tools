@@ -2,43 +2,50 @@ Index: prime-agent-src/crates/pa-ai/src/providers/anthropic/mod.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/anthropic/mod.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/anthropic/mod.rs
-@@ -410,8 +410,11 @@ pub(crate) fn build_request_headers(
+@@ -365,7 +365,7 @@ pub(crate) fn build_request_headers(
+             .collect()
+     });
+ 
+-    let default_headers = match model.provider.as_str() {
++    let mut default_headers = match model.provider.as_str() {
+         "cloudflare-ai-gateway" => {
+             let mut headers = Map::new();
+             headers.insert("accept".into(), json!("application/json"));
+@@ -425,6 +425,11 @@ pub(crate) fn build_request_headers(
          }
      };
  
--    // withOpenCodeHeaders: session header for opencode providers.
--    if model.provider == "opencode" || model.provider == "opencode-go" {
-+    // withOpenCodeHeaders: session_id plus opencode session headers (opencode providers only).
++    // withOpenCodeHeaders: opencode session headers (opencode providers only).
 +    for (name, value) in super::opencode_session::session_headers(&model.provider, session_id) {
 +        default_headers.entry(name).or_insert(json!(value));
 +    }
-+    if model.provider == "opencode" || model.provider == "opencode-go" {
-         if let Some(session_id) = session_id {
-             default_headers.insert("session_id".into(), json!(session_id));
-         }
++
+     let mut pairs = headers_to_pairs(&default_headers);
+     crate::providers::opencode_headers::apply(&mut pairs, &model.provider, session_id);
+     // The Anthropic SDK always sends the API version; mirror it.
 Index: prime-agent-src/crates/pa-ai/src/providers/google.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/google.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/google.rs
-@@ -276,6 +276,11 @@ async fn run_stream(
-         if let Some(session_id) = &options.base.session_id {
-             headers.push(("session_id".into(), session_id.clone()));
+@@ -269,6 +269,11 @@ async fn run_stream(
+             headers.push((name.clone(), value.clone()));
          }
-+        crate::providers::opencode_session::push_session_headers(
-+            &mut headers,
-+            &model.provider,
-+            options.base.session_id.as_deref(),
-+        );
      }
-     headers.push(("x-goog-api-key".into(), api_key));
- 
++    crate::providers::opencode_session::push_session_headers(
++        &mut headers,
++        &model.provider,
++        options.base.session_id.as_deref(),
++    );
+     crate::providers::opencode_headers::apply(
+         &mut headers,
+         &model.provider,
 Index: prime-agent-src/crates/pa-ai/src/providers/mod.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/mod.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/mod.rs
-@@ -16,5 +16,6 @@ pub mod openai_responses_hooks;
- pub mod openai_responses_shared;
+@@ -17,5 +17,6 @@ pub mod openai_responses_shared;
  pub mod openai_responses_stream;
+ mod opencode_headers;
  pub mod opencode_tools;
 +pub(crate) mod opencode_session;
  pub mod simple_options;
@@ -47,7 +54,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/mod.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/mod.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/mod.rs
-@@ -331,7 +331,14 @@ pub fn stream_openai_completions(
+@@ -331,7 +331,14 @@ pub fn stream_simple_openai_completions(
  ) -> AssistantMessageEventStream {
      let api_key = options
          .and_then(|options| options.base.api_key.clone())
@@ -67,28 +74,31 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/params.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/params.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/params.rs
-@@ -351,8 +351,14 @@ pub(crate) fn build_headers(
+@@ -333,8 +333,10 @@ pub(crate) fn build_headers(
+ ) -> Vec<(String, String)> {
+     // The default Authorization goes in first so model and caller headers replace it (header names
+     // compare case-insensitively) instead of shipping a second Authorization alongside theirs.
++    let is_opencode = matches!(model.provider.as_str(), "opencode" | "opencode-zen" | "opencode_zen");
++    let effective_key = if is_opencode && api_key.is_empty() { "public" } else { api_key };
+     let mut headers: Vec<(String, String)> =
+-        vec![("Authorization".into(), format!("Bearer {api_key}"))];
++        vec![("Authorization".into(), format!("Bearer {effective_key}"))];
+     for (name, value) in model.headers.iter().flatten() {
+         headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+         headers.push((name.clone(), value.clone()));
+@@ -355,6 +357,7 @@ pub(crate) fn build_headers(
          }
      }
  
 +    crate::providers::opencode_session::push_session_headers(&mut headers, &model.provider, conversation_id);
-+    let is_opencode = model.provider == "opencode" || model.provider == "opencode-zen" || model.provider == "opencode_zen";
-+    let effective_key = if is_opencode && api_key.is_empty() {
-+        "public"
-+    } else {
-+        api_key
-+    };
-+    headers.insert(0, ("Authorization".into(), format!("Bearer {effective_key}")));
--    headers.insert(0, ("Authorization".into(), format!("Bearer {api_key}")));
--    let _ = conversation_id;
+     crate::providers::opencode_headers::apply(&mut headers, &model.provider, conversation_id);
      headers
  }
- 
 Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/stream.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/stream.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/stream.rs
-@@ -581,7 +581,8 @@ async fn run_stream(
+@@ -586,7 +586,8 @@ async fn run_stream(
          }
      }
  
@@ -102,7 +112,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_responses.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/openai_responses.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/openai_responses.rs
-@@ -182,6 +182,11 @@ fn build_headers(
+@@ -186,6 +186,11 @@ fn build_headers(
              headers.push((name.clone(), value.clone()));
          }
      }
@@ -111,9 +121,9 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_responses.rs
 +        &model.provider,
 +        options.base.session_id.as_deref(),
 +    );
-     headers.push(("Authorization".into(), format!("Bearer {api_key}")));
-     headers
- }
+     crate::providers::opencode_headers::apply(
+         &mut headers,
+         &model.provider,
 Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 ===================================================================
 --- /dev/null
@@ -341,7 +351,7 @@ Index: prime-agent-src/crates/pa-core/src/models/registry.rs
      }
  
      /// The provider's auth status without credential values: callers
-@@ -818,6 +821,11 @@ impl ModelRegistry {
+@@ -848,6 +851,11 @@ impl ModelRegistry {
                  }
              }
          }
@@ -353,25 +363,3 @@ Index: prime-agent-src/crates/pa-core/src/models/registry.rs
          let provider_headers = provider_config
              .as_ref()
              .and_then(|config| config.headers.clone());
-Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs
-+++ prime-agent-src/crates/pa-core/src/session_engine/engine.rs
-@@ -408,7 +408,7 @@ pub async fn create_session(mut config:
-             as crate::kernel::provisioner::UnavailableSkillsCallback)
-     };
-     let provisioner = super::runtime_wiring::kernel_provisioner(
--        session_id,
-+        session_id.clone(),
-         handlers,
-         python_skills,
-         cwd.clone(),
-@@ -620,6 +620,8 @@ pub async fn create_session(mut config:
-         should_stop_before_turn: config.queued_steering_probe.clone(),
-         steering_mode: config.steering_mode,
-         follow_up_mode: config.follow_up_mode,
-+        // Provider session headers and OpenAI prompt_cache_key read this.
-+        session_id: Some(session_id),
-         ..Default::default()
-     });
- 

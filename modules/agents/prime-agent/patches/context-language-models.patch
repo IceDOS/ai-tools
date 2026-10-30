@@ -2297,7 +2297,7 @@ Index: prime-agent-src/crates/pa-core/src/lib.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/lib.rs
 +++ prime-agent-src/crates/pa-core/src/lib.rs
-@@ -58,6 +58,7 @@ pub use tools::rlm_bootstrap::{build_rlm
+@@ -46,6 +46,7 @@ pub use tools::ipython::{
  pub mod agent_traces;
  pub mod auth;
  pub mod autonomous;
@@ -2305,128 +2305,6 @@ Index: prime-agent-src/crates/pa-core/src/lib.rs
  pub mod cron;
  pub mod export_html;
  pub mod goals;
-Index: prime-agent-src/crates/pa-core/src/settings/load.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-core/src/settings/load.rs
-+++ prime-agent-src/crates/pa-core/src/settings/load.rs
-@@ -62,6 +62,7 @@ const KNOWN_FIELDS: &[&str] = &[
-     "requestTiming",
-     "hooks",
-     "contextWindowPercent",
-+    "contextLanguageModels",
- ];
- 
- /// Extract each known field independently; ignore fields whose JSON type does not match the Rust
-Index: prime-agent-src/crates/pa-core/src/settings/manager.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-core/src/settings/manager.rs
-+++ prime-agent-src/crates/pa-core/src/settings/manager.rs
-@@ -889,6 +889,17 @@ impl SettingsManager {
-             .filter(|percent| (1..100).contains(percent))
-     }
- 
-+    // contextLanguageModels when enabled is true.
-+    #[must_use]
-+    pub fn get_context_language_models(
-+        &self,
-+    ) -> Option<super::types::ContextLanguageModelsSettings> {
-+        self.merged
-+            .context_language_models
-+            .clone()
-+            .filter(|clm| clm.enabled == Some(true))
-+    }
-+
-     #[must_use]
-     pub fn get_session_dir(&self) -> Option<std::path::PathBuf> {
-         let session_dir = self.merged.session_dir.as_ref()?;
-@@ -1043,6 +1054,26 @@ mod tests {
-     }
- 
-     #[test]
-+    fn context_language_models_needs_enabled_true() {
-+        let settings: Settings = serde_json::from_value(serde_json::json!({
-+            "contextLanguageModels": { "budget": 64000, "oneToolPerTurn": true }
-+        }))
-+        .unwrap();
-+        assert!(SettingsManager::in_memory(&settings)
-+            .get_context_language_models()
-+            .is_none());
-+        let settings: Settings = serde_json::from_value(serde_json::json!({
-+            "contextLanguageModels": { "enabled": true, "budget": 64000, "remindAt": [] }
-+        }))
-+        .unwrap();
-+        let clm = SettingsManager::in_memory(&settings)
-+            .get_context_language_models()
-+            .expect("enabled");
-+        assert_eq!(clm.budget, Some(64000));
-+        assert_eq!(clm.remind_at, Some(Vec::new()));
-+    }
-+
-+    #[test]
-     fn in_memory_loads_merges_and_saves() {
-         let mut manager = SettingsManager::in_memory(&Settings::default());
-         manager
-Index: prime-agent-src/crates/pa-core/src/settings/mod.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-core/src/settings/mod.rs
-+++ prime-agent-src/crates/pa-core/src/settings/mod.rs
-@@ -17,7 +17,7 @@ pub use storage::{
-     FileSettingsStorage, InMemorySettingsStorage, SettingsScope, SettingsStorage, CONFIG_DIR_NAME,
- };
- pub use types::{
--    AutoRefineSettings, AutonomousSettings, CompactionSettings, LifecycleHookEntry,
--    LifecycleHooksSettings, McpServerConfig, QueueModeSetting, Settings, ThinkingLevelSetting,
--    TransportSetting, UpdateChannel,
-+    AutoRefineSettings, AutonomousSettings, CompactionSettings, ContextLanguageModelsSettings,
-+    LifecycleHookEntry, LifecycleHooksSettings, McpServerConfig, QueueModeSetting, Settings,
-+    ThinkingLevelSetting, TransportSetting, UpdateChannel,
- };
-Index: prime-agent-src/crates/pa-core/src/settings/types.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-core/src/settings/types.rs
-+++ prime-agent-src/crates/pa-core/src/settings/types.rs
-@@ -261,6 +261,33 @@ pub struct LifecycleHooksSettings {
-     pub include_subagents: Option<bool>,
- }
- 
-+// contextLanguageModels: the pi-clm port (model-edited context mirror).
-+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-+#[serde(rename_all = "camelCase")]
-+pub struct ContextLanguageModelsSettings {
-+    pub enabled: Option<bool>,
-+    // Token budget; unset means the model's context window.
-+    pub budget: Option<u64>,
-+    // Generation headroom below the budget (default 2048).
-+    pub reserve: Option<u64>,
-+    // Reminder fractions in (0, 1); an empty list disables reminders.
-+    pub remind_at: Option<Vec<f64>>,
-+    // Max characters per tool result in the effective context; unset is off.
-+    pub observation_cap: Option<u64>,
-+    // Head fraction of the observation cap (default 0.8).
-+    pub observation_cap_head: Option<f64>,
-+    // Markdown steering document appended to the system prompt.
-+    pub steering: Option<String>,
-+    // "withhold" (default) or "off".
-+    pub overflow: Option<String>,
-+    // Initial chars/4 calibration factor, 1 to 4 (default 1).
-+    pub estimate_factor: Option<f64>,
-+    pub one_tool_per_turn: Option<bool>,
-+    pub size_trailer: Option<bool>,
-+    // "auto" (default), "off" or "on".
-+    pub native_compaction: Option<String>,
-+}
-+
- #[derive(Debug, Clone, Default, Serialize, Deserialize)]
- #[serde(rename_all = "camelCase")]
- pub struct TelemetrySettings {
-@@ -395,6 +422,7 @@ pub struct Settings {
-     pub hooks: Option<LifecycleHooksSettings>,
-     // Cap non-local model context windows at this percent of native (1-99).
-     pub context_window_percent: Option<u64>,
-+    pub context_language_models: Option<ContextLanguageModelsSettings>,
-     /// Unknown keys survive load/save round-trips (forward compatibility).
-     #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
-     pub extra: serde_json::Map<String, serde_json::Value>,
 Index: prime-agent-src/crates/pa-core/src/session_engine/compaction_arms.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/session_engine/compaction_arms.rs
@@ -2446,7 +2324,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/compaction_arms.rs
          let state = self.agent.state().await;
          // The live loop context is the agent's message list (the same
          // JSON round-trip `compact` uses).
-@@ -463,3 +471,66 @@ impl AgentSession {
+@@ -473,3 +481,66 @@ impl AgentSession {
          Ok(result)
      }
  }
@@ -2517,7 +2395,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs
 +++ prime-agent-src/crates/pa-core/src/session_engine/engine.rs
-@@ -233,6 +233,9 @@ pub async fn create_session(mut config:
+@@ -277,6 +277,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
      let lifecycle_hooks = settings
          .get_lifecycle_hooks()
          .map(|hooks| super::lifecycle_hooks::LifecycleHooks::from_settings(&hooks));
@@ -2527,9 +2405,9 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
      let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
          mcp_gating(&settings, config.agent_dir.clone()).await?;
      let mcp_manager = config
-@@ -285,6 +288,40 @@ pub async fn create_session(mut config:
+@@ -328,6 +331,40 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
+     let model_context_window = model.context_window;
  
-     let python_skills = super::runtime_wiring::kernel_python_skills(&resources.skills);
      let session_id = wiring.session.lock().await.get_session_id().to_string();
 +    let clm = match clm_config {
 +        Some(Ok(clm_cfg)) if config.rlm_depth.unwrap_or(0) == 0 => {
@@ -2568,13 +2446,11 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
      let mut handlers = wiring.handlers.clone();
      if let Some(extra) = config.extra_host_handlers.clone() {
          handlers.merge(extra);
-@@ -494,9 +531,21 @@ pub async fn create_session(mut config:
-             rlm_depth: config.rlm_depth,
+@@ -602,7 +639,21 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
+             daemonless: config.daemonless,
+             can_spawn: config.rlm_subagent_host.is_some(),
              generic_mcp_servers,
-             prompt_guidelines: Some(prompt_guidelines),
--            // `APPEND_SYSTEM.md` (project `.prime/` or agent dir) was discovered but dropped.
--            append_system_prompt: Some(resources.append_system_prompt.join("\n\n"))
--                .filter(|text| !text.trim().is_empty()),
+-            append_system_prompt: Some(resources.append_system_prompt.join("\n\n")),
 +            // APPEND_SYSTEM.md joined with CLM steering section if active.
 +            append_system_prompt: {
 +                let mut parts = Vec::new();
@@ -2593,7 +2469,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
              ..Default::default()
          },
      );
-@@ -607,8 +656,61 @@ pub async fn create_session(mut config:
+@@ -724,8 +775,61 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
          // wraps a pass-through that marks the turn's dispatch moment.
          transform_context: Some(super::request_timing::instrument_transform_context(
              std::sync::Arc::clone(&request_timing_wiring),
@@ -2653,10 +2529,10 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
 +                })
 +            })
 +        }),
-         should_stop_after_turn: config.queued_steering_probe.take().map(|probe| {
-             let probe: pa_agent::agent_loop::ShouldStopAfterTurnFn =
-                 std::sync::Arc::new(move |_context| {
-@@ -722,6 +824,57 @@ pub async fn create_session(mut config:
+         should_stop_after_turn: {
+             let steering = config.queued_steering_probe.take();
+             let boundary = config.should_stop_after_turn.take();
+@@ -877,6 +981,57 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
          )
          .await;
      }
@@ -2718,8 +2594,8 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/session_engine/engine/tests.rs
 +++ prime-agent-src/crates/pa-core/src/session_engine/engine/tests.rs
-@@ -370,3 +370,85 @@ async fn create_session_registers_goal_a
-         "tools: {names:?}"
+@@ -914,3 +914,85 @@ async fn late_receipts_recorded_before_the_row_lands_apply_on_landing() {
+         "the receipt persists as a custom entry"
      );
  }
 +
@@ -2808,7 +2684,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/mod.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/session_engine/mod.rs
 +++ prime-agent-src/crates/pa-core/src/session_engine/mod.rs
-@@ -182,6 +182,7 @@ pub struct AgentSession {
+@@ -186,6 +186,7 @@ pub struct AgentSession {
      /// resolves it (verification harnesses building the session directly
      /// keep `None`, which reads as the fail-closed disabled default).
      agent_dir: Option<std::path::PathBuf>,
@@ -2816,7 +2692,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/mod.rs
  }
  
  impl AgentSession {
-@@ -250,6 +251,7 @@ impl AgentSession {
+@@ -255,6 +256,7 @@ impl AgentSession {
              side_question_stream_fn: std::sync::Mutex::new(None),
              agent_dir: None,
              compaction_flight: tokio::sync::Mutex::new(()),
@@ -2824,7 +2700,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/mod.rs
          };
          this.ensure_harness_digest_context().await?;
          Ok(this)
-@@ -260,6 +262,13 @@ impl AgentSession {
+@@ -265,6 +267,13 @@ impl AgentSession {
          &self.agent
      }
  
@@ -2838,6 +2714,128 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/mod.rs
      /// The kernel host handlers and the command executor reach the same
      /// session state as the loop.
      pub(crate) fn session_handle(&self) -> &Arc<tokio::sync::Mutex<SessionManager>> {
+Index: prime-agent-src/crates/pa-core/src/settings/load.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/load.rs
++++ prime-agent-src/crates/pa-core/src/settings/load.rs
+@@ -64,6 +64,7 @@ const KNOWN_FIELDS: &[&str] = &[
+     "pythonCellTimeoutMs",
+     "hooks",
+     "contextWindowPercent",
++    "contextLanguageModels",
+ ];
+ 
+ /// Extract each known field independently; ignore fields whose JSON type does not match the Rust
+Index: prime-agent-src/crates/pa-core/src/settings/manager.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/manager.rs
++++ prime-agent-src/crates/pa-core/src/settings/manager.rs
+@@ -877,6 +877,17 @@ impl SettingsManager {
+             .filter(|percent| (1..100).contains(percent))
+     }
+ 
++    // contextLanguageModels when enabled is true.
++    #[must_use]
++    pub fn get_context_language_models(
++        &self,
++    ) -> Option<super::types::ContextLanguageModelsSettings> {
++        self.merged
++            .context_language_models
++            .clone()
++            .filter(|clm| clm.enabled == Some(true))
++    }
++
+     #[must_use]
+     pub fn get_session_dir(&self) -> Option<std::path::PathBuf> {
+         let session_dir = self.merged.session_dir.as_ref()?;
+@@ -1088,6 +1099,26 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn context_language_models_needs_enabled_true() {
++        let settings: Settings = serde_json::from_value(serde_json::json!({
++            "contextLanguageModels": { "budget": 64000, "oneToolPerTurn": true }
++        }))
++        .unwrap();
++        assert!(SettingsManager::in_memory(&settings)
++            .get_context_language_models()
++            .is_none());
++        let settings: Settings = serde_json::from_value(serde_json::json!({
++            "contextLanguageModels": { "enabled": true, "budget": 64000, "remindAt": [] }
++        }))
++        .unwrap();
++        let clm = SettingsManager::in_memory(&settings)
++            .get_context_language_models()
++            .expect("enabled");
++        assert_eq!(clm.budget, Some(64000));
++        assert_eq!(clm.remind_at, Some(Vec::new()));
++    }
++
+     #[test]
+     fn in_memory_loads_merges_and_saves() {
+         let mut manager = SettingsManager::in_memory(&Settings::default());
+Index: prime-agent-src/crates/pa-core/src/settings/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/mod.rs
++++ prime-agent-src/crates/pa-core/src/settings/mod.rs
+@@ -16,7 +16,7 @@ pub use storage::{
+     FileSettingsStorage, InMemorySettingsStorage, SettingsScope, SettingsStorage, CONFIG_DIR_NAME,
+ };
+ pub use types::{
+-    AutoRefineSettings, AutonomousSettings, CompactionSettings, LifecycleHookEntry,
+-    LifecycleHooksSettings, QueueModeSetting, Settings, ThinkingLevelSetting, TransportSetting,
+-    UpdateChannel,
++    AutoRefineSettings, AutonomousSettings, CompactionSettings, ContextLanguageModelsSettings,
++    LifecycleHookEntry, LifecycleHooksSettings, QueueModeSetting, Settings, ThinkingLevelSetting,
++    TransportSetting, UpdateChannel,
+ };
+Index: prime-agent-src/crates/pa-core/src/settings/types.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/settings/types.rs
++++ prime-agent-src/crates/pa-core/src/settings/types.rs
+@@ -273,6 +273,33 @@ pub struct LifecycleHooksSettings {
+     pub include_subagents: Option<bool>,
+ }
+ 
++// contextLanguageModels: the pi-clm port (model-edited context mirror).
++#[derive(Debug, Clone, Default, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ContextLanguageModelsSettings {
++    pub enabled: Option<bool>,
++    // Token budget; unset means the model's context window.
++    pub budget: Option<u64>,
++    // Generation headroom below the budget (default 2048).
++    pub reserve: Option<u64>,
++    // Reminder fractions in (0, 1); an empty list disables reminders.
++    pub remind_at: Option<Vec<f64>>,
++    // Max characters per tool result in the effective context; unset is off.
++    pub observation_cap: Option<u64>,
++    // Head fraction of the observation cap (default 0.8).
++    pub observation_cap_head: Option<f64>,
++    // Markdown steering document appended to the system prompt.
++    pub steering: Option<String>,
++    // "withhold" (default) or "off".
++    pub overflow: Option<String>,
++    // Initial chars/4 calibration factor, 1 to 4 (default 1).
++    pub estimate_factor: Option<f64>,
++    pub one_tool_per_turn: Option<bool>,
++    pub size_trailer: Option<bool>,
++    // "auto" (default), "off" or "on".
++    pub native_compaction: Option<String>,
++}
++
+ #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct TelemetrySettings {
+@@ -373,6 +400,7 @@ pub struct Settings {
+     pub hooks: Option<LifecycleHooksSettings>,
+     // Cap non-local model context windows at this percent of native (1-99).
+     pub context_window_percent: Option<u64>,
++    pub context_language_models: Option<ContextLanguageModelsSettings>,
+     /// Unknown keys survive load/save round-trips (forward compatibility).
+     #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+     pub extra: serde_json::Map<String, serde_json::Value>,
 Index: prime-agent-src/crates/pa-daemon/src/overflow_compaction.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/overflow_compaction.rs

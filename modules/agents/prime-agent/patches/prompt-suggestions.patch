@@ -2,7 +2,7 @@ Index: prime-agent-src/crates/pa-cli/src/client_settings.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-cli/src/client_settings.rs
 +++ prime-agent-src/crates/pa-cli/src/client_settings.rs
-@@ -116,6 +116,29 @@ impl ClientSettings for CliClientSetting
+@@ -160,6 +160,29 @@ impl ClientSettings for CliClientSettings {
      fn speed_display(&self) -> bool {
          self.manager().get_speed()
      }
@@ -32,7 +32,7 @@ Index: prime-agent-src/crates/pa-cli/src/client_settings.rs
      setting!(
          enable_skill_commands,
          set_enable_skill_commands,
-@@ -354,4 +377,23 @@ mod tests {
+@@ -398,4 +421,23 @@ mod tests {
          // The sibling key in the same block still reads.
          assert!(!settings.manager().get_fullscreen_mouse());
      }
@@ -170,7 +170,7 @@ Index: prime-agent-src/crates/pa-tui/src/client_settings.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/client_settings.rs
 +++ prime-agent-src/crates/pa-tui/src/client_settings.rs
-@@ -42,6 +42,14 @@ pub trait ClientSettings: Send + Sync {
+@@ -61,6 +61,14 @@ pub trait ClientSettings: Send + Sync {
      fn speed_display(&self) -> bool {
          false
      }
@@ -189,16 +189,16 @@ Index: prime-agent-src/crates/pa-tui/src/interactive/run.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/interactive/run.rs
 +++ prime-agent-src/crates/pa-tui/src/interactive/run.rs
-@@ -208,6 +208,8 @@ async fn run_interactive_surface(
-     // autocomplete provider.
+@@ -211,6 +211,8 @@ async fn run_interactive_surface(
      let (commands_tx, mut commands_rx) =
          mpsc::unbounded_channel::<crate::session_ui::CommandCatalogUpdate>();
+     let (page_tx, mut page_rx) = mpsc::unbounded_channel::<crate::session_ui::TranscriptPageNote>();
 +    let (suggest_tx, mut suggest_rx) =
 +        mpsc::unbounded_channel::<crate::prompt_suggest::SuggestNote>();
      // The double-Ctrl+C force-quit guard: the terminal reader observes the pair while this loop is
      // wedged in a daemon request; a std-thread watchdog enforces the exit deadline without the
      // runtime.
-@@ -649,6 +651,7 @@ async fn run_interactive_surface(
+@@ -659,6 +661,7 @@ async fn run_interactive_surface(
          }
      };
      session.exit_guard = exit_guard.clone();
@@ -206,7 +206,7 @@ Index: prime-agent-src/crates/pa-tui/src/interactive/run.rs
      // The supervisor reader's death watch: the event channel stays open across a supervisor socket
      // loss, so this watch is the signal the reconnect driver arms on. Taken from the LIVE session
      // client after the open (a wait retry may have reconnected).
-@@ -1539,6 +1542,11 @@ async fn run_interactive_surface(
+@@ -1570,6 +1573,11 @@ async fn run_interactive_surface(
                      session.apply_update_note(outcome, &mut view);
                  }
              }
@@ -222,7 +222,7 @@ Index: prime-agent-src/crates/pa-tui/src/lib.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/lib.rs
 +++ prime-agent-src/crates/pa-tui/src/lib.rs
-@@ -91,6 +91,7 @@ pub mod osc133;
+@@ -93,6 +93,7 @@ pub mod osc133;
  pub mod osc52;
  pub(crate) mod prompt_highlight;
  pub mod prompt_stash;
@@ -513,16 +513,16 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui.rs
-@@ -171,6 +171,8 @@ pub(crate) struct SessionUi {
+@@ -196,6 +196,8 @@ pub(crate) struct SessionUi {
      /// Per-session output tok/sec accumulation over completed responses;
      /// `None` until the first sample, a rebind restarts it.
      speed_stats: Option<SpeedStats>,
 +    pub(crate) suggest: crate::prompt_suggest::SuggestState,
 +    suggest_notes: Option<tokio::sync::mpsc::UnboundedSender<crate::prompt_suggest::SuggestNote>>,
      service_tier: Option<String>,
+     pending_model_fallback_message: Option<String>,
      client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
-     /// The ban-risk warning's view-local dedup (TS
-@@ -442,6 +444,10 @@ pub(crate) enum DockFold {
+@@ -474,6 +476,10 @@ pub(crate) enum DockFold {
  }
  
  impl SessionUi {
@@ -537,7 +537,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/apply.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
-@@ -373,6 +373,8 @@ impl SessionUi {
+@@ -349,6 +349,8 @@ impl SessionUi {
              TurnUpdate::TurnStarted => {
                  self.turn_active = true;
                  self.turn_error_shown = false;
@@ -546,7 +546,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
                  // No card from a previous run settles on this one's failure.
                  self.pending_tools.clear();
                  self.aborted_tools.clear();
-@@ -600,6 +602,12 @@ impl SessionUi {
+@@ -576,6 +578,12 @@ impl SessionUi {
              TurnUpdate::Idle => {
                  if !self.turn_active {
                      view.working = None;
@@ -559,7 +559,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
                  }
              }
              TurnUpdate::GoalUpdate(goal) => {
-@@ -939,6 +947,15 @@ impl SessionUi {
+@@ -915,6 +923,15 @@ impl SessionUi {
          });
      }
  
@@ -579,7 +579,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/commands.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
-@@ -785,6 +785,29 @@ impl SessionUi {
+@@ -797,6 +797,29 @@ impl SessionUi {
                  };
                  self.set_speed_display(enable, view);
              }
@@ -613,7 +613,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/keys.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/keys.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/keys.rs
-@@ -333,6 +333,9 @@ impl SessionUi {
+@@ -340,6 +340,9 @@ impl SessionUi {
          if key_event_to_id(&key).is_some_and(|id| id != "escape") {
              self.escape_tree_shortcut_spent = false;
          }
@@ -623,7 +623,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/keys.rs
          // The `/model` picker owns the frame while open: its keys go before the
          // editor, viewport keys, and Ctrl+C.
          if view.model_picker.is_some() {
-@@ -800,6 +803,16 @@ impl SessionUi {
+@@ -810,6 +813,16 @@ impl SessionUi {
              self.dirty = true;
              return Ok(());
          }
@@ -644,7 +644,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/lifecycle.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
-@@ -87,6 +87,14 @@ impl SessionUi {
+@@ -89,6 +89,14 @@ impl SessionUi {
                  .as_ref()
                  .is_some_and(|settings| settings.speed_display()),
              speed_stats: None,
@@ -659,7 +659,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
              client_settings: options.client_settings.clone(),
              anthropic_subscription_warning_shown: false,
              anthropic_warning_mark_pending: std::sync::Arc::default(),
-@@ -265,6 +273,8 @@ impl SessionUi {
+@@ -270,6 +278,8 @@ impl SessionUi {
              service_tier: None,
              speed_display_enabled: false,
              speed_stats: None,
@@ -668,7 +668,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
              client_settings: None,
              anthropic_subscription_warning_shown: false,
              anthropic_warning_mark_pending: std::sync::Arc::default(),
-@@ -732,6 +742,8 @@ impl SessionUi {
+@@ -753,6 +763,8 @@ impl SessionUi {
          // A rebind replaces the whole view: the previous session's open bash view
          // dies with its transcript, and the tok/sec stats restart per session.
          if matches!(kind, RebuildKind::Rebind) {
@@ -690,7 +690,7 @@ Index: prime-agent-src/crates/pa-tui/src/view.rs
      /// When the current working loader started (elapsed label).
      pub working_since: Option<std::time::Instant>,
      pub retry: Option<crate::chat::RetryState>,
-@@ -291,6 +293,7 @@ impl AgentView {
+@@ -293,6 +295,7 @@ impl AgentView {
              compaction: None,
              compaction_generation: 0,
              pulse_frame: 0,
@@ -722,7 +722,7 @@ Index: prime-agent-src/crates/pa-tui/src/view/tests.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/view/tests.rs
 +++ prime-agent-src/crates/pa-tui/src/view/tests.rs
-@@ -1647,3 +1647,12 @@ fn settled_rows_survive_a_cache_roundtri
+@@ -1666,3 +1666,12 @@ fn settled_rows_survive_a_cache_roundtrip() {
          "a fresh view renders the same rows (the Took clock may move)"
      );
  }
@@ -739,7 +739,7 @@ Index: prime-agent-src/crates/pa-types/src/slash_commands.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-types/src/slash_commands.rs
 +++ prime-agent-src/crates/pa-types/src/slash_commands.rs
-@@ -80,6 +80,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS:
+@@ -79,6 +79,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
      BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
      BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
      BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },

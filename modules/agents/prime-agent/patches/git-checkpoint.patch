@@ -134,19 +134,6 @@ Index: prime-agent-src/crates/pa-daemon/src/git_checkpoint.rs
 +        assert_eq!(format!("{missing:#}"), "checkpoint missing");
 +    }
 +}
-Index: prime-agent-src/crates/pa-daemon/src/lib.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-daemon/src/lib.rs
-+++ prime-agent-src/crates/pa-daemon/src/lib.rs
-@@ -45,6 +45,8 @@ pub(crate) mod context_tree_children;
- pub(crate) mod create_reuse;
- pub mod descriptor;
- pub mod engine;
-+pub(crate) mod git_checkpoint;
-+pub(crate) mod git_checkpoint_commands;
- pub(crate) mod clm_commands;
- pub(crate) mod todo_commands;
- pub(crate) mod factory_activity;
 Index: prime-agent-src/crates/pa-daemon/src/git_checkpoint_commands.rs
 ===================================================================
 --- /dev/null
@@ -328,20 +315,33 @@ Index: prime-agent-src/crates/pa-daemon/src/git_checkpoint_commands.rs
 +        assert!(!dir.path().join("agent").join(crate::git_checkpoint::REPOS_FILE).exists());
 +    }
 +}
+Index: prime-agent-src/crates/pa-daemon/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-daemon/src/lib.rs
++++ prime-agent-src/crates/pa-daemon/src/lib.rs
+@@ -45,6 +45,8 @@ pub(crate) mod context_tree_children;
+ pub(crate) mod create_reuse;
+ pub mod descriptor;
+ pub mod engine;
++pub(crate) mod git_checkpoint;
++pub(crate) mod git_checkpoint_commands;
+ pub(crate) mod clm_commands;
+ pub(crate) mod todo_commands;
+ pub(crate) mod factory_activity;
 Index: prime-agent-src/crates/pa-daemon/src/protocol.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/protocol.rs
 +++ prime-agent-src/crates/pa-daemon/src/protocol.rs
-@@ -165,6 +165,8 @@ pub const KNOWN_COMMAND_TYPES: &[&str] =
-     "set_mcp_static_token",
-     "remove_mcp_connection",
-     "mark_anthropic_warning_shown",
+@@ -168,6 +168,8 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
+     "list_persistent_shells",
+     "tail_persistent_shell",
+     "kill_persistent_shell",
 +    "get_git_checkpoint",
 +    "restore_git_checkpoint",
      "get_clm_view",
      "clm_configure",
      "get_todos",
-@@ -711,6 +713,12 @@ pub fn command_active_session_id(command
+@@ -716,6 +718,12 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
          | DaemonCommand::GetSessionStats {
              active_session_id, ..
          }
@@ -354,7 +354,7 @@ Index: prime-agent-src/crates/pa-daemon/src/protocol.rs
          | DaemonCommand::GetClmView {
              active_session_id, ..
          }
-@@ -1000,6 +1008,8 @@ pub fn command_type_name(command: &Daemo
+@@ -1011,6 +1019,8 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
          DaemonCommand::GetMessages { .. } => "get_messages",
          DaemonCommand::GetRlmChildren { .. } => "get_rlm_children",
          DaemonCommand::GetSessionStats { .. } => "get_session_stats",
@@ -367,7 +367,7 @@ Index: prime-agent-src/crates/pa-daemon/src/worker/commands.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/worker/commands.rs
 +++ prime-agent-src/crates/pa-daemon/src/worker/commands.rs
-@@ -159,6 +159,8 @@ impl Worker {
+@@ -163,6 +163,8 @@ impl Worker {
              "mutate_queued_message" => self.handle_mutate_queued_message(payload),
              "resume_queue" => self.handle_resume_queue(),
              "factory_activity" => self.handle_factory_activity(payload).await,
@@ -380,7 +380,7 @@ Index: prime-agent-src/crates/pa-daemon/src/worker/turn.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/worker/turn.rs
 +++ prime-agent-src/crates/pa-daemon/src/worker/turn.rs
-@@ -419,6 +419,27 @@ impl TurnRunner {
+@@ -421,6 +421,27 @@ impl TurnRunner {
          // post-join flag read raced `handle_abort`).
          let abort_gate_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
          let abort_gate_armed_seen = Arc::clone(&abort_gate_armed);
@@ -408,7 +408,7 @@ Index: prime-agent-src/crates/pa-daemon/src/worker/turn.rs
          let turn = tokio::task::spawn_blocking(move || {
              // The engine's own terminal `turn_end` frame keeps the
              // trailing `Done` fallback silent.
-@@ -575,7 +596,17 @@ impl TurnRunner {
+@@ -610,7 +631,17 @@ impl TurnRunner {
                      | EngineEvent::AssistantMessage(message)
                      | EngineEvent::ToolResultMessage(message) => {
                          if let Some(store) = core.store.as_mut() {
@@ -427,7 +427,7 @@ Index: prime-agent-src/crates/pa-daemon/src/worker/turn.rs
                          }
                      }
                      // The in-flight tool-call set, updated under the same core lock
-@@ -1015,6 +1046,21 @@ impl TurnRunner {
+@@ -1059,6 +1090,21 @@ impl TurnRunner {
              );
          });
          let _ = turn.await;
@@ -453,9 +453,9 @@ Index: prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/tests/command_breadth.rs
 +++ prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
-@@ -520,6 +520,11 @@ const WIRE_FIXTURES: &[(&str, &str)] = &
-         "mark_anthropic_warning_shown",
-         r#"{"type": "mark_anthropic_warning_shown", "activeSessionId": "sess"}"#,
+@@ -532,6 +532,11 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
+         "kill_persistent_shell",
+         r#"{"type": "kill_persistent_shell", "shellId": "s"}"#,
      ),
 +    ("get_git_checkpoint", r#"{"type": "get_git_checkpoint", "activeSessionId": "sess", "entryId": "e1"}"#),
 +    (
@@ -465,83 +465,15 @@ Index: prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
      ("get_clm_view", r#"{"type": "get_clm_view", "activeSessionId": "sess"}"#),
      ("clm_configure", r#"{"type": "clm_configure", "activeSessionId": "sess", "action": "on"}"#),
      ("get_todos", r#"{"type": "get_todos", "activeSessionId": "sess"}"#),
-@@ -552,6 +557,8 @@ fn known_command_types_match_the_ts_list
-                     | "tail_kernel_bash"
-                     | "kill_kernel_bash"
-                     | "mark_anthropic_warning_shown"
+@@ -567,6 +572,8 @@ fn known_command_types_match_the_ts_list() {
+                     | "list_persistent_shells"
+                     | "tail_persistent_shell"
+                     | "kill_persistent_shell"
 +                    | "get_git_checkpoint"
 +                    | "restore_git_checkpoint"
                      | "get_clm_view"
                      | "clm_configure"
                      | "get_todos"
-Index: prime-agent-src/crates/pa-types/src/daemon/command.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-types/src/daemon/command.rs
-+++ prime-agent-src/crates/pa-types/src/daemon/command.rs
-@@ -616,6 +616,24 @@ pub enum DaemonCommand {
-         #[serde(flatten)]
-         rest: JsonMap,
-     },
-+    /// The git checkpoint taken before the turn of user entry `entry_id`, if any.
-+    GetGitCheckpoint {
-+        #[serde(default, skip_serializing_if = "Option::is_none")]
-+        id: Option<String>,
-+        active_session_id: String,
-+        entry_id: String,
-+        #[serde(flatten)]
-+        rest: JsonMap,
-+    },
-+    /// `git stash apply` of a checkpoint ref in the session cwd.
-+    RestoreGitCheckpoint {
-+        #[serde(default, skip_serializing_if = "Option::is_none")]
-+        id: Option<String>,
-+        active_session_id: String,
-+        checkpoint_ref: String,
-+        #[serde(flatten)]
-+        rest: JsonMap,
-+    },
-     GetClmView {
-         #[serde(default, skip_serializing_if = "Option::is_none")]
-         id: Option<String>,
-@@ -1301,6 +1319,17 @@ mod tests {
- 
-     #[test]
-     fn clm_commands_use_their_wire_names() {
-+        let checkpoint: crate::daemon::DaemonCommand = serde_json::from_str(
-+            r#"{"type":"get_git_checkpoint","activeSessionId":"s","entryId":"e1"}"#,
-+        )
-+        .unwrap();
-+        assert!(matches!(checkpoint, crate::daemon::DaemonCommand::GetGitCheckpoint { ref entry_id, .. } if entry_id == "e1"));
-+        let restore: crate::daemon::DaemonCommand = serde_json::from_str(
-+            r#"{"type":"restore_git_checkpoint","activeSessionId":"s","checkpointRef":"refs/prime-agent/checkpoints/s/e1"}"#,
-+        )
-+        .unwrap();
-+        assert!(matches!(restore, crate::daemon::DaemonCommand::RestoreGitCheckpoint { ref checkpoint_ref, .. } if checkpoint_ref.ends_with("/e1")));
-+
-         let view: crate::daemon::DaemonCommand = serde_json::from_str(
-             r#"{"type":"get_clm_view","activeSessionId":"s","revision":2}"#,
-         )
-Index: prime-agent-src/crates/pa-types/src/daemon/plane.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-types/src/daemon/plane.rs
-+++ prime-agent-src/crates/pa-types/src/daemon/plane.rs
-@@ -48,6 +48,8 @@ pub fn command_plane(command_type: &str)
-         | "get_messages"
-         | "get_rlm_children"
-         | "get_session_stats"
-+        | "get_git_checkpoint"
-+        | "restore_git_checkpoint"
-         | "get_clm_view"
-         | "clm_configure"
-         | "get_todos"
-@@ -133,6 +135,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str]
-     "get_messages",
-     "get_rlm_children",
-     "get_session_stats",
-+    "get_git_checkpoint",
-     "get_clm_view",
-     "get_todos",
-     "get_context_tree",
 Index: prime-agent-src/crates/pa-tui/src/confirm.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/confirm.rs
@@ -770,3 +702,71 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/settings.rs
                      }
                  }
              }
+Index: prime-agent-src/crates/pa-types/src/daemon/command.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/daemon/command.rs
++++ prime-agent-src/crates/pa-types/src/daemon/command.rs
+@@ -679,6 +679,24 @@ pub enum DaemonCommand {
+         #[serde(flatten)]
+         rest: JsonMap,
+     },
++    /// The git checkpoint taken before the turn of user entry `entry_id`, if any.
++    GetGitCheckpoint {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<String>,
++        active_session_id: String,
++        entry_id: String,
++        #[serde(flatten)]
++        rest: JsonMap,
++    },
++    /// `git stash apply` of a checkpoint ref in the session cwd.
++    RestoreGitCheckpoint {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<String>,
++        active_session_id: String,
++        checkpoint_ref: String,
++        #[serde(flatten)]
++        rest: JsonMap,
++    },
+     GetClmView {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         id: Option<String>,
+@@ -1364,6 +1382,17 @@ mod tests {
+ 
+     #[test]
+     fn clm_commands_use_their_wire_names() {
++        let checkpoint: crate::daemon::DaemonCommand = serde_json::from_str(
++            r#"{"type":"get_git_checkpoint","activeSessionId":"s","entryId":"e1"}"#,
++        )
++        .unwrap();
++        assert!(matches!(checkpoint, crate::daemon::DaemonCommand::GetGitCheckpoint { ref entry_id, .. } if entry_id == "e1"));
++        let restore: crate::daemon::DaemonCommand = serde_json::from_str(
++            r#"{"type":"restore_git_checkpoint","activeSessionId":"s","checkpointRef":"refs/prime-agent/checkpoints/s/e1"}"#,
++        )
++        .unwrap();
++        assert!(matches!(restore, crate::daemon::DaemonCommand::RestoreGitCheckpoint { ref checkpoint_ref, .. } if checkpoint_ref.ends_with("/e1")));
++
+         let view: crate::daemon::DaemonCommand = serde_json::from_str(
+             r#"{"type":"get_clm_view","activeSessionId":"s","revision":2}"#,
+         )
+Index: prime-agent-src/crates/pa-types/src/daemon/plane.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/daemon/plane.rs
++++ prime-agent-src/crates/pa-types/src/daemon/plane.rs
+@@ -48,6 +48,8 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
+         | "get_messages"
+         | "get_rlm_children"
+         | "get_session_stats"
++        | "get_git_checkpoint"
++        | "restore_git_checkpoint"
+         | "get_clm_view"
+         | "clm_configure"
+         | "get_todos"
+@@ -135,6 +137,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
+     "get_messages",
+     "get_rlm_children",
+     "get_session_stats",
++    "get_git_checkpoint",
+     "get_clm_view",
+     "get_todos",
+     "get_context_tree",

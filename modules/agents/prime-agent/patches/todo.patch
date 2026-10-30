@@ -2,7 +2,7 @@ Index: prime-agent-src/crates/pa-core/src/lib.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/lib.rs
 +++ prime-agent-src/crates/pa-core/src/lib.rs
-@@ -75,6 +75,7 @@ pub mod session_engine;
+@@ -63,6 +63,7 @@ pub mod session_engine;
  pub mod settings;
  pub mod skills;
  pub mod slash_command_args;
@@ -10,11 +10,31 @@ Index: prime-agent-src/crates/pa-core/src/lib.rs
  pub mod update;
  pub mod workspace_snapshot;
  pub use kernel::ReplKernelManager;
+Index: prime-agent-src/crates/pa-core/src/prompts/layers/core.md
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/prompts/layers/core.md
++++ prime-agent-src/crates/pa-core/src/prompts/layers/core.md
+@@ -149,6 +149,15 @@ In goal mode prime-agent helps an agent stay on track until a task is fully fini
+ - `goal.get() -> dict`: get goal status (only one goal can be active at a time)
+ - `goal.complete() -> dict`: mark goal as completed and get final goal status
+ 
++## Todo
++
++A per-session todo list for multi-step work. It is saved in the session and follows forks; the user sees it with /todos.
++
++- `todo.add(text: str) -> dict`: add an open item; returns its `id` and the whole list
++- `todo.toggle(id: int) -> dict`: mark an item done, or open again
++- `todo.list() -> dict`: the list as `{items, text}`
++- `todo.clear() -> dict`: remove every item
++
+ ## Heartbeat
+ 
+ In prime-agent, agents can create heartbeats to wake themselves up after a given period of time with remembered instructions, recurrently on a given schedule.
 Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs
 +++ prime-agent-src/crates/pa-core/src/session_engine/engine.rs
-@@ -312,6 +312,7 @@ pub async fn create_session(mut config:
+@@ -355,6 +355,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
          handlers.merge(extra);
      }
      crate::clm::host::register(&mut handlers, clm.clone(), wiring.session.clone());
@@ -199,93 +219,11 @@ Index: prime-agent-src/crates/pa-core/src/todo.rs
 +        }
 +    }
 +}
-Index: prime-agent-src/crates/pa-types/src/lib.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-types/src/lib.rs
-+++ prime-agent-src/crates/pa-types/src/lib.rs
-@@ -17,6 +17,7 @@ pub mod session;
- pub mod skill_blocks;
- pub mod slash_commands;
- pub mod themes;
-+pub mod todo;
- pub mod usage;
- 
- use serde::{Deserialize, Serialize};
-Index: prime-agent-src/crates/pa-types/src/todo.rs
-===================================================================
---- /dev/null
-+++ prime-agent-src/crates/pa-types/src/todo.rs
-@@ -0,0 +1,45 @@
-+//! The session todo list. A `todo` custom entry holds the whole list; the latest one on the branch wins.
-+
-+use serde::{Deserialize, Serialize};
-+
-+pub const TODO_CUSTOM_TYPE: &str = "todo";
-+
-+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-+pub struct TodoItem {
-+    pub id: u64,
-+    pub text: String,
-+    pub done: bool,
-+}
-+
-+/// One line per item, `[x] 2 text` when done; `No todos` for an empty list.
-+#[must_use]
-+pub fn format_lines(items: &[TodoItem]) -> Vec<String> {
-+    if items.is_empty() {
-+        return vec!["No todos".to_string()];
-+    }
-+    items
-+        .iter()
-+        .map(|item| format!("[{}] {} {}", if item.done { "x" } else { " " }, item.id, item.text))
-+        .collect()
-+}
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+
-+    #[test]
-+    fn lines_mark_done_items_and_name_an_empty_list() {
-+        let items = vec![
-+            TodoItem { id: 1, text: "write the plan".into(), done: false },
-+            TodoItem { id: 2, text: "run the tests".into(), done: true },
-+        ];
-+        assert_eq!(format_lines(&items), vec!["[ ] 1 write the plan", "[x] 2 run the tests"]);
-+        assert_eq!(format_lines(&[]), vec!["No todos"]);
-+    }
-+
-+    #[test]
-+    fn items_use_the_wire_shape() {
-+        let item: TodoItem = serde_json::from_str(r#"{"id":3,"text":"t","done":false}"#).unwrap();
-+        assert_eq!(serde_json::to_string(&item).unwrap(), r#"{"id":3,"text":"t","done":false}"#);
-+    }
-+}
-Index: prime-agent-src/crates/pa-core/src/prompts/layers/core.md
-===================================================================
---- prime-agent-src.orig/crates/pa-core/src/prompts/layers/core.md
-+++ prime-agent-src/crates/pa-core/src/prompts/layers/core.md
-@@ -149,6 +149,15 @@ In goal mode prime-agent helps an agent
- - `goal.get() -> dict`: get goal status (only one goal can be active at a time)
- - `goal.complete() -> dict`: mark goal as completed and get final goal status
- 
-+## Todo
-+
-+A per-session todo list for multi-step work. It is saved in the session and follows forks; the user sees it with /todos.
-+
-+- `todo.add(text: str) -> dict`: add an open item; returns its `id` and the whole list
-+- `todo.toggle(id: int) -> dict`: mark an item done, or open again
-+- `todo.list() -> dict`: the list as `{items, text}`
-+- `todo.clear() -> dict`: remove every item
-+
- ## Heartbeat
- 
- In prime-agent, agents can create heartbeats to wake themselves up after a given period of time with remembered instructions, recurrently on a given schedule.
 Index: prime-agent-src/crates/pa-core/tests/prompt_guards.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/tests/prompt_guards.rs
 +++ prime-agent-src/crates/pa-core/tests/prompt_guards.rs
-@@ -310,6 +310,9 @@ fn python_skill_functions(package_path:
+@@ -328,6 +328,9 @@ fn python_skill_functions(package_path: &Path) -> Vec<String> {
          for entry in entries.flatten() {
              let path = entry.path();
              if path.is_dir() {
@@ -295,7 +233,7 @@ Index: prime-agent-src/crates/pa-core/tests/prompt_guards.rs
                  stack.push(path);
                  continue;
              }
-@@ -502,6 +505,7 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &
+@@ -532,6 +535,7 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &[
      "refine",
      "rlm-heartbeat",
      "skill-creator",
@@ -303,129 +241,13 @@ Index: prime-agent-src/crates/pa-core/tests/prompt_guards.rs
      "websearch",
  ];
  
-Index: prime-agent-src/skills/todo/SKILL.md
-===================================================================
---- /dev/null
-+++ prime-agent-src/skills/todo/SKILL.md
-@@ -0,0 +1,17 @@
-+---
-+name: todo
-+description: Keep a todo list for multi-step work in this session. The list is saved in the session, follows forks and resumes, and the user sees it with /todos. Use it to plan steps, tick them off and show what is left.
-+---
-+
-+# todo
-+
-+```python
-+import todo
-+
-+await todo.add("write the failing test")   # {"id": 1, "items": [...], "text": "[ ] 1 write the failing test"}
-+await todo.toggle(1)                       # marks item 1 done, or open again
-+await todo.list()                          # {"items": [{"id", "text", "done"}], "text": ...}
-+await todo.clear()                         # empties the list
-+```
-+
-+Each call returns the whole list. Ids start at 1 and stay stable until `clear()`.
-Index: prime-agent-src/skills/todo/pyproject.toml
-===================================================================
---- /dev/null
-+++ prime-agent-src/skills/todo/pyproject.toml
-@@ -0,0 +1,14 @@
-+# rlm is provided by the kernel and deliberately not a dependency.
-+[project]
-+name = "todo"
-+version = "0.1.0"
-+description = "Prime Agent todo skill: a per-session todo list that forks with the branch"
-+requires-python = ">=3.10"
-+dependencies = []
-+
-+[build-system]
-+requires = ["hatchling"]
-+build-backend = "hatchling.build"
-+
-+[tool.hatch.build.targets.wheel]
-+packages = ["src/todo"]
-Index: prime-agent-src/skills/todo/src/todo/__init__.py
-===================================================================
---- /dev/null
-+++ prime-agent-src/skills/todo/src/todo/__init__.py
-@@ -0,0 +1,25 @@
-+"""Session todo list over the kernel host bridge (todo.* requests)."""
-+
-+from __future__ import annotations
-+
-+from typing import Any
-+
-+from rlm import host_request
-+
-+
-+async def list() -> dict[str, Any]:  # noqa: A001 - the skill's public name
-+    return await host_request("todo.list")
-+
-+
-+async def add(text: str) -> dict[str, Any]:
-+    if not text.strip():
-+        raise ValueError("text must not be empty")
-+    return await host_request("todo.add", {"text": text})
-+
-+
-+async def toggle(id: int) -> dict[str, Any]:
-+    return await host_request("todo.toggle", {"id": int(id)})
-+
-+
-+async def clear() -> dict[str, Any]:
-+    return await host_request("todo.clear")
-Index: prime-agent-src/skills/todo/tests/test_todo.py
-===================================================================
---- /dev/null
-+++ prime-agent-src/skills/todo/tests/test_todo.py
-@@ -0,0 +1,40 @@
-+import asyncio
-+import importlib.util
-+import sys
-+import types
-+from pathlib import Path
-+from unittest.mock import AsyncMock
-+
-+import pytest
-+
-+SRC = Path(__file__).resolve().parents[1] / "src" / "todo" / "__init__.py"
-+
-+
-+def load(host):
-+    sys.modules["rlm"] = types.SimpleNamespace(host_request=host)
-+    spec = importlib.util.spec_from_file_location("todo", SRC)
-+    module = importlib.util.module_from_spec(spec)
-+    spec.loader.exec_module(module)
-+    return module
-+
-+
-+def test_calls_map_to_todo_requests():
-+    host = AsyncMock(return_value={"items": [], "text": "No todos"})
-+    todo = load(host)
-+    asyncio.run(todo.add("write the plan"))
-+    asyncio.run(todo.toggle(1))
-+    asyncio.run(todo.list())
-+    asyncio.run(todo.clear())
-+    calls = [call.args for call in host.await_args_list]
-+    assert calls == [
-+        ("todo.add", {"text": "write the plan"}),
-+        ("todo.toggle", {"id": 1}),
-+        ("todo.list",),
-+        ("todo.clear",),
-+    ]
-+
-+
-+def test_add_refuses_empty_text():
-+    todo = load(AsyncMock(return_value={}))
-+    with pytest.raises(ValueError):
-+        asyncio.run(todo.add("   "))
 Index: prime-agent-src/crates/pa-daemon/src/agent_engine.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/agent_engine.rs
 +++ prime-agent-src/crates/pa-daemon/src/agent_engine.rs
-@@ -100,8 +100,13 @@ pub(crate) type SettledKernelRelease =
-     std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
- 
+@@ -107,8 +107,13 @@ enum PromptContextBoundary {
+     Leaf(String),
+ }
  /// Engine custom-entry types the worker mirrors into the session file.
 -pub(crate) const DURABLE_CUSTOM_TYPES: &[&str] =
 -    &["clm-state", "clm-annotation", "clm-settings", "clm-reset"];
@@ -443,7 +265,7 @@ Index: prime-agent-src/crates/pa-daemon/src/agent_engine/lifecycle.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/agent_engine/lifecycle.rs
 +++ prime-agent-src/crates/pa-daemon/src/agent_engine/lifecycle.rs
-@@ -767,6 +767,15 @@ impl AgentSessionEngine {
+@@ -938,6 +938,15 @@ impl AgentSessionEngine {
          Ok(serde_json::to_value(view)?)
      }
  
@@ -475,8 +297,8 @@ Index: prime-agent-src/crates/pa-daemon/src/protocol.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/protocol.rs
 +++ prime-agent-src/crates/pa-daemon/src/protocol.rs
-@@ -167,6 +167,8 @@ pub const KNOWN_COMMAND_TYPES: &[&str] =
-     "mark_anthropic_warning_shown",
+@@ -170,6 +170,8 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
+     "kill_persistent_shell",
      "get_clm_view",
      "clm_configure",
 +    "get_todos",
@@ -484,7 +306,7 @@ Index: prime-agent-src/crates/pa-daemon/src/protocol.rs
  ];
  
  /// Parsed client command envelope.
-@@ -715,6 +717,12 @@ pub fn command_active_session_id(command
+@@ -720,6 +722,12 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
          | DaemonCommand::ClmConfigure {
              active_session_id, ..
          }
@@ -497,7 +319,7 @@ Index: prime-agent-src/crates/pa-daemon/src/protocol.rs
          | DaemonCommand::GetContextTree {
              active_session_id, ..
          }
-@@ -994,6 +1002,8 @@ pub fn command_type_name(command: &Daemo
+@@ -1005,6 +1013,8 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
          DaemonCommand::GetSessionStats { .. } => "get_session_stats",
          DaemonCommand::GetClmView { .. } => "get_clm_view",
          DaemonCommand::ClmConfigure { .. } => "clm_configure",
@@ -687,7 +509,7 @@ Index: prime-agent-src/crates/pa-daemon/src/worker.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/worker.rs
 +++ prime-agent-src/crates/pa-daemon/src/worker.rs
-@@ -53,7 +53,7 @@ pub use env::{
+@@ -55,7 +55,7 @@ pub use env::{
      WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
  };
  use serde_json::Map;
@@ -700,7 +522,7 @@ Index: prime-agent-src/crates/pa-daemon/src/worker/commands.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/src/worker/commands.rs
 +++ prime-agent-src/crates/pa-daemon/src/worker/commands.rs
-@@ -161,6 +161,8 @@ impl Worker {
+@@ -165,6 +165,8 @@ impl Worker {
              "factory_activity" => self.handle_factory_activity(payload).await,
              "get_clm_view" => self.handle_get_clm_view(payload).await,
              "clm_configure" => self.handle_clm_configure(payload).await,
@@ -708,12 +530,12 @@ Index: prime-agent-src/crates/pa-daemon/src/worker/commands.rs
 +            "todo_clear" => self.handle_todo_clear().await,
              "execute_bash" => self.handle_execute_bash(payload),
              "execute_bash_and_wait" => self.handle_execute_bash_and_wait(payload).await,
-             "abort_bash" => self.handle_abort_bash().await,
+             "abort_bash" => self.handle_abort_bash(),
 Index: prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-daemon/tests/command_breadth.rs
 +++ prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
-@@ -522,6 +522,8 @@ const WIRE_FIXTURES: &[(&str, &str)] = &
+@@ -534,6 +534,8 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
      ),
      ("get_clm_view", r#"{"type": "get_clm_view", "activeSessionId": "sess"}"#),
      ("clm_configure", r#"{"type": "clm_configure", "activeSessionId": "sess", "action": "on"}"#),
@@ -722,8 +544,8 @@ Index: prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
  ];
  
  /// The accept list is the TS list, in TS order, then the Rust-native supervisor/worker frames.
-@@ -552,6 +554,8 @@ fn known_command_types_match_the_ts_list
-                     | "mark_anthropic_warning_shown"
+@@ -567,6 +569,8 @@ fn known_command_types_match_the_ts_list() {
+                     | "kill_persistent_shell"
                      | "get_clm_view"
                      | "clm_configure"
 +                    | "get_todos"
@@ -731,67 +553,6 @@ Index: prime-agent-src/crates/pa-daemon/tests/command_breadth.rs
              ),
              "unexpected non-TS command type: {extra}"
          );
-Index: prime-agent-src/crates/pa-types/src/daemon/command.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-types/src/daemon/command.rs
-+++ prime-agent-src/crates/pa-types/src/daemon/command.rs
-@@ -638,6 +638,20 @@ pub enum DaemonCommand {
-         #[serde(flatten)]
-         rest: JsonMap,
-     },
-+    GetTodos {
-+        #[serde(default, skip_serializing_if = "Option::is_none")]
-+        id: Option<String>,
-+        active_session_id: String,
-+        #[serde(flatten)]
-+        rest: JsonMap,
-+    },
-+    TodoClear {
-+        #[serde(default, skip_serializing_if = "Option::is_none")]
-+        id: Option<String>,
-+        active_session_id: String,
-+        #[serde(flatten)]
-+        rest: JsonMap,
-+    },
-     GetContextTree {
-         #[serde(default, skip_serializing_if = "Option::is_none")]
-         id: Option<String>,
-@@ -1298,4 +1312,14 @@ mod tests {
-         .unwrap();
-         assert!(matches!(set, crate::daemon::DaemonCommand::ClmConfigure { ref action, .. } if action == "set"));
-     }
-+
-+    #[test]
-+    fn todo_commands_use_their_wire_names() {
-+        let get: crate::daemon::DaemonCommand =
-+            serde_json::from_str(r#"{"type":"get_todos","activeSessionId":"s"}"#).unwrap();
-+        assert!(matches!(get, crate::daemon::DaemonCommand::GetTodos { .. }));
-+        let clear: crate::daemon::DaemonCommand =
-+            serde_json::from_str(r#"{"type":"todo_clear","activeSessionId":"s"}"#).unwrap();
-+        assert!(matches!(clear, crate::daemon::DaemonCommand::TodoClear { .. }));
-+    }
- }
-Index: prime-agent-src/crates/pa-types/src/daemon/plane.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-types/src/daemon/plane.rs
-+++ prime-agent-src/crates/pa-types/src/daemon/plane.rs
-@@ -50,6 +50,8 @@ pub fn command_plane(command_type: &str)
-         | "get_session_stats"
-         | "get_clm_view"
-         | "clm_configure"
-+        | "get_todos"
-+        | "todo_clear"
-         | "get_context_tree"
-         | "get_commands"
-         | "get_resource_snapshot"
-@@ -132,6 +134,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str]
-     "get_rlm_children",
-     "get_session_stats",
-     "get_clm_view",
-+    "get_todos",
-     "get_context_tree",
-     "get_commands",
-     "get_resource_snapshot",
 Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui.rs
@@ -801,14 +562,14 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
  mod share;
  mod stream;
 +mod todos;
+ mod window;
+ pub(crate) use window::TranscriptPageNote;
  
- pub(crate) use apply::CompactionAbortNote;
- use auth::{McpAuthIntent, PendingModelSignIn, SetModelOutcome};
 Index: prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/commands.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
-@@ -457,6 +457,7 @@ impl SessionUi {
+@@ -488,6 +488,7 @@ impl SessionUi {
                  }
              }
              "clm" => self.handle_clm_command(resolved.args.trim(), view).await?,
@@ -885,11 +646,84 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/todos.rs
 +        assert!(reply_lines(&json!({}), false).is_err());
 +    }
 +}
+Index: prime-agent-src/crates/pa-types/src/daemon/command.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/daemon/command.rs
++++ prime-agent-src/crates/pa-types/src/daemon/command.rs
+@@ -701,6 +701,20 @@ pub enum DaemonCommand {
+         #[serde(flatten)]
+         rest: JsonMap,
+     },
++    GetTodos {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<String>,
++        active_session_id: String,
++        #[serde(flatten)]
++        rest: JsonMap,
++    },
++    TodoClear {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<String>,
++        active_session_id: String,
++        #[serde(flatten)]
++        rest: JsonMap,
++    },
+     GetContextTree {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         id: Option<String>,
+@@ -1361,4 +1375,14 @@ mod tests {
+         .unwrap();
+         assert!(matches!(set, crate::daemon::DaemonCommand::ClmConfigure { ref action, .. } if action == "set"));
+     }
++
++    #[test]
++    fn todo_commands_use_their_wire_names() {
++        let get: crate::daemon::DaemonCommand =
++            serde_json::from_str(r#"{"type":"get_todos","activeSessionId":"s"}"#).unwrap();
++        assert!(matches!(get, crate::daemon::DaemonCommand::GetTodos { .. }));
++        let clear: crate::daemon::DaemonCommand =
++            serde_json::from_str(r#"{"type":"todo_clear","activeSessionId":"s"}"#).unwrap();
++        assert!(matches!(clear, crate::daemon::DaemonCommand::TodoClear { .. }));
++    }
+ }
+Index: prime-agent-src/crates/pa-types/src/daemon/plane.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/daemon/plane.rs
++++ prime-agent-src/crates/pa-types/src/daemon/plane.rs
+@@ -50,6 +50,8 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
+         | "get_session_stats"
+         | "get_clm_view"
+         | "clm_configure"
++        | "get_todos"
++        | "todo_clear"
+         | "get_context_tree"
+         | "get_commands"
+         | "get_resource_snapshot"
+@@ -134,6 +136,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
+     "get_rlm_children",
+     "get_session_stats",
+     "get_clm_view",
++    "get_todos",
+     "get_context_tree",
+     "get_commands",
+     "get_resource_snapshot",
+Index: prime-agent-src/crates/pa-types/src/lib.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-types/src/lib.rs
++++ prime-agent-src/crates/pa-types/src/lib.rs
+@@ -18,6 +18,7 @@ pub mod session;
+ pub mod skill_blocks;
+ pub mod slash_commands;
+ pub mod themes;
++pub mod todo;
+ pub mod usage;
+ 
+ use serde::{Deserialize, Serialize};
 Index: prime-agent-src/crates/pa-types/src/slash_commands.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-types/src/slash_commands.rs
 +++ prime-agent-src/crates/pa-types/src/slash_commands.rs
-@@ -78,6 +78,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS:
+@@ -77,6 +77,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
      BuiltinSlashCommand { name: "heartbeats", description: "View and manage all user and agent heartbeats", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
      BuiltinSlashCommand { name: "factory", description: "Show or set the agent factory opt-in gate (off by default)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off|status]"), aliases: &[], takes_argument: true },
      BuiltinSlashCommand { name: "clm", description: "Context Language Models: edits, settings and status for this session", execution: SlashCommandExecution::Client, argument_hint: Some("[edits|settings|status|config <key> <value>|config reset|on|off|reset]"), aliases: &[], takes_argument: true },
@@ -897,3 +731,169 @@ Index: prime-agent-src/crates/pa-types/src/slash_commands.rs
      BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
      BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
      BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
+Index: prime-agent-src/crates/pa-types/src/todo.rs
+===================================================================
+--- /dev/null
++++ prime-agent-src/crates/pa-types/src/todo.rs
+@@ -0,0 +1,45 @@
++//! The session todo list. A `todo` custom entry holds the whole list; the latest one on the branch wins.
++
++use serde::{Deserialize, Serialize};
++
++pub const TODO_CUSTOM_TYPE: &str = "todo";
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct TodoItem {
++    pub id: u64,
++    pub text: String,
++    pub done: bool,
++}
++
++/// One line per item, `[x] 2 text` when done; `No todos` for an empty list.
++#[must_use]
++pub fn format_lines(items: &[TodoItem]) -> Vec<String> {
++    if items.is_empty() {
++        return vec!["No todos".to_string()];
++    }
++    items
++        .iter()
++        .map(|item| format!("[{}] {} {}", if item.done { "x" } else { " " }, item.id, item.text))
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn lines_mark_done_items_and_name_an_empty_list() {
++        let items = vec![
++            TodoItem { id: 1, text: "write the plan".into(), done: false },
++            TodoItem { id: 2, text: "run the tests".into(), done: true },
++        ];
++        assert_eq!(format_lines(&items), vec!["[ ] 1 write the plan", "[x] 2 run the tests"]);
++        assert_eq!(format_lines(&[]), vec!["No todos"]);
++    }
++
++    #[test]
++    fn items_use_the_wire_shape() {
++        let item: TodoItem = serde_json::from_str(r#"{"id":3,"text":"t","done":false}"#).unwrap();
++        assert_eq!(serde_json::to_string(&item).unwrap(), r#"{"id":3,"text":"t","done":false}"#);
++    }
++}
+Index: prime-agent-src/skills/todo/SKILL.md
+===================================================================
+--- /dev/null
++++ prime-agent-src/skills/todo/SKILL.md
+@@ -0,0 +1,17 @@
++---
++name: todo
++description: Keep a todo list for multi-step work in this session. The list is saved in the session, follows forks and resumes, and the user sees it with /todos. Use it to plan steps, tick them off and show what is left.
++---
++
++# todo
++
++```python
++import todo
++
++await todo.add("write the failing test")   # {"id": 1, "items": [...], "text": "[ ] 1 write the failing test"}
++await todo.toggle(1)                       # marks item 1 done, or open again
++await todo.list()                          # {"items": [{"id", "text", "done"}], "text": ...}
++await todo.clear()                         # empties the list
++```
++
++Each call returns the whole list. Ids start at 1 and stay stable until `clear()`.
+Index: prime-agent-src/skills/todo/pyproject.toml
+===================================================================
+--- /dev/null
++++ prime-agent-src/skills/todo/pyproject.toml
+@@ -0,0 +1,14 @@
++# rlm is provided by the kernel and deliberately not a dependency.
++[project]
++name = "todo"
++version = "0.1.0"
++description = "Prime Agent todo skill: a per-session todo list that forks with the branch"
++requires-python = ">=3.10"
++dependencies = []
++
++[build-system]
++requires = ["hatchling"]
++build-backend = "hatchling.build"
++
++[tool.hatch.build.targets.wheel]
++packages = ["src/todo"]
+Index: prime-agent-src/skills/todo/src/todo/__init__.py
+===================================================================
+--- /dev/null
++++ prime-agent-src/skills/todo/src/todo/__init__.py
+@@ -0,0 +1,25 @@
++"""Session todo list over the kernel host bridge (todo.* requests)."""
++
++from __future__ import annotations
++
++from typing import Any
++
++from rlm import host_request
++
++
++async def list() -> dict[str, Any]:  # noqa: A001 - the skill's public name
++    return await host_request("todo.list")
++
++
++async def add(text: str) -> dict[str, Any]:
++    if not text.strip():
++        raise ValueError("text must not be empty")
++    return await host_request("todo.add", {"text": text})
++
++
++async def toggle(id: int) -> dict[str, Any]:
++    return await host_request("todo.toggle", {"id": int(id)})
++
++
++async def clear() -> dict[str, Any]:
++    return await host_request("todo.clear")
+Index: prime-agent-src/skills/todo/tests/test_todo.py
+===================================================================
+--- /dev/null
++++ prime-agent-src/skills/todo/tests/test_todo.py
+@@ -0,0 +1,40 @@
++import asyncio
++import importlib.util
++import sys
++import types
++from pathlib import Path
++from unittest.mock import AsyncMock
++
++import pytest
++
++SRC = Path(__file__).resolve().parents[1] / "src" / "todo" / "__init__.py"
++
++
++def load(host):
++    sys.modules["rlm"] = types.SimpleNamespace(host_request=host)
++    spec = importlib.util.spec_from_file_location("todo", SRC)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++def test_calls_map_to_todo_requests():
++    host = AsyncMock(return_value={"items": [], "text": "No todos"})
++    todo = load(host)
++    asyncio.run(todo.add("write the plan"))
++    asyncio.run(todo.toggle(1))
++    asyncio.run(todo.list())
++    asyncio.run(todo.clear())
++    calls = [call.args for call in host.await_args_list]
++    assert calls == [
++        ("todo.add", {"text": "write the plan"}),
++        ("todo.toggle", {"id": 1}),
++        ("todo.list",),
++        ("todo.clear",),
++    ]
++
++
++def test_add_refuses_empty_text():
++    todo = load(AsyncMock(return_value={}))
++    with pytest.raises(ValueError):
++        asyncio.run(todo.add("   "))

@@ -2,7 +2,7 @@ Index: prime-agent-src/crates/pa-core/src/models/registry.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/models/registry.rs
 +++ prime-agent-src/crates/pa-core/src/models/registry.rs
-@@ -408,6 +408,9 @@ impl ModelRegistry {
+@@ -411,6 +411,9 @@ impl ModelRegistry {
          built_in.extend(private_models.into_values());
          let custom = Self::apply_custom_model_overrides(&result);
          self.models = Self::merge_custom_models(built_in, custom);
@@ -12,7 +12,7 @@ Index: prime-agent-src/crates/pa-core/src/models/registry.rs
          self.apply_subscription_model_adaptations();
      }
  
-@@ -889,3 +892,40 @@ fn now_millis() -> u64 {
+@@ -910,3 +913,40 @@ fn now_millis() -> u64 {
  
  #[cfg(test)]
  mod tests;
@@ -57,9 +57,9 @@ Index: prime-agent-src/crates/pa-core/src/models/registry/tests.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/models/registry/tests.rs
 +++ prime-agent-src/crates/pa-core/src/models/registry/tests.rs
-@@ -443,3 +443,91 @@ fn without_a_stored_xai_subscription_the
-     assert!(grok.thinking_level_map.is_none());
-     assert!(grok.compat.is_none());
+@@ -486,3 +486,91 @@ async fn scope_readiness_timeout_keeps_models_available_before_refresh() {
+         vec![existing]
+     );
  }
 +
 +fn window(registry: &ModelRegistry, provider: &str, id: &str) -> u64 {
@@ -153,9 +153,9 @@ Index: prime-agent-src/crates/pa-core/src/settings/load.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/settings/load.rs
 +++ prime-agent-src/crates/pa-core/src/settings/load.rs
-@@ -61,6 +61,7 @@ const KNOWN_FIELDS: &[&str] = &[
-     "sessionDir",
+@@ -63,6 +63,7 @@ const KNOWN_FIELDS: &[&str] = &[
      "requestTiming",
+     "pythonCellTimeoutMs",
      "hooks",
 +    "contextWindowPercent",
  ];
@@ -165,7 +165,7 @@ Index: prime-agent-src/crates/pa-core/src/settings/manager.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/settings/manager.rs
 +++ prime-agent-src/crates/pa-core/src/settings/manager.rs
-@@ -881,6 +881,14 @@ impl SettingsManager {
+@@ -869,6 +869,14 @@ impl SettingsManager {
          self.global.hooks.clone()
      }
  
@@ -180,10 +180,11 @@ Index: prime-agent-src/crates/pa-core/src/settings/manager.rs
      #[must_use]
      pub fn get_session_dir(&self) -> Option<std::path::PathBuf> {
          let session_dir = self.merged.session_dir.as_ref()?;
-@@ -1025,6 +1033,16 @@ mod tests {
+@@ -1070,6 +1078,16 @@ mod tests {
+         );
      }
  
-     #[test]
++    #[test]
 +    fn context_window_percent_ignores_out_of_range_values() {
 +        for (raw, expected) in [(30, Some(30)), (0, None), (100, None), (250, None)] {
 +            let settings: Settings =
@@ -193,15 +194,14 @@ Index: prime-agent-src/crates/pa-core/src/settings/manager.rs
 +        }
 +    }
 +
-+    #[test]
+     #[test]
      fn in_memory_loads_merges_and_saves() {
          let mut manager = SettingsManager::in_memory(&Settings::default());
-         manager
 Index: prime-agent-src/crates/pa-core/src/settings/types.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/settings/types.rs
 +++ prime-agent-src/crates/pa-core/src/settings/types.rs
-@@ -393,6 +393,8 @@ pub struct Settings {
+@@ -371,6 +371,8 @@ pub struct Settings {
      pub request_timing: Option<bool>,
      /// Lifecycle hook commands (global scope only).
      pub hooks: Option<LifecycleHooksSettings>,

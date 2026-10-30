@@ -2,7 +2,7 @@ Index: prime-agent-src/crates/pa-cli/src/client_settings.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-cli/src/client_settings.rs
 +++ prime-agent-src/crates/pa-cli/src/client_settings.rs
-@@ -139,6 +139,39 @@ impl ClientSettings for CliClientSetting
+@@ -183,6 +183,39 @@ impl ClientSettings for CliClientSettings {
              agent_dir: self.agent_dir.clone(),
          }))
      }
@@ -42,7 +42,7 @@ Index: prime-agent-src/crates/pa-cli/src/client_settings.rs
      setting!(
          enable_skill_commands,
          set_enable_skill_commands,
-@@ -396,4 +429,19 @@ mod tests {
+@@ -440,4 +473,19 @@ mod tests {
          assert_eq!(config.model.as_deref(), Some("opencode-go/x"));
          assert!(!cli_settings_with("{}").prompt_suggestions().enabled);
      }
@@ -79,7 +79,7 @@ Index: prime-agent-src/crates/pa-tui/src/client_settings.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/client_settings.rs
 +++ prime-agent-src/crates/pa-tui/src/client_settings.rs
-@@ -50,6 +50,10 @@ pub trait ClientSettings: Send + Sync {
+@@ -69,6 +69,10 @@ pub trait ClientSettings: Send + Sync {
      fn prompt_suggester(&self) -> Option<std::sync::Arc<dyn crate::prompt_suggest::PromptSuggester>> {
          None
      }
@@ -94,15 +94,15 @@ Index: prime-agent-src/crates/pa-tui/src/interactive/run.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/interactive/run.rs
 +++ prime-agent-src/crates/pa-tui/src/interactive/run.rs
-@@ -210,6 +210,7 @@ async fn run_interactive_surface(
-         mpsc::unbounded_channel::<crate::session_ui::CommandCatalogUpdate>();
+@@ -213,6 +213,7 @@ async fn run_interactive_surface(
+     let (page_tx, mut page_rx) = mpsc::unbounded_channel::<crate::session_ui::TranscriptPageNote>();
      let (suggest_tx, mut suggest_rx) =
          mpsc::unbounded_channel::<crate::prompt_suggest::SuggestNote>();
 +    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<Option<String>>();
      // The double-Ctrl+C force-quit guard: the terminal reader observes the pair while this loop is
      // wedged in a daemon request; a std-thread watchdog enforces the exit deadline without the
      // runtime.
-@@ -1547,6 +1548,15 @@ async fn run_interactive_surface(
+@@ -1578,6 +1579,15 @@ async fn run_interactive_surface(
                      session.apply_suggest_note(note, &mut view);
                  }
              }
@@ -118,7 +118,7 @@ Index: prime-agent-src/crates/pa-tui/src/interactive/run.rs
              maybe_reload = reload_rx.recv() => {
                  if let Some(outcome) = maybe_reload {
                      session.apply_reload_outcome(outcome, &mut view).await;
-@@ -1969,6 +1979,17 @@ async fn run_interactive_surface(
+@@ -1997,6 +2007,17 @@ async fn run_interactive_surface(
              }
          }
  
@@ -140,7 +140,7 @@ Index: prime-agent-src/crates/pa-tui/src/lib.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/lib.rs
 +++ prime-agent-src/crates/pa-tui/src/lib.rs
-@@ -103,6 +103,7 @@ pub mod session_ui;
+@@ -105,6 +105,7 @@ pub mod session_ui;
  pub mod settings_menu;
  pub mod side_question;
  pub mod snapshot;
@@ -152,15 +152,15 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui.rs
-@@ -173,6 +173,7 @@ pub(crate) struct SessionUi {
+@@ -198,6 +198,7 @@ pub(crate) struct SessionUi {
      speed_stats: Option<SpeedStats>,
      pub(crate) suggest: crate::prompt_suggest::SuggestState,
      suggest_notes: Option<tokio::sync::mpsc::UnboundedSender<crate::prompt_suggest::SuggestNote>>,
 +    pub(crate) status_hook: Option<crate::status_hook::StatusHook>,
      service_tier: Option<String>,
+     pending_model_fallback_message: Option<String>,
      client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
-     /// The ban-risk warning's view-local dedup (TS
-@@ -448,6 +449,29 @@ impl SessionUi {
+@@ -480,6 +481,29 @@ impl SessionUi {
          self.suggest_notes = Some(tx);
      }
  
@@ -194,7 +194,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/apply.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
-@@ -375,6 +375,9 @@ impl SessionUi {
+@@ -351,6 +351,9 @@ impl SessionUi {
                  self.turn_error_shown = false;
                  self.suggest.cancel();
                  view.prompt_suggestion = None;
@@ -204,7 +204,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/apply.rs
                  // No card from a previous run settles on this one's failure.
                  self.pending_tools.clear();
                  self.aborted_tools.clear();
-@@ -470,6 +473,9 @@ impl SessionUi {
+@@ -446,6 +449,9 @@ impl SessionUi {
                  self.streaming_index = None;
                  self.turn_ends_seen += 1;
                  self.turn_active = false;
@@ -218,7 +218,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/commands.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/commands.rs
-@@ -808,6 +808,30 @@ impl SessionUi {
+@@ -820,6 +820,30 @@ impl SessionUi {
                  let note = if enable { "Prompt suggestions on" } else { "Prompt suggestions off" };
                  self.note(note, view);
              }
@@ -253,7 +253,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/session_ui/lifecycle.rs
 +++ prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
-@@ -95,6 +95,11 @@ impl SessionUi {
+@@ -97,6 +97,11 @@ impl SessionUi {
                  options.client_settings.as_ref().and_then(|s| s.prompt_suggester()),
              ),
              suggest_notes: None,
@@ -265,7 +265,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
              client_settings: options.client_settings.clone(),
              anthropic_subscription_warning_shown: false,
              anthropic_warning_mark_pending: std::sync::Arc::default(),
-@@ -275,6 +280,7 @@ impl SessionUi {
+@@ -280,6 +285,7 @@ impl SessionUi {
              speed_stats: None,
              suggest: crate::prompt_suggest::SuggestState::default(),
              suggest_notes: None,
@@ -273,7 +273,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
              client_settings: None,
              anthropic_subscription_warning_shown: false,
              anthropic_warning_mark_pending: std::sync::Arc::default(),
-@@ -606,6 +612,9 @@ impl SessionUi {
+@@ -611,6 +617,9 @@ impl SessionUi {
          // stop must not route into a stale shutdown recovery's reconnect hang.
          self.daemon_closing_notice = None;
          self.session_name.clone_from(&reconstructed.session_name);
@@ -283,7 +283,7 @@ Index: prime-agent-src/crates/pa-tui/src/session_ui/lifecycle.rs
          self.first_user_text = reconstructed.chat.iter().find_map(|entry| match entry {
              ChatEntry::User { text } => Some(text.clone()),
              _ => None,
-@@ -803,6 +812,9 @@ impl SessionUi {
+@@ -817,6 +826,9 @@ impl SessionUi {
          if let Some(model) = self.pending_model.take() {
              view.chrome.model_id = Some(model);
              view.chrome.model_provider = self.pending_model_provider.take();
@@ -651,7 +651,7 @@ Index: prime-agent-src/crates/pa-tui/src/view/tests.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-tui/src/view/tests.rs
 +++ prime-agent-src/crates/pa-tui/src/view/tests.rs
-@@ -1656,3 +1656,13 @@ fn prompt_suggestion_renders_as_dim_plac
+@@ -1675,3 +1675,13 @@ fn prompt_suggestion_renders_as_dim_placeholder() {
      assert!(text.contains("run the tests  (tab)"));
  }
  
@@ -669,7 +669,7 @@ Index: prime-agent-src/crates/pa-types/src/slash_commands.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-types/src/slash_commands.rs
 +++ prime-agent-src/crates/pa-types/src/slash_commands.rs
-@@ -81,6 +81,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS:
+@@ -80,6 +80,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
      BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
      BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
      BuiltinSlashCommand { name: "suggest", description: "Toggle ghost-text suggestions for your next prompt", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },

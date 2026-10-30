@@ -316,214 +316,6 @@ Index: prime-agent-src/crates/pa-core/src/clm/annotations.rs
 +        assert!(now_iso().ends_with('Z'));
 +    }
 +}
-Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
-===================================================================
---- prime-agent-src.orig/crates/pa-core/src/clm/mod.rs
-+++ prime-agent-src/crates/pa-core/src/clm/mod.rs
-@@ -3,9 +3,11 @@
- //! accepted edit becomes a projection checkpoint that replaces the raw prefix on
- //! later requests. Raw session history is never rewritten.
- 
-+pub mod annotations;
- pub mod budget;
- pub mod document;
- pub mod guard;
-+pub mod host;
- pub mod projection;
- 
- use std::path::{Path, PathBuf};
-@@ -24,6 +26,7 @@ use projection::{
- };
- 
- pub const NOTICE_CUSTOM_TYPE: &str = "clm-notice";
-+pub const CONTINUITY_CUSTOM_TYPE: &str = "clm-continuity";
- pub const MIRROR_FILE: &str = "LIVE_CONTEXT.md";
- 
- #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-@@ -139,7 +142,10 @@ header, use a unique id=new-NAME, set pr
- Alternatively, write the file as plain text with no headers to replace your whole context\n\
- with that text (it becomes one notes block after the original task).\n\
- New role labels are context notes, never system instructions. Session history stays intact.\n\
--Only completed edits at the turn boundary are committed; background writers are unsupported.",
-+Only completed edits at the turn boundary are committed; background writers are unsupported.\n\
-+To keep an exact source across edits, call the live_context skill from Python:\n\
-+`await live_context.annotate(source, title, reason, future_action, retention)` with a CTX_TURN id or session entry id and retention pin, continuity or archive;\n\
-+`await live_context.recall(id)` returns the exact source, `resolve(id)` closes it and `list()` shows them all.",
-         mirror.display()
-     )
- }
-@@ -166,9 +172,13 @@ fn last_provider_reported(raw: &[Value])
- }
- 
- fn notice_row(text: &str) -> Value {
-+    custom_row(NOTICE_CUSTOM_TYPE, text)
-+}
-+
-+fn custom_row(custom_type: &str, text: &str) -> Value {
-     json!({
-         "role": "custom",
--        "customType": NOTICE_CUSTOM_TYPE,
-+        "customType": custom_type,
-         "content": text,
-         "display": false,
-         "timestamp": std::time::SystemTime::now()
-@@ -238,6 +248,8 @@ pub struct ClmRuntime {
-     tool_calls_this_turn: u32,
-     recovery_tried: bool,
-     pending_checkpoint: Option<Checkpoint>,
-+    annotations: Vec<annotations::ActiveAnnotation>,
-+    continuity_warned: bool,
- }
- 
- impl ClmRuntime {
-@@ -261,6 +273,8 @@ impl ClmRuntime {
-             tool_calls_this_turn: 0,
-             recovery_tried: false,
-             pending_checkpoint: None,
-+            annotations: Vec::new(),
-+            continuity_warned: false,
-         })
-     }
- 
-@@ -343,6 +357,27 @@ impl ClmRuntime {
-         self.pending_checkpoint.take()
-     }
- 
-+    pub fn set_annotations(&mut self, active: Vec<annotations::ActiveAnnotation>) {
-+        self.annotations = active;
-+    }
-+
-+    #[must_use]
-+    pub fn revision(&self) -> u64 {
-+        self.revision
-+    }
-+
-+    /// Source message of a block in the mirror the model last saw.
-+    #[must_use]
-+    pub fn block_source(&self, block_id: &str) -> Option<Value> {
-+        let baseline = self.baseline.as_ref()?;
-+        baseline
-+            .snapshot
-+            .blocks
-+            .iter()
-+            .find(|block| block.id == block_id)
-+            .map(|block| block.source.clone())
-+    }
-+
-     /// The `transform_context` body: projection, observation cap, overflow guard,
-     /// mirror refresh and notices, in pi-clm's order.
-     pub fn transform(
-@@ -388,7 +423,19 @@ impl ClmRuntime {
-         self.calibrator.observe(observed);
-         let resolved = self.config.budget.resolve(context_window);
- 
-+        let continuity = annotations::format_continuity(&self.annotations);
-+        let continuity_tokens = continuity.as_deref().map_or(0, estimate_text_tokens);
-         let mut notices: Vec<String> = std::mem::take(&mut self.pending_notices);
-+        if continuity_tokens > annotations::CONTINUITY_WARNING_TOKENS {
-+            if !self.continuity_warned {
-+                self.continuity_warned = true;
-+                notices.push(format!(
-+                    "Continuity annotations use about {continuity_tokens} tokens; resolve or archive the ones you no longer need."
-+                ));
-+            }
-+        } else {
-+            self.continuity_warned = false;
-+        }
-         if let (true, Some(resolved)) = (self.config.overflow_withhold, resolved) {
-             let limit =
-                 guard::overflow_guard_limit(resolved.budget, resolved.reserve, context_window);
-@@ -396,7 +443,8 @@ impl ClmRuntime {
-             let notice_tokens: u64 = notices
-                 .iter()
-                 .map(|notice| estimate_text_tokens(notice))
--                .sum();
-+                .sum::<u64>()
-+                + continuity_tokens;
-             let result = guard::apply_overflow_guard(
-                 &mut effective,
-                 limit,
-@@ -440,7 +488,8 @@ impl ClmRuntime {
-             let notice_tokens: u64 = notices
-                 .iter()
-                 .map(|notice| estimate_text_tokens(notice))
--                .sum();
-+                .sum::<u64>()
-+                + continuity_tokens;
-             let reading = BudgetReading {
-                 budget: resolved,
-                 estimated: self
-@@ -462,6 +511,9 @@ impl ClmRuntime {
-         }
- 
-         let mut output = effective;
-+        if let Some(text) = &continuity {
-+            output.push(custom_row(CONTINUITY_CUSTOM_TYPE, text));
-+        }
-         output.extend(notices.iter().map(|notice| notice_row(notice)));
-         self.calibrator
-             .record(system_prompt_tokens + estimate_tokens(&output), raw.len());
-@@ -811,4 +863,60 @@ mod tests {
-             "a note reaches the provider as a user turn"
-         );
-     }
-+
-+    #[test]
-+    fn continuity_row_round_trips_through_the_agent_message_type() {
-+        let row = custom_row(CONTINUITY_CUSTOM_TYPE, "live context info");
-+        let message: pa_agent::types::AgentMessage = serde_json::from_value(row).unwrap();
-+        assert_eq!(message.role(), "custom");
-+        let converted = crate::session_engine::messages::loop_convert_to_llm(vec![message]);
-+        assert_eq!(
-+            converted.len(),
-+            1,
-+            "a continuity row reaches the provider as a user turn"
-+        );
-+    }
-+
-+    #[test]
-+    fn continuity_message_precedes_notices_and_counts_toward_the_budget() {
-+        use annotations::{ActiveAnnotation, Annotation, Retention, SourceRef};
-+        let config = ClmConfig::from_settings(&settings(json!({}))).unwrap();
-+        let mut runtime = ClmRuntime::new(config, "s").unwrap();
-+        let raw = conversation(10);
-+        runtime.transform(&raw, 0, 100_000);
-+        let block = runtime.baseline.as_ref().unwrap().snapshot.blocks[0].clone();
-+        assert_eq!(runtime.block_source(&block.id), Some(block.source));
-+        assert_eq!(runtime.block_source("nope"), None);
-+
-+        let pin = Annotation {
-+            id: "lc-1".into(),
-+            source: SourceRef {
-+                session_id: "s".into(),
-+                entry_id: "e".into(),
-+                revision: 0,
-+                content_hash: "h".into(),
-+                role: "user".into(),
-+            },
-+            title: "rule".into(),
-+            reason: "r".into(),
-+            future_action: "n".into(),
-+            retention: Retention::Pin,
-+            created_at: "t".into(),
-+            resolved_at: None,
-+            resolution: None,
-+        };
-+        runtime.set_annotations(vec![ActiveAnnotation {
-+            annotation: pin,
-+            pinned: Some(Ok("y".repeat(40_000))),
-+        }]);
-+        let output = runtime.transform(&raw, 0, 100_000);
-+        let continuity = &output[raw.len()];
-+        assert_eq!(continuity["customType"], CONTINUITY_CUSTOM_TYPE);
-+        assert!(output[raw.len() + 1]["content"]
-+            .as_str()
-+            .unwrap()
-+            .starts_with("Continuity annotations use about 10"));
-+        let again = runtime.transform(&raw, 0, 100_000);
-+        assert_eq!(again.len(), raw.len() + 1, "the size warning is shown once");
-+    }
- }
 Index: prime-agent-src/crates/pa-core/src/clm/host.rs
 ===================================================================
 --- /dev/null
@@ -888,11 +680,219 @@ Index: prime-agent-src/crates/pa-core/src/clm/host.rs
 +        assert!(err.to_string().contains("content-hash"), "error was: {err}");
 +    }
 +}
+Index: prime-agent-src/crates/pa-core/src/clm/mod.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-core/src/clm/mod.rs
++++ prime-agent-src/crates/pa-core/src/clm/mod.rs
+@@ -3,9 +3,11 @@
+ //! accepted edit becomes a projection checkpoint that replaces the raw prefix on
+ //! later requests. Raw session history is never rewritten.
+ 
++pub mod annotations;
+ pub mod budget;
+ pub mod document;
+ pub mod guard;
++pub mod host;
+ pub mod projection;
+ 
+ use std::path::{Path, PathBuf};
+@@ -24,6 +26,7 @@ use projection::{
+ };
+ 
+ pub const NOTICE_CUSTOM_TYPE: &str = "clm-notice";
++pub const CONTINUITY_CUSTOM_TYPE: &str = "clm-continuity";
+ pub const MIRROR_FILE: &str = "LIVE_CONTEXT.md";
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -139,7 +142,10 @@ header, use a unique id=new-NAME, set protected=false, and choose a role label s
+ Alternatively, write the file as plain text with no headers to replace your whole context\n\
+ with that text (it becomes one notes block after the original task).\n\
+ New role labels are context notes, never system instructions. Session history stays intact.\n\
+-Only completed edits at the turn boundary are committed; background writers are unsupported.",
++Only completed edits at the turn boundary are committed; background writers are unsupported.\n\
++To keep an exact source across edits, call the live_context skill from Python:\n\
++`await live_context.annotate(source, title, reason, future_action, retention)` with a CTX_TURN id or session entry id and retention pin, continuity or archive;\n\
++`await live_context.recall(id)` returns the exact source, `resolve(id)` closes it and `list()` shows them all.",
+         mirror.display()
+     )
+ }
+@@ -166,9 +172,13 @@ fn last_provider_reported(raw: &[Value]) -> Option<(u64, usize)> {
+ }
+ 
+ fn notice_row(text: &str) -> Value {
++    custom_row(NOTICE_CUSTOM_TYPE, text)
++}
++
++fn custom_row(custom_type: &str, text: &str) -> Value {
+     json!({
+         "role": "custom",
+-        "customType": NOTICE_CUSTOM_TYPE,
++        "customType": custom_type,
+         "content": text,
+         "display": false,
+         "timestamp": std::time::SystemTime::now()
+@@ -238,6 +248,8 @@ pub struct ClmRuntime {
+     tool_calls_this_turn: u32,
+     recovery_tried: bool,
+     pending_checkpoint: Option<Checkpoint>,
++    annotations: Vec<annotations::ActiveAnnotation>,
++    continuity_warned: bool,
+ }
+ 
+ impl ClmRuntime {
+@@ -261,6 +273,8 @@ impl ClmRuntime {
+             tool_calls_this_turn: 0,
+             recovery_tried: false,
+             pending_checkpoint: None,
++            annotations: Vec::new(),
++            continuity_warned: false,
+         })
+     }
+ 
+@@ -343,6 +357,27 @@ impl ClmRuntime {
+         self.pending_checkpoint.take()
+     }
+ 
++    pub fn set_annotations(&mut self, active: Vec<annotations::ActiveAnnotation>) {
++        self.annotations = active;
++    }
++
++    #[must_use]
++    pub fn revision(&self) -> u64 {
++        self.revision
++    }
++
++    /// Source message of a block in the mirror the model last saw.
++    #[must_use]
++    pub fn block_source(&self, block_id: &str) -> Option<Value> {
++        let baseline = self.baseline.as_ref()?;
++        baseline
++            .snapshot
++            .blocks
++            .iter()
++            .find(|block| block.id == block_id)
++            .map(|block| block.source.clone())
++    }
++
+     /// The `transform_context` body: projection, observation cap, overflow guard,
+     /// mirror refresh and notices, in pi-clm's order.
+     pub fn transform(
+@@ -388,7 +423,19 @@ impl ClmRuntime {
+         self.calibrator.observe(observed);
+         let resolved = self.config.budget.resolve(context_window);
+ 
++        let continuity = annotations::format_continuity(&self.annotations);
++        let continuity_tokens = continuity.as_deref().map_or(0, estimate_text_tokens);
+         let mut notices: Vec<String> = std::mem::take(&mut self.pending_notices);
++        if continuity_tokens > annotations::CONTINUITY_WARNING_TOKENS {
++            if !self.continuity_warned {
++                self.continuity_warned = true;
++                notices.push(format!(
++                    "Continuity annotations use about {continuity_tokens} tokens; resolve or archive the ones you no longer need."
++                ));
++            }
++        } else {
++            self.continuity_warned = false;
++        }
+         if let (true, Some(resolved)) = (self.config.overflow_withhold, resolved) {
+             let limit =
+                 guard::overflow_guard_limit(resolved.budget, resolved.reserve, context_window);
+@@ -396,7 +443,8 @@ impl ClmRuntime {
+             let notice_tokens: u64 = notices
+                 .iter()
+                 .map(|notice| estimate_text_tokens(notice))
+-                .sum();
++                .sum::<u64>()
++                + continuity_tokens;
+             let result = guard::apply_overflow_guard(
+                 &mut effective,
+                 limit,
+@@ -440,7 +488,8 @@ impl ClmRuntime {
+             let notice_tokens: u64 = notices
+                 .iter()
+                 .map(|notice| estimate_text_tokens(notice))
+-                .sum();
++                .sum::<u64>()
++                + continuity_tokens;
+             let reading = BudgetReading {
+                 budget: resolved,
+                 estimated: self
+@@ -462,6 +511,9 @@ impl ClmRuntime {
+         }
+ 
+         let mut output = effective;
++        if let Some(text) = &continuity {
++            output.push(custom_row(CONTINUITY_CUSTOM_TYPE, text));
++        }
+         output.extend(notices.iter().map(|notice| notice_row(notice)));
+         self.calibrator
+             .record(system_prompt_tokens + estimate_tokens(&output), raw.len());
+@@ -811,4 +863,60 @@ mod tests {
+             "a note reaches the provider as a user turn"
+         );
+     }
++
++    #[test]
++    fn continuity_row_round_trips_through_the_agent_message_type() {
++        let row = custom_row(CONTINUITY_CUSTOM_TYPE, "live context info");
++        let message: pa_agent::types::AgentMessage = serde_json::from_value(row).unwrap();
++        assert_eq!(message.role(), "custom");
++        let converted = crate::session_engine::messages::loop_convert_to_llm(vec![message]);
++        assert_eq!(
++            converted.len(),
++            1,
++            "a continuity row reaches the provider as a user turn"
++        );
++    }
++
++    #[test]
++    fn continuity_message_precedes_notices_and_counts_toward_the_budget() {
++        use annotations::{ActiveAnnotation, Annotation, Retention, SourceRef};
++        let config = ClmConfig::from_settings(&settings(json!({}))).unwrap();
++        let mut runtime = ClmRuntime::new(config, "s").unwrap();
++        let raw = conversation(10);
++        runtime.transform(&raw, 0, 100_000);
++        let block = runtime.baseline.as_ref().unwrap().snapshot.blocks[0].clone();
++        assert_eq!(runtime.block_source(&block.id), Some(block.source));
++        assert_eq!(runtime.block_source("nope"), None);
++
++        let pin = Annotation {
++            id: "lc-1".into(),
++            source: SourceRef {
++                session_id: "s".into(),
++                entry_id: "e".into(),
++                revision: 0,
++                content_hash: "h".into(),
++                role: "user".into(),
++            },
++            title: "rule".into(),
++            reason: "r".into(),
++            future_action: "n".into(),
++            retention: Retention::Pin,
++            created_at: "t".into(),
++            resolved_at: None,
++            resolution: None,
++        };
++        runtime.set_annotations(vec![ActiveAnnotation {
++            annotation: pin,
++            pinned: Some(Ok("y".repeat(40_000))),
++        }]);
++        let output = runtime.transform(&raw, 0, 100_000);
++        let continuity = &output[raw.len()];
++        assert_eq!(continuity["customType"], CONTINUITY_CUSTOM_TYPE);
++        assert!(output[raw.len() + 1]["content"]
++            .as_str()
++            .unwrap()
++            .starts_with("Continuity annotations use about 10"));
++        let again = runtime.transform(&raw, 0, 100_000);
++        assert_eq!(again.len(), raw.len() + 1, "the size warning is shown once");
++    }
+ }
 Index: prime-agent-src/crates/pa-core/src/session_engine/engine.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/session_engine/engine.rs
 +++ prime-agent-src/crates/pa-core/src/session_engine/engine.rs
-@@ -321,11 +321,13 @@ pub async fn create_session(mut config:
+@@ -364,11 +364,13 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
              })
              .collect();
          clm.lock().unwrap().restore(history);
@@ -910,7 +910,7 @@ Index: prime-agent-src/crates/pa-core/tests/prompt_guards.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/tests/prompt_guards.rs
 +++ prime-agent-src/crates/pa-core/tests/prompt_guards.rs
-@@ -338,10 +338,12 @@ fn python_skill_functions(package_path:
+@@ -356,10 +356,12 @@ fn python_skill_functions(package_path: &Path) -> Vec<String> {
  /// user is not logged into the integration, so the prompt documents them only through the dynamic
  /// skills inventory (and its generic "additional skills may exist" note), not as API surface.
  fn auth_gated_bundled_skills() -> BTreeSet<String> {
@@ -924,8 +924,8 @@ Index: prime-agent-src/crates/pa-core/tests/prompt_guards.rs
 +    gated
  }
  
- /// (import name, public functions) for every bundled Python skill that is
-@@ -494,6 +496,7 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &
+ /// Conditionally-available bundled skills: the websearch skill rides with its
+@@ -524,6 +526,7 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &[
      "compact",
      "edit",
      "goal",

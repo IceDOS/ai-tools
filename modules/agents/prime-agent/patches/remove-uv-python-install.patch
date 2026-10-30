@@ -2,24 +2,26 @@ Index: prime-agent-src/crates/pa-core/src/kernel/bootstrap/venv.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/kernel/bootstrap/venv.rs
 +++ prime-agent-src/crates/pa-core/src/kernel/bootstrap/venv.rs
-@@ -109,6 +109,16 @@ pub(crate) async fn bootstrap_venv(
+@@ -115,6 +115,18 @@ pub(crate) async fn bootstrap_venv(
  ) -> anyhow::Result<()> {
      std::fs::create_dir_all(venv.parent().unwrap_or(Path::new("/")))?;
      let uv = ensure_uv()?;
-+    bootstrap_venv_with_uv(&uv, venv, python_skills, options).await
++    bootstrap_venv_with_uv(&uv, venv, source_dir, runtime_identity, python_skills, options).await
 +}
 +
 +// Split from the discovery above so tests can drive the uv calls with a fake uv.
 +async fn bootstrap_venv_with_uv(
 +    uv: &str,
 +    venv: &Path,
++    source_dir: &Path,
++    runtime_identity: &str,
 +    python_skills: &[BootstrapPythonSkill],
 +    options: &EnsureKernelPythonOptions,
 +) -> anyhow::Result<()> {
      let python = kernel_venv_python(venv);
-     let source_dir = resolve_runtime_source_dir();
-     let runtime_requirement = source_dir.as_ref().map_or_else(
-@@ -132,16 +142,7 @@ pub(crate) async fn bootstrap_venv(
+ 
+     let venv_str = venv.to_string_lossy().to_string();
+@@ -132,16 +144,7 @@ pub(crate) async fn bootstrap_venv(
      }
  
      run_async(
@@ -37,7 +39,7 @@ Index: prime-agent-src/crates/pa-core/src/kernel/bootstrap/venv.rs
          &[
              "venv".to_string(),
              venv_str,
-@@ -151,9 +152,9 @@ pub(crate) async fn bootstrap_venv(
+@@ -151,9 +154,9 @@ pub(crate) async fn bootstrap_venv(
          ],
      )
      .await?;
@@ -48,14 +50,14 @@ Index: prime-agent-src/crates/pa-core/src/kernel/bootstrap/venv.rs
 +        uv,
          venv,
          &python,
-         &runtime_identity,
+         source_dir,
 Index: prime-agent-src/crates/pa-core/src/kernel/bootstrap/venv/tests.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/kernel/bootstrap/venv/tests.rs
 +++ prime-agent-src/crates/pa-core/src/kernel/bootstrap/venv/tests.rs
-@@ -1065,3 +1065,37 @@ async fn skill_sync_falls_back_to_per_sk
-         .collect::<Vec<_>>();
-     assert_eq!(recorded, vec!["edit"], "only the healthy skill is recorded");
+@@ -1213,3 +1213,41 @@ async fn unwritable_stale_venv_names_the_venv_and_both_env_overrides() {
+         "no raw lock-candidate path: {message}"
+     );
  }
 +
 +#[cfg(unix)]
@@ -73,9 +75,13 @@ Index: prime-agent-src/crates/pa-core/src/kernel/bootstrap/venv/tests.rs
 +    let venv = dir.path().join("venv");
 +    // The fake uv creates nothing; the real `uv venv` makes this directory.
 +    std::fs::create_dir_all(&venv).unwrap();
++    let source_dir = require_runtime_source_dir().unwrap();
++    let runtime_identity = hash_runtime_source(&source_dir).unwrap();
 +    bootstrap_venv_with_uv(
 +        uv.to_str().unwrap(),
 +        &venv,
++        &source_dir,
++        &runtime_identity,
 +        &[],
 +        &EnsureKernelPythonOptions::default(),
 +    )
