@@ -26,6 +26,7 @@ from . import build_hosts as remote
 from . import config_files
 from . import leftovers
 from . import sandbox as sandboxes
+from . import shell_run as shells
 from . import storage
 from .cli import (
     _ANSI_RE,
@@ -1339,12 +1340,127 @@ async def nix_build(
 
 
 @mcp.tool()
+async def shell_run(
+    ctx: Context,
+    command: str,
+    cwd: str,
+    packages: list[str] | None = None,
+    flake: str = "",
+    host: str = "auto",
+    need_gb: float = 0,
+    insecure: bool = False,
+    fetch: list[str] | None = None,
+    timeout: int = 3600,
+    logs: bool = False,
+) -> str:
+    """Run a shell command inside a Nix shell, here or on a build host.
+
+    Use it for heavy work that is not a Nix build: cargo, make, cmake, go, npm
+    builds and test suites. The shell is `nix-shell -p <packages>` against this
+    PC's pinned nixpkgs, or a flake's devShell. It is evaluated here either way,
+    so a host gets the same toolchain.
+
+    On a host (needs build.remoteExec), cwd is rsynced to
+    /tmp/icedos-mcp-<user>/<key>/src, leaving out .git, result links and
+    .gitignore'd files, and the command runs there outside the Nix sandbox. The
+    copy and its ignored build outputs (`target/`) stay between runs of the same
+    cwd, so rebuilds are incremental. A timeout or cancel kills the remote run.
+
+    $ICEDOS_SCRATCH is a scratch dir: on a host its work dir, here a dir on a
+    secondary SSD when need_gb > 0. Point big outputs at it, e.g.
+    `CARGO_TARGET_DIR=$ICEDOS_SCRATCH/target cargo test` for a local run.
+    TMPDIR points inside it too.
+
+    build_cleanup deletes the work dirs and the store paths a run sent to a
+    host; the server also does this when it exits.
+
+    Args:
+        command: Shell command, run with `nix-shell --run`.
+        cwd: Absolute dir to run in; on a host, the dir that gets synced.
+        packages: nixpkgs attribute paths, e.g. ['cargo', 'rustc', 'pkg-config'].
+        flake: Instead of packages, a flake ref whose devShell to use, e.g.
+               '/abs/dir' (its default devShell) or 'path:/abs/dir#devShells.x86_64-linux.ci'.
+        host: "auto" asks build_hosts, "local", or a configured host.
+        need_gb: Disk the run needs, in GB, for the host's /tmp or the local scratch dir.
+        insecure: Allow packages marked insecure.
+        fetch: Paths relative to cwd to copy back from a host after the run,
+               e.g. ['target/release/foo']. They overwrite the local files.
+        timeout: Max seconds for the command (default 3600).
+        logs: Return the full output instead of its tail.
+    """
+    packages, fetch = packages or [], fetch or []
+    cwd = str(Path(cwd).expanduser())
+    if not Path(cwd).is_absolute() or not Path(cwd).is_dir():
+        return _err("bad_args", f"cwd must be an absolute existing dir: {cwd!r}")
+    if why := shells.check_args(packages, flake, fetch):
+        return _err("bad_args", why)
+    if flake:
+        try:
+            check = await asyncio.to_thread(leftovers.preflight, shells.flake_ref(flake))
+        except ValueError as e:
+            return _err("bad_args", str(e))
+        if check and not check["ok"]:
+            return _err("flake_copy", f"{check['reason']}\n{json.dumps(check, indent=2)}")
+    cfg = remote.settings()
+    why = ""
+    if host == "auto":
+        if cfg["remoteExec"]:
+            picked = await remote.choose(need_gb)
+            host, why = picked["pick"], picked["why"]
+        else:
+            host, why = remote.LOCAL, "build.remoteExec is off"
+    elif host != remote.LOCAL:
+        if host not in cfg["hosts"]:
+            return _err("bad_args", f"unknown host {host!r}; configured hosts: {', '.join(cfg['hosts']) or 'none'}")
+        if not cfg["remoteExec"]:
+            return _err("bad_args", "running commands on a host needs icedos.ai-tools.mcp-server.build.remoteExec = true")
+    if fetch and host == remote.LOCAL:
+        fetch = []
+    drv, err = await shells.env_drv(packages, flake, insecure)
+    if err:
+        return _err("eval", err)
+    on_line = _progress_reporter(ctx)
+    where = f"on {host}" if host != remote.LOCAL else "here"
+    try:
+        if host == remote.LOCAL:
+            try:
+                scratch = await asyncio.to_thread(shells.local_scratch, cwd, need_gb)
+            except (ValueError, OSError) as e:
+                return _err("storage", str(e))
+            rc, log = await shells.run_local(drv, command, cwd, scratch, timeout, on_line)
+        else:
+            work, err = await shells.prepare(host, cwd, need_gb)
+            if err:
+                return _err("host", err)
+            rc, log = await shells.copy_closure(host, [drv], timeout, on_line)
+            if rc != 0:
+                return _err("host", f"cannot copy the shell to {host}:\n{cli_summarize_log_tail(log)}")
+            rsync_path = await shells.remote_rsync(host)
+            rc, log = await shells.sync(host, cwd, work, rsync_path, timeout)
+            if rc != 0:
+                return _err("host", f"rsync to {host} failed:\n{log.strip()[-1500:]}")
+            rc, log = await shells.run_remote(host, work, drv, command, timeout, on_line)
+            where += f", in {work}/src"
+    except TimeoutError as e:
+        partial = getattr(e, "partial_output", "")
+        return _err("timeout", f"{e}\n--- last output ---\n{cli_summarize_log_tail(partial)}")
+    clean = _ANSI_RE.sub("", log).strip()
+    out = clean if logs else cli_summarize_log_tail(clean)
+    head = f"Command {'succeeded' if rc == 0 else f'failed (exit {rc})'} {where}" + (f" ({why})" if why else "") + "."
+    if fetch and rc == 0:
+        frc, fout = await shells.fetch_back(host, work, cwd, fetch, timeout)
+        head += " Fetched " + ", ".join(fetch) + "." if frc == 0 else f" Fetch failed: {fout.strip()[-500:]}"
+    return f"{head}\n{out}"
+
+
+@mcp.tool()
 async def build_cleanup(target: str = "", gc: bool = False) -> str:
-    """Delete the paths this server's nix_build runs added to build hosts and drive stores.
+    """Delete the paths this server's nix_build and shell_run runs added to build hosts and drive stores.
 
     On a host it deletes built outputs, their .drv files and every path copied or
     substituted there, never paths the host already had. Paths something else
-    still uses stay. The server also runs this when it exits.
+    still uses stay. For a host, or no target, it also deletes the shell_run
+    work dirs. The server also runs this when it exits.
 
     Args:
         target: A configured host, a drive mount, "host" for the flake source
@@ -1368,6 +1484,8 @@ async def build_cleanup(target: str = "", gc: bool = False) -> str:
     report: dict[str, str] = {}
     for s in stores or [""]:
         report.update(await asyncio.to_thread(remote.cleanup, s))
+    if not target or target in hosts:
+        report.update(await asyncio.to_thread(shells.cleanup, target))
     if gc:
         for s in [x for x in stores if not x.startswith("ssh-ng://")] or (
             [] if target else [storage.store_dir(m) for m in mounts]
@@ -1981,6 +2099,8 @@ def _on_exit() -> None:
     try:
         for store, msg in remote.cleanup(timeout=60).items():
             logger.info("build cleanup %s: %s", store, msg)
+        for where, msg in shells.cleanup(timeout=30).items():
+            logger.info("cleanup %s: %s", where, msg)
     except Exception as e:
         logger.warning("build cleanup failed: %s", e)
 

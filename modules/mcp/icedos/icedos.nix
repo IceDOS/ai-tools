@@ -14,6 +14,7 @@ in
 
     build = {
       hosts = icedosLib.mkStrListOption { default = defaults.build.hosts; };
+      remoteExec = icedosLib.mkBoolOption { default = defaults.build.remoteExec; };
 
       minFreeGb = icedosLib.mkIntBetweenOption {
         path = "icedos.ai-tools.mcp-server.build.minFreeGb";
@@ -129,7 +130,7 @@ in
                 {
                   command = "serve";
                   help = "start the IceDOS MCP server (stdio); tools use a temp config copy unless --live";
-                  script = "ICEDOS_CONFIG_DIR=${config.icedos.configurationLocation}/.. ICEDOS_MCP_SETTINGS=${settingsFile} exec ${icedosMcpServer}/bin/icedos-mcp-server \"$@\"";
+                  script = "ICEDOS_MCP_RSYNC=${pkgs.rsync}/bin/rsync ICEDOS_CONFIG_DIR=${config.icedos.configurationLocation}/.. ICEDOS_MCP_SETTINGS=${settingsFile} exec ${icedosMcpServer}/bin/icedos-mcp-server \"$@\"";
                   completion.files = false;
                 }
               ];

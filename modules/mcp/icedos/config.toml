@@ -8,6 +8,9 @@ timeout = 3600000
 # users need not be trusted.
 [icedos.ai-tools.mcp-server.build]
 hosts = []
+# Let shell_run sync a dir to a host and run commands there outside the Nix
+# sandbox, under /tmp/icedos-mcp-<user>/. Off keeps shell_run on this PC.
+remoteExec = false
 # Free space a host keeps on /nix/store after a build, in GB.
 minFreeGb = 20
 # This PC counts as busy above this CPU or IO `some avg10` pressure.
@@ -90,8 +93,19 @@ For any heavy Nix build outside `rebuild` (compilers, kernels, browsers, VM test
 - Pass absolute paths in the installable, e.g. `path:/abs/dir#pkg`. The server's working dir is not yours.
 - A remote build's outputs stay in the host's store, because the remote user is not trusted. Inspect them with `ssh <host>`, or copy files back with `scp`. These are other people's PCs. Only touch the Nix store and files you created under `/tmp`.
 - A drive store's outputs print as `/nix/store/...` but live under the store dir. Run them with the `nix shell --store ...` command the result gives, not by the printed path.
-- Call `build_cleanup` once you are done with the outputs. It deletes only paths your builds added, and the server also runs it on exit. `gc=true` also collects the drive stores; paths that running programs use from the host `/nix/store` stay, because a drive store shares their names.
+- Call `build_cleanup` once you are done with the outputs. It deletes only paths your builds and `shell_run` runs added, and their work dirs, and the server also runs it on exit. `gc=true` also collects the drive stores; paths that running programs use from the host `/nix/store` stay, because a drive store shares their names.
 - Never build IceDOS remotely or in a drive store. `rebuild` refuses `--builder` in a sandbox, and rebuilds need the host store.
+
+## Heavy work outside Nix builds
+
+For heavy compiles and test runs that are not a Nix build (cargo, make, cmake, go, npm builds, test suites), use `shell_run` with `host="auto"` instead of `nix-shell` or `icedos shell` in Bash. Small commands stay in Bash.
+
+- Pass the shell as `packages` (nixpkgs attribute paths, evaluated against this PC's pinned nixpkgs, like `icedos shell -p`) or `flake` (a devShell). The server evaluates it here, so a host gets the same toolchain.
+- With `build.remoteExec = true`, `host="auto"` picks like `nix_build`. On a host, `cwd` is rsynced to `/tmp/icedos-mcp-<user>/<key>/src` without `.git`, result links and `.gitignore`'d files, and the command runs there outside the Nix sandbox. Ignored outputs such as `target/` stay between runs of the same `cwd`, so the second run is incremental. With `remoteExec` off, every run is local.
+- `$ICEDOS_SCRATCH` is the run's scratch dir, and `TMPDIR` points inside it. On a host it is the work dir; here it exists only with `need_gb > 0`, on a secondary SSD. For a big local cargo run, use `CARGO_TARGET_DIR=$ICEDOS_SCRATCH/target`.
+- `fetch=["target/release/foo"]` copies paths from the host back into `cwd` after a successful run.
+- A timeout or a cancelled call kills the remote process group.
+- `build_cleanup` deletes the work dirs and the store paths a run sent to a host. The server also does this when it exits.
 
 ## Heavy files
 
@@ -130,7 +144,7 @@ Sandbox-aware, all take `sandbox=`:
 
 Sandbox management: `sandbox_create`, `sandbox_list`, `sandbox_diff`, `sandbox_inputs_diff`, `sandbox_delete`, `sandbox_override_repo`.
 
-Always live and read-only or self-contained: `doctor`, `get_system_info_tool`, `get_generations_tool`, `diff_generations`, `config_history`, `list_packages`, `run_package` (`args`, `insecure`), `pkgs_build` (builds a package.nix against the system's pkgs), `explore_local_repo`, `build_hosts`, `nix_build`, `build_cleanup`, `storage_pick`, `storage_status`, `flake_preflight`, `gc_roots`, `nix_cleanup`.
+Always live and read-only or self-contained: `doctor`, `get_system_info_tool`, `get_generations_tool`, `diff_generations`, `config_history`, `list_packages`, `run_package` (`args`, `insecure`), `pkgs_build` (builds a package.nix against the system's pkgs), `explore_local_repo`, `build_hosts`, `nix_build`, `shell_run`, `build_cleanup`, `storage_pick`, `storage_status`, `flake_preflight`, `gc_roots`, `nix_cleanup`.
 
 Live mode only, unless `dry=true`: `rollback`, `gc`.
 
