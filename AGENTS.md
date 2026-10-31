@@ -69,8 +69,10 @@ basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pagespeed-
   so skills always match the packaged version. basic-memory builds from its GitHub release
   for this, since its wheel leaves out `skills/`. The module's own `skills`
   replaces an upstream skill of the same name.
-- `lib/python.nix` is Python 3 with the MCP Python SDK 2.x (nixpkgs ships 1.x), used by
+- `lib/python.nix` is Python 3 with the MCP Python SDK 2.x from pinned wheels, used by
   `kwin-mcp` and `basic-memory-mcp`; `basic-memory-mcp` adds the FastMCP release it pins on top.
+  `lib/python-mcp1.nix` pins the SDK back to 1.x for `mcp-server`, `opencart-mcp`, `plesk-mcp`
+  and `signal-mcp`. nixpkgs ships SDK 2.x, which marks its FastMCP 3.x broken.
   `lib/python-bin.nix` runs an entry point through `python.withPackages`, since kwin-mcp
   re-runs `sys.executable -m kwin_mcp.*` and needs its packages in the child.
 - `rea-mcp`, `ddev-mcp` and `pagespeed-insights-mcp` build the npm tarball with `package-lock.json` generated from the trimmed

@@ -73,7 +73,10 @@ in
           ...
         }:
         let
-          icedosMcpServer = pkgs.python3Packages.buildPythonApplication {
+          # pyproject caps mcp<2.
+          python = import ../lib/python-mcp1.nix { inherit pkgs; };
+
+          icedosMcpServer = python.pkgs.buildPythonApplication {
             pname = "icedos-mcp-server";
             version = "0.1.0";
             pyproject = true;
@@ -89,9 +92,9 @@ in
                 rel == "pyproject.toml" || rel == "icedos_mcp" || lib.hasPrefix "icedos_mcp/" rel;
             };
 
-            build-system = [ pkgs.python3Packages.hatchling ];
+            build-system = [ python.pkgs.hatchling ];
 
-            dependencies = with pkgs.python3Packages; [
+            dependencies = with python.pkgs; [
               mcp
               tomlkit
               httpx

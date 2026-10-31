@@ -2,7 +2,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/anthropic/mod.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/anthropic/mod.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/anthropic/mod.rs
-@@ -365,7 +365,7 @@ pub(crate) fn build_request_headers(
+@@ -365,7 +365,7 @@
              .collect()
      });
  
@@ -11,7 +11,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/anthropic/mod.rs
          "cloudflare-ai-gateway" => {
              let mut headers = Map::new();
              headers.insert("accept".into(), json!("application/json"));
-@@ -425,6 +425,11 @@ pub(crate) fn build_request_headers(
+@@ -425,6 +425,11 @@
          }
      };
  
@@ -27,7 +27,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/google.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/google.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/google.rs
-@@ -269,6 +269,11 @@ async fn run_stream(
+@@ -269,6 +269,11 @@
              headers.push((name.clone(), value.clone()));
          }
      }
@@ -43,7 +43,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/mod.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/mod.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/mod.rs
-@@ -17,5 +17,6 @@ pub mod openai_responses_shared;
+@@ -17,5 +17,6 @@
  pub mod openai_responses_stream;
  mod opencode_headers;
  pub mod opencode_tools;
@@ -54,7 +54,32 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/mod.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/mod.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/mod.rs
-@@ -331,7 +331,14 @@ pub fn stream_simple_openai_completions(
+@@ -145,10 +145,14 @@
+         || is_cloudflare_ai_gateway
+         || is_prime_inference;
+ 
++    let is_opencode = matches!(provider, "opencode" | "opencode-zen" | "opencode_zen")
++        || base_url.contains("opencode.ai");
++
+     let use_max_tokens = base_url.contains("chutes.ai")
+         || is_moonshot
+         || is_cloudflare_ai_gateway
+-        || is_prime_inference;
++        || is_prime_inference
++        || is_opencode;
+ 
+     let is_grok = provider == "xai" || base_url.contains("api.x.ai");
+     let is_deep_seek = provider == "deepseek" || base_url.contains("deepseek.com");
+@@ -163,7 +167,7 @@
+     ResolvedCompat {
+         supports_store: !is_non_standard,
+         supports_developer_role: !is_non_standard,
+-        supports_reasoning_effort: !is_grok && !is_zai && !is_moonshot && !is_cloudflare_ai_gateway,
++        supports_reasoning_effort: !is_grok && !is_zai && !is_moonshot && !is_cloudflare_ai_gateway && !is_opencode,
+         supports_usage_in_streaming: true,
+         max_tokens_field: if use_max_tokens {
+             crate::types::MaxTokensField::MaxTokens
+@@ -331,7 +335,14 @@
  ) -> AssistantMessageEventStream {
      let api_key = options
          .and_then(|options| options.base.api_key.clone())
@@ -74,7 +99,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/params.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/params.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/params.rs
-@@ -333,8 +333,10 @@ pub(crate) fn build_headers(
+@@ -333,8 +333,10 @@
  ) -> Vec<(String, String)> {
      // The default Authorization goes in first so model and caller headers replace it (header names
      // compare case-insensitively) instead of shipping a second Authorization alongside theirs.
@@ -86,7 +111,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/params.rs
      for (name, value) in model.headers.iter().flatten() {
          headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
          headers.push((name.clone(), value.clone()));
-@@ -355,6 +357,7 @@ pub(crate) fn build_headers(
+@@ -355,6 +357,7 @@
          }
      }
  
@@ -98,7 +123,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_completions/stream.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/openai_completions/stream.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/openai_completions/stream.rs
-@@ -586,7 +586,8 @@ async fn run_stream(
+@@ -586,7 +586,8 @@
          }
      }
  
@@ -112,7 +137,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/openai_responses.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/openai_responses.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/openai_responses.rs
-@@ -186,6 +186,11 @@ fn build_headers(
+@@ -186,6 +186,11 @@
              headers.push((name.clone(), value.clone()));
          }
      }
@@ -128,8 +153,9 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 ===================================================================
 --- /dev/null
 +++ prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,332 @@
 +use std::fmt::Write as _;
++use std::sync::atomic::{AtomicU64, Ordering};
 +use std::sync::OnceLock;
 +
 +use sha2::{Digest, Sha256};
@@ -137,6 +163,9 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +pub use crate::providers::opencode_tools::is_opencode_provider;
 +
 +pub const SESSION_HEADER: &str = "x-opencode-session";
++pub const REQUEST_HEADER: &str = "x-opencode-request";
++pub const DEFAULT_USER_AGENT: &str =
++    "opencode/1.19.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.2";
 +
 +const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 +
@@ -175,14 +204,53 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +    out
 +}
 +
++static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
++
++// msg_<12 hex><14 base62>; ascending timestamp + counter, followed by random base62 suffix.
++#[must_use]
++pub fn opencode_request_id() -> String {
++    opencode_request_id_at(
++        now_millis(),
++        REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed),
++    )
++}
++
++#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
++fn opencode_request_id_at(timestamp: u64, counter: u64) -> String {
++    let val = u128::from(timestamp) * 0x1000 + u128::from(counter & 0xfff);
++    let mut out = String::with_capacity(4 + 12 + 14);
++    out.push_str("msg_");
++    for i in 0..6 {
++        let byte = ((val >> (40 - 8 * i)) & 0xff) as u8;
++        let _ = write!(out, "{byte:02x}");
++    }
++    let mut hasher = Sha256::new();
++    hasher.update(timestamp.to_le_bytes());
++    hasher.update(counter.to_le_bytes());
++    let rand_val: [u8; 8] = rand::random();
++    hasher.update(rand_val);
++    let digest = hasher.finalize();
++    for byte in digest.iter().take(14) {
++        out.push(BASE62[usize::from(*byte) % 62] as char);
++    }
++    out
++}
++
 +#[must_use]
 +pub fn sanitize_opencode_url(provider: &str, base_url: &str) -> String {
 +    let trimmed = base_url.trim_end_matches('/');
-+    if is_opencode_provider(provider) && trimmed.contains("opencode.ai/zen/v1") {
-+        trimmed.replace("opencode.ai/zen/v1", "opencode.ai/inference/v1")
-+    } else {
-+        trimmed.to_string()
++    if is_opencode_provider(provider) {
++        if trimmed.contains("opencode.ai/zen/v1") {
++            return trimmed.replace("opencode.ai/zen/v1", "opencode.ai/inference/openai/v1");
++        }
++        if trimmed.contains("opencode.ai/inference/v1") {
++            return trimmed.replace("opencode.ai/inference/v1", "opencode.ai/inference/openai/v1");
++        }
++        if trimmed.ends_with("opencode.ai/zen") {
++            return trimmed.replace("opencode.ai/zen", "opencode.ai/inference/openai/v1");
++        }
 +    }
++    trimmed.to_string()
 +}
 +
 +// Headers for opencode provider request; calls without session id share a process id.
@@ -204,18 +272,22 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +        return;
 +    }
 +
-+    // User-Agent: rewrite legacy 1.x or push 2.0.29
++    // User-Agent: rewrite fake 2.0.29 or missing ai-sdk runtime suffix
 +    let mut has_ua = false;
 +    for (name, val) in headers.iter_mut() {
 +        if name.eq_ignore_ascii_case("User-Agent") {
 +            has_ua = true;
-+            if val.starts_with("opencode/1.") || val == "opencode" {
-+                *val = "opencode/latest/2.0.29/cli".to_string();
++            if val.contains("2.0.29")
++                || val.starts_with("opencode/latest")
++                || val == "opencode"
++                || (val.starts_with("opencode/1.") && !val.contains("ai-sdk"))
++            {
++                *val = DEFAULT_USER_AGENT.to_string();
 +            }
 +        }
 +    }
 +    if !has_ua {
-+        headers.push(("User-Agent".to_string(), "opencode/latest/2.0.29/cli".to_string()));
++        headers.push(("User-Agent".to_string(), DEFAULT_USER_AGENT.to_string()));
 +    }
 +
 +    // Clean up stale or non-ses_ session headers (e.g. legacy UUID pins)
@@ -225,6 +297,15 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +        } else {
 +            true
 +        }
++    });
++
++    // Strip non-OpenCode headers that leak client identity
++    headers.retain(|(name, _)| {
++        !name.eq_ignore_ascii_case("idempotency-key")
++            && !name.eq_ignore_ascii_case("x-acp-model-request-id")
++            && !name.eq_ignore_ascii_case("session_id")
++            && !name.eq_ignore_ascii_case("x-client-request-id")
++            && !name.eq_ignore_ascii_case("x-session-affinity")
 +    });
 +
 +    let sid = if let Some((_, val)) = headers
@@ -244,21 +325,38 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +        val
 +    };
 +
-+    for header_name in ["x-opencode-session-id", "x-session-affinity", "x-session-id"] {
-+        if !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(header_name)) {
-+            headers.push((header_name.to_string(), sid.clone()));
-+        }
++    if !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-opencode-session-id")) {
++        headers.push(("x-opencode-session-id".to_string(), sid));
 +    }
 +
 +    if !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-opencode-client")) {
 +        headers.push(("x-opencode-client".to_string(), "cli".to_string()));
 +    }
 +
-+    if !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-opencode-project")) {
-+        let cwd = std::env::current_dir().unwrap_or_default();
-+        let hex_full = format!("{:x}", Sha256::digest(cwd.to_string_lossy().as_bytes()));
-+        let hex_40 = if hex_full.len() >= 40 { &hex_full[..40] } else { &hex_full };
-+        headers.push(("x-opencode-project".to_string(), hex_40.to_string()));
++    let mut has_project = false;
++    for (name, val) in headers.iter_mut() {
++        if name.eq_ignore_ascii_case("x-opencode-project") {
++            has_project = true;
++            if val.len() == 40 && val.chars().all(|c| c.is_ascii_hexdigit()) {
++                *val = "global".to_string();
++            }
++        }
++    }
++    if !has_project {
++        headers.push(("x-opencode-project".to_string(), "global".to_string()));
++    }
++
++    let mut has_req = false;
++    for (name, val) in headers.iter_mut() {
++        if name.eq_ignore_ascii_case(REQUEST_HEADER) {
++            has_req = true;
++            if !val.starts_with("msg_") {
++                *val = opencode_request_id();
++            }
++        }
++    }
++    if !has_req {
++        headers.push((REQUEST_HEADER.to_string(), opencode_request_id()));
 +    }
 +}
 +
@@ -305,7 +403,13 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +        assert_eq!(headers[0].1, "ses_valid0123456789");
 +        assert!(headers.iter().any(|(k, _)| k == "x-opencode-session-id"));
 +        assert!(headers.iter().any(|(k, _)| k == "x-opencode-client"));
-+        assert!(headers.iter().any(|(k, _)| k == "x-opencode-project"));
++        assert_eq!(
++            headers.iter().find(|(k, _)| k == "x-opencode-project").map(|(_, v)| v.as_str()),
++            Some("global")
++        );
++        let req = headers.iter().find(|(k, _)| k == REQUEST_HEADER).unwrap();
++        assert!(req.1.starts_with("msg_"));
++        assert_eq!(req.1.len(), 30);
 +    }
 +
 +    #[test]
@@ -322,14 +426,59 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +        let mut headers = vec![("User-Agent".to_string(), "opencode/1.19.0".to_string())];
 +        push_session_headers(&mut headers, "opencode", Some("s"));
 +        let ua = headers.iter().find(|(k, _)| k == "User-Agent").unwrap();
-+        assert_eq!(ua.1, "opencode/latest/2.0.29/cli");
++        assert_eq!(ua.1, DEFAULT_USER_AGENT);
++
++        let mut headers2 = vec![("User-Agent".to_string(), "opencode/latest/2.0.29/cli".to_string())];
++        push_session_headers(&mut headers2, "opencode", Some("s"));
++        let ua2 = headers2.iter().find(|(k, _)| k == "User-Agent").unwrap();
++        assert_eq!(ua2.1, DEFAULT_USER_AGENT);
++    }
++
++    #[test]
++    fn ascending_request_ids_sort_newer_last() {
++        let older = opencode_request_id_at(1_700_000_000_000, 1);
++        let newer = opencode_request_id_at(1_700_000_000_500, 2);
++        assert!(older.starts_with("msg_"));
++        assert_eq!(older.len(), 30);
++        assert!(older[4..16] < newer[4..16]);
++    }
++
++    #[test]
++    fn fake_hex_project_is_normalized_to_global() {
++        let mut headers = vec![("x-opencode-project".to_string(), "a".repeat(40))];
++        push_session_headers(&mut headers, "opencode", Some("s"));
++        let project = headers.iter().find(|(k, _)| k == "x-opencode-project").unwrap();
++        assert_eq!(project.1, "global");
++    }
++
++    #[test]
++    fn extraneous_headers_are_stripped() {
++        let mut headers = vec![
++            ("idempotency-key".to_string(), "123".to_string()),
++            ("session_id".to_string(), "abc".to_string()),
++            ("x-client-request-id".to_string(), "def".to_string()),
++            ("x-session-affinity".to_string(), "ghi".to_string()),
++            ("x-acp-model-request-id".to_string(), "jkl".to_string()),
++            ("custom-header".to_string(), "ok".to_string()),
++        ];
++        push_session_headers(&mut headers, "opencode", Some("s"));
++        assert!(!headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("idempotency-key")));
++        assert!(!headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("session_id")));
++        assert!(!headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-client-request-id")));
++        assert!(!headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-session-affinity")));
++        assert!(!headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-acp-model-request-id")));
++        assert!(headers.iter().any(|(k, _)| k == "custom-header"));
 +    }
 +
 +    #[test]
 +    fn url_sanitization_rewrites_zen() {
 +        assert_eq!(
 +            sanitize_opencode_url("opencode", "https://opencode.ai/zen/v1/"),
-+            "https://opencode.ai/inference/v1"
++            "https://opencode.ai/inference/openai/v1"
++        );
++        assert_eq!(
++            sanitize_opencode_url("opencode", "https://opencode.ai/inference/v1/"),
++            "https://opencode.ai/inference/openai/v1"
 +        );
 +        assert_eq!(
 +            sanitize_opencode_url("openai", "https://api.openai.com/v1/"),
@@ -341,7 +490,7 @@ Index: prime-agent-src/crates/pa-core/src/models/registry.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-core/src/models/registry.rs
 +++ prime-agent-src/crates/pa-core/src/models/registry.rs
-@@ -246,6 +246,9 @@ impl ModelRegistry {
+@@ -246,6 +246,9 @@
      pub fn has_configured_auth(&self, model: &Model) -> bool {
          self.auth.has_auth(&model.provider)
              || self.has_configured_provider_request_auth(&model.provider)
@@ -351,7 +500,7 @@ Index: prime-agent-src/crates/pa-core/src/models/registry.rs
      }
  
      /// The provider's auth status without credential values: callers
-@@ -848,6 +851,11 @@ impl ModelRegistry {
+@@ -848,6 +851,11 @@
                  }
              }
          }

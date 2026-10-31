@@ -6,17 +6,25 @@ let
   # Pin refreshed by ./update.sh from the PyPI sdist; upstream pushes no git tags.
   source = lib.importJSON ./source.json;
 
-  # nixpkgs FastMCP 3.x runs on the MCP SDK 1.x, so this uses plain python3, not ../lib/python.nix.
-  unwrapped = pkgs.python3Packages.buildPythonApplication {
+  # nixpkgs FastMCP 3.x needs the MCP SDK 1.x.
+  python = import ../lib/python-mcp1.nix { inherit pkgs; };
+
+  unwrapped = python.pkgs.buildPythonApplication {
     pname = "plesk-mcp";
     inherit (source) version;
     pyproject = true;
 
     src = pkgs.fetchurl { inherit (source) url hash; };
 
-    build-system = [ pkgs.python3Packages.uv-build ];
+    # Upstream caps uv_build below the 0.12 that nixpkgs ships.
+    postPatch = ''
+      substituteInPlace pyproject.toml \
+        --replace-fail '"uv_build>=0.10,<0.12"' '"uv_build>=0.10"'
+    '';
 
-    dependencies = with pkgs.python3Packages; [
+    build-system = [ python.pkgs.uv-build ];
+
+    dependencies = with python.pkgs; [
       async-lru
       fastmcp
       httpx

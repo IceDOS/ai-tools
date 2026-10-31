@@ -6,7 +6,10 @@ let
   # Pin refreshed by ./update.sh; upstream main runs ahead of its tags.
   source = lib.importJSON ./source.json;
 
-  unwrapped = pkgs.python3Packages.buildPythonApplication {
+  # nixpkgs FastMCP 3.x needs the MCP SDK 1.x.
+  python = import ../lib/python-mcp1.nix { inherit pkgs; };
+
+  unwrapped = python.pkgs.buildPythonApplication {
     pname = "opencart-mcp";
     inherit (source) version;
     pyproject = true;
@@ -17,9 +20,9 @@ let
       inherit (source) rev hash;
     };
 
-    build-system = [ pkgs.python3Packages.setuptools ];
+    build-system = [ python.pkgs.setuptools ];
 
-    dependencies = with pkgs.python3Packages; [
+    dependencies = with python.pkgs; [
       fastmcp
       paramiko
       pymysql

@@ -1,4 +1,4 @@
-# Python 3 with the MCP Python SDK 2.x, which nixpkgs does not ship yet (it has 1.x).
+# Python 3 with the MCP Python SDK 2.x, pinned to the wheels in ./python-sdk.json.
 # extraOverrides adds a server's own packages on top of the same scope.
 {
   pkgs,

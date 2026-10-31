@@ -1,7 +1,8 @@
 { pkgs }:
 
 let
-  python = pkgs.python3;
+  # Upstream caps mcp<2 and needs FastMCP 3.x.
+  python = import ../lib/python-mcp1.nix { inherit pkgs; };
 
   # Pin refreshed by ./update.sh. Upstream main runs ahead of its tags, so it tracks main.
   source = pkgs.lib.importJSON ./source.json;
