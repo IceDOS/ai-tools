@@ -1,0 +1,12 @@
+{
+  "proxy": {
+    "version": "1.7.0",
+    "rev": "22f1b3f8b7c4ef37112114b4af3d6c5a6c0a83bb",
+    "hash": "sha256-nYTa/a5UI9p1ZAqfTDJ8r909YNsIbWevPMhVn9ysyNg="
+  },
+  "toolkit": {
+    "version": "0-unstable-2026-11-02",
+    "rev": "1761e96813ebcbd43ed81d19e837219033f0afe5",
+    "hash": "sha256-tpCHRD9k/DjKHyL+sJ2zsrmgheiaH7YasoqmwJtD8R4="
+  }
+}

@@ -16,7 +16,7 @@
 ## Purpose
 AI agents, local model servers and their glue: `claude-code`, `antigravity`, `opencode`, `prime-agent`
 (agents), `llamacpp`, `ollama` (model servers), `peon-ping` (agent-event audio),
-`mcp-server` (`icedos mcp serve`), one module per MCP server (`basic-memory-mcp`,
+`mcp-server` (`icedos mcp serve`), one module per MCP server (`aws-mcp`, `basic-memory-mcp`,
 `chrome-devtools-mcp`, `context7-mcp`, `ddev-mcp`, `kwin-mcp`, `nixos-mcp`, `opencart-mcp`, `pagespeed-insights-mcp`, `plesk-mcp`, `rea-mcp`,
 `signal-mcp`), `alimit` (usage limits for every agent and provider),
 `ai-accounts` (several accounts per agent), `agent-launch` (fzf agent picker) and
@@ -31,7 +31,7 @@ attrset per module (`icedos.ai-tools.prime-agent`, ...).
 `icedosLib.scanModules { path = ./modules; filename = "icedos.nix"; }`, which recurses, and
 `meta.name` (not the folder) names the module. The categories are `agents` (antigravity,
 claude-code, opencode, prime-agent), `models` (llamacpp, ollama), `mcp` (one folder per MCP server: icedos-mcp, whose module name is `mcp-server`, and
-basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pagespeed-insights, plesk, rea, signal, each named
+aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pagespeed-insights, plesk, rea, signal, each named
 `<folder>-mcp` except `kwin-mcp`; `mcp/lib` holds their shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence, peon-ping).
 `modules/default` loads whenever the repo is listed and owns the shared options.
 
@@ -58,7 +58,7 @@ basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pagespeed-
 ## MCP modules
 - Each one packages its server as a real derivation, puts it on the system PATH, registers it
   in `mcp-servers` under the server name agents already use (`basic-memory`, `chrome-devtools`,
-  `context7`, `ddev`, `icedos`, `kwin-mcp`, `nixos`, `opencart`, `pagespeed-insights`, `rea`, `signal-mcp`) and ships
+  `aws-mcp`, `context7`, `ddev`, `icedos`, `kwin-mcp`, `nixos`, `opencart`, `pagespeed-insights`, `rea`, `signal-mcp`) and ships
   its skills. `plesk-mcp` instead registers one `plesk-<name>` entry per `servers.<name>`, and its
   wrapper sources the credentials from `PLESK_ENV_FILE`, so they stay out of the store.
   `opencart-mcp` sources `OPENCART_ENV_FILE` (`envFile`) the same way, and
@@ -69,9 +69,13 @@ basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pagespeed-
   so skills always match the packaged version. basic-memory builds from its GitHub release
   for this, since its wheel leaves out `skills/`. The module's own `skills`
   replaces an upstream skill of the same name.
+- `aws-mcp` runs the AWS proxy from `github:aws/mcp-proxy-for-aws` as the shared `aws-mcp` server and installs
+  the plugins in `plugins` from `github:aws/agent-toolkit-for-aws` for Claude Code only, since their skills ship
+  scripts that the text-only shared `skills` pool would lose. `package.nix` removes each plugin's uvx `aws-mcp`
+  entry and points its hooks at a store Python.
 - `lib/python.nix` is Python 3 with the MCP Python SDK 2.x from pinned wheels, used by
   `kwin-mcp` and `basic-memory-mcp`; `basic-memory-mcp` adds the FastMCP release it pins on top.
-  `lib/python-mcp1.nix` pins the SDK back to 1.x for `mcp-server`, `opencart-mcp`, `plesk-mcp`
+  `lib/python-mcp1.nix` pins the SDK back to 1.x for `aws-mcp`, `mcp-server`, `opencart-mcp`, `plesk-mcp`
   and `signal-mcp`. nixpkgs ships SDK 2.x, which marks its FastMCP 3.x broken.
   `lib/python-bin.nix` runs an entry point through `python.withPackages`, since kwin-mcp
   re-runs `sys.executable -m kwin_mcp.*` and needs its packages in the child.

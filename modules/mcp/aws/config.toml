@@ -1,0 +1,15 @@
+[icedos.ai-tools.aws-mcp]
+# Managed AWS MCP endpoint the local proxy signs requests for.
+url = "https://aws-mcp.us-east-1.api.aws/mcp"
+
+# Proxy flags. --skip-auth keeps documentation search working without AWS
+# credentials; requests are still signed when credentials exist.
+extraArgs = ["--skip-auth", "--disable-telemetry"]
+
+# Agent Toolkit plugins installed for Claude Code. aws-agents-for-devsecops needs
+# DEVOPS_AGENT_TOKEN. aws-startup-advisor adds usage telemetry and partner offers.
+plugins = ["aws-core", "aws-agents", "aws-data-analytics"]
+
+# Skills for this module, name = full SKILL.md content. Added to the shared
+# icedos.ai-tools.skills pool.
+[icedos.ai-tools.aws-mcp.skills]
