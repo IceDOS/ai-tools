@@ -728,6 +728,12 @@
                     substring 0 6 (builtins.hashString "sha256" "${config.home.username}:${name}")
                   )) 200;
 
+                opencodeBridgePort =
+                  if prime-agent.settings.ports.overrides ? opencode-bridge then
+                    prime-agent.settings.ports.overrides.opencode-bridge
+                  else
+                    hashPort "opencode-bridge";
+
                 portsByServer =
                   let
                     sorted = lib.sort (a: b: a.name < b.name) (
@@ -735,7 +741,10 @@
                     );
                     # Reserved up front so derived ports bump around pins; double pins fail below.
                     pinnedUsed = lib.listToAttrs (
-                      map (p: lib.nameValuePair (toString p) true) (lib.attrValues prime-agent.settings.ports.overrides)
+                      map (p: lib.nameValuePair (toString p) true) (
+                        [ opencodeBridgePort ]
+                        ++ (lib.attrValues prime-agent.settings.ports.overrides)
+                      )
                     );
 
                     step =
@@ -766,7 +775,12 @@
                 # Shared final ports; empty unless the config is wrong, asserted below.
                 duplicatePorts =
                   let
-                    entries = lib.mapAttrsToList (name: p: { inherit name p; }) portsByServer;
+                    entries = [
+                      {
+                        name = "opencode-bridge";
+                        p = opencodeBridgePort;
+                      }
+                    ] ++ (lib.mapAttrsToList (name: p: { inherit name p; }) portsByServer);
                   in
                   lib.filter (e: 1 < lib.length (lib.filter (o: o.p == e.p) entries)) entries;
 
@@ -1244,7 +1258,7 @@
                 opencodeUserAgent = "opencode/${opencodeVersion} ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.2";
                 providerDefaults = {
                   opencode = {
-                    baseUrl = "https://opencode.ai/inference/openai/v1";
+                    baseUrl = "http://127.0.0.1:${toString opencodeBridgePort}/inference/openai/v1";
                     headers = {
                       "User-Agent" = opencodeUserAgent;
                       "x-opencode-project" = "global";
@@ -1316,7 +1330,7 @@
 
                   MODELS="${dataDir}/models.json"
                   if json_ok "$MODELS"; then
-                    "$JQ" -n --slurpfile a "$MODELS" --slurpfile b "${modelsFile}" '($a[0] * $b[0]) | if .providers.opencode.headers["x-opencode-session"]? | test("^ses_") | not then del(.providers.opencode.headers["x-opencode-session"]) else . end | if .providers["opencode-go"].headers["x-opencode-session"]? | test("^ses_") | not then del(.providers["opencode-go"].headers["x-opencode-session"]) else . end' > "$MODELS.tmp" && commit_json "$MODELS.tmp" "$MODELS" 0644 || { rm -f "$MODELS.tmp"; echo "prime-agent: failed to merge $MODELS, left unchanged" >&2; }
+                    "$JQ" -n --slurpfile a "$MODELS" --slurpfile b "${modelsFile}" '($a[0] * $b[0]) | if (.providers.opencode.headers["x-opencode-session"]? // "") | test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") then del(.providers.opencode.headers["x-opencode-session"]) else . end | if (.providers["opencode-go"].headers["x-opencode-session"]? // "") | test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") then del(.providers["opencode-go"].headers["x-opencode-session"]) else . end' > "$MODELS.tmp" && commit_json "$MODELS.tmp" "$MODELS" 0644 || { rm -f "$MODELS.tmp"; echo "prime-agent: failed to merge $MODELS, left unchanged" >&2; }
                   else
                     [ -e "$MODELS" ] && echo "prime-agent: $MODELS unreadable, reseeding" >&2
                     rm -f "$MODELS.tmp"
@@ -1475,7 +1489,25 @@
                     ]
                   );
 
-                  systemd.user.services = mkMerge (lib.mapAttrsToList service localServers);
+                  systemd.user.services = mkMerge (
+                    (lib.mapAttrsToList service localServers)
+                    ++ [
+                      {
+                        prime-agent-opencode-bridge = {
+                          Unit.Description = "prime-agent opencode inference forwarder";
+                          Service = {
+                            ExecStart = "${pkgs.bun}/bin/bun run ${./lib/opencode-bridge.ts}";
+                            Environment = [
+                              "OPENCODE_BRIDGE_PORT=${toString opencodeBridgePort}"
+                            ];
+                            Restart = "always";
+                            RestartSec = 2;
+                          };
+                          Install.WantedBy = [ "default.target" ];
+                        };
+                      }
+                    ]
+                  );
 
                   home.activation.seed-prime-agent = lib.hm.dag.entryAfter [
                     "writeBoundary"

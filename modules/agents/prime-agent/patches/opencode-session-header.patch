@@ -2,27 +2,18 @@ Index: prime-agent-src/crates/pa-ai/src/providers/anthropic/mod.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/anthropic/mod.rs
 +++ prime-agent-src/crates/pa-ai/src/providers/anthropic/mod.rs
-@@ -365,7 +365,7 @@
-             .collect()
-     });
- 
--    let default_headers = match model.provider.as_str() {
-+    let mut default_headers = match model.provider.as_str() {
-         "cloudflare-ai-gateway" => {
-             let mut headers = Map::new();
-             headers.insert("accept".into(), json!("application/json"));
-@@ -425,6 +425,11 @@
-         }
+@@ -426,6 +426,11 @@
      };
  
-+    // withOpenCodeHeaders: opencode session headers (opencode providers only).
-+    for (name, value) in super::opencode_session::session_headers(&model.provider, session_id) {
-+        default_headers.entry(name).or_insert(json!(value));
-+    }
-+
      let mut pairs = headers_to_pairs(&default_headers);
++    crate::providers::opencode_session::push_session_headers(
++        &mut pairs,
++        &model.provider,
++        session_id,
++    );
      crate::providers::opencode_headers::apply(&mut pairs, &model.provider, session_id);
      // The Anthropic SDK always sends the API version; mirror it.
+     pairs.insert(0, ("anthropic-version".into(), "2023-06-01".into()));
 Index: prime-agent-src/crates/pa-ai/src/providers/google.rs
 ===================================================================
 --- prime-agent-src.orig/crates/pa-ai/src/providers/google.rs
@@ -153,7 +144,7 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 ===================================================================
 --- /dev/null
 +++ prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,342 @@
 +use std::fmt::Write as _;
 +use std::sync::atomic::{AtomicU64, Ordering};
 +use std::sync::OnceLock;
@@ -253,15 +244,18 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +    trimmed.to_string()
 +}
 +
-+// Headers for opencode provider request; calls without session id share a process id.
-+#[must_use]
-+pub fn session_headers(provider: &str, session_id: Option<&str>) -> Vec<(String, String)> {
-+    let mut headers = Vec::new();
-+    push_session_headers(&mut headers, provider, session_id);
-+    headers
++// Append headers required by OpenCode inference gate.
++fn is_legacy_uuid(val: &str) -> bool {
++    let parts: Vec<&str> = val.split('-').collect();
++    parts.len() == 5
++        && parts[0].len() == 8
++        && parts[1].len() == 4
++        && parts[2].len() == 4
++        && parts[3].len() == 4
++        && parts[4].len() == 12
++        && parts.iter().all(|part| part.chars().all(|c| c.is_ascii_hexdigit()))
 +}
 +
-+// Append headers required by OpenCode inference gate.
 +pub fn push_session_headers(
 +    headers: &mut Vec<(String, String)>,
 +    provider: &str,
@@ -290,10 +284,10 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +        headers.push(("User-Agent".to_string(), DEFAULT_USER_AGENT.to_string()));
 +    }
 +
-+    // Clean up stale or non-ses_ session headers (e.g. legacy UUID pins)
++    // Clean up legacy UUID pins (36-char hyphenated hex strings)
 +    headers.retain(|(name, val)| {
 +        if name.eq_ignore_ascii_case(SESSION_HEADER) {
-+            val.starts_with("ses_")
++            !is_legacy_uuid(val)
 +        } else {
 +            true
 +        }
@@ -396,11 +390,18 @@ Index: prime-agent-src/crates/pa-ai/src/providers/opencode_session.rs
 +
 +    #[test]
 +    fn headers_only_for_opencode_providers_and_never_twice() {
-+        assert!(session_headers("anthropic", Some("s")).is_empty());
-+        assert!(!session_headers("opencode-go", None).is_empty());
++        let mut non_opencode = Vec::new();
++        push_session_headers(&mut non_opencode, "anthropic", Some("s"));
++        assert!(non_opencode.is_empty());
++        let mut opencode_go = Vec::new();
++        push_session_headers(&mut opencode_go, "opencode-go", None);
++        assert!(!opencode_go.is_empty());
 +        let mut headers = vec![("X-OpenCode-Session".to_string(), "ses_valid0123456789".to_string())];
 +        push_session_headers(&mut headers, "opencode", Some("s"));
 +        assert_eq!(headers[0].1, "ses_valid0123456789");
++        let mut pinned = vec![("X-OpenCode-Session".to_string(), "pinned".to_string())];
++        push_session_headers(&mut pinned, "opencode", Some("s"));
++        assert_eq!(pinned[0].1, "pinned");
 +        assert!(headers.iter().any(|(k, _)| k == "x-opencode-session-id"));
 +        assert!(headers.iter().any(|(k, _)| k == "x-opencode-client"));
 +        assert_eq!(
@@ -512,3 +513,75 @@ Index: prime-agent-src/crates/pa-core/src/models/registry.rs
          let provider_headers = provider_config
              .as_ref()
              .and_then(|config| config.headers.clone());
+Index: prime-agent-src/crates/pa-ai/tests/opencode_session.rs
+===================================================================
+--- prime-agent-src.orig/crates/pa-ai/tests/opencode_session.rs
++++ prime-agent-src/crates/pa-ai/tests/opencode_session.rs
+@@ -68,6 +68,7 @@
+ 
+ #[tokio::test]
+ async fn opencode_session_identity_reaches_every_transport_without_cache_retention() {
++    let mut expected_suffix: Option<String> = None;
+     for api in [
+         "openai-completions",
+         "openai-responses",
+@@ -75,20 +76,50 @@
+         "google-generative-ai",
+     ] {
+         let headers = capture(api, "opencode-go", "conversation", None).await;
+-        assert_eq!(
++        let sessions = headers
++            .iter()
++            .filter(|(name, _)| name == "x-opencode-session")
++            .map(|(_, value)| value.as_str())
++            .collect::<Vec<_>>();
++        assert_eq!(sessions.len(), 1, "{api}: expected 1 session header, got {sessions:?}");
++        assert!(sessions[0].starts_with("ses_"), "{api}: session id {sessions:?} does not start with ses_");
++        assert_eq!(sessions[0].len(), 30, "{api}: session id length must be 30");
++        assert!(
+             headers
+                 .iter()
+-                .filter(|(name, _)| name == "x-opencode-session")
+-                .map(|(_, value)| value.as_str())
+-                .collect::<Vec<_>>(),
+-            vec!["conversation"],
+-            "{api}"
+-        );
+-        assert!(
+-            headers.contains(&("user-agent".into(), "prime-agent".into())),
++                .any(|(name, value)| name == "user-agent" && value.contains("opencode")),
+             "{api}: {headers:?}"
+         );
++        let suffix = sessions[0][16..].to_string();
++        if let Some(expected) = &expected_suffix {
++            assert_eq!(&suffix, expected, "{api}: session suffix must remain stable across transports");
++        } else {
++            expected_suffix = Some(suffix);
++        }
+     }
++    let repeat = capture("openai-completions", "opencode-go", "conversation", None).await;
++    let repeat_suffix = repeat
++        .iter()
++        .find(|(name, _)| name == "x-opencode-session")
++        .map(|(_, value)| &value[16..])
++        .unwrap();
++    assert_eq!(
++        repeat_suffix,
++        expected_suffix.as_deref().unwrap(),
++        "same session id must produce identical suffix on repeated calls"
++    );
++
++    let other = capture("openai-completions", "opencode-go", "different-session", None).await;
++    let other_suffix = other
++        .iter()
++        .find(|(name, _)| name == "x-opencode-session")
++        .map(|(_, value)| &value[16..])
++        .unwrap();
++    assert_ne!(
++        other_suffix,
++        expected_suffix.as_deref().unwrap(),
++        "different session ids must produce different session suffixes"
++    );
+ }
+ 
+ #[tokio::test]
