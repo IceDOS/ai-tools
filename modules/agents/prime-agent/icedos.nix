@@ -64,9 +64,6 @@
         # Plain-text rules (name = markdown), each appended to the system prompt every turn.
         rules = mkAttrsOfOption { default = extensions.rules; } types.lines;
 
-        # Fire peon-ping on session start, prompt submit and turn end (settings `hooks`).
-        peonPing = mkBoolOption { default = extensions.peonPing; };
-
         context-window-cap = {
           # Install the context-cap extension.
           enable = mkBoolOption { default = extensions.context-window-cap.enable; };
@@ -422,9 +419,6 @@
           };
           primeAgentUsers = prime-agent.users;
 
-          # peon-ping is a standalone module and may not be loaded at all.
-          peonPingEnabled = (config.icedos.ai-tools.peon-ping.users or { }) != { };
-
           # alimit is a standalone module; its rows follow each user's statusLine switch.
           alimitStatusFor = name: config.icedos.ai-tools.alimit.users.${name}.statusLine or false;
 
@@ -669,9 +663,7 @@
                       stripped
                   );
                 rulesText = lib.concatStringsSep "\n\n" (
-                  lib.attrValues (
-                    sharedRules // prime-agent.extensions.rules
-                  )
+                  lib.attrValues (sharedRules // prime-agent.extensions.rules)
                 );
                 # home.file keys are $HOME-relative; only in-home dataDirs work (asserted below).
                 relDataDir = lib.removePrefix (config.home.homeDirectory + "/") dataDir;
@@ -742,8 +734,7 @@
                     # Reserved up front so derived ports bump around pins; double pins fail below.
                     pinnedUsed = lib.listToAttrs (
                       map (p: lib.nameValuePair (toString p) true) (
-                        [ opencodeBridgePort ]
-                        ++ (lib.attrValues prime-agent.settings.ports.overrides)
+                        [ opencodeBridgePort ] ++ (lib.attrValues prime-agent.settings.ports.overrides)
                       )
                     );
 
@@ -780,7 +771,8 @@
                         name = "opencode-bridge";
                         p = opencodeBridgePort;
                       }
-                    ] ++ (lib.mapAttrsToList (name: p: { inherit name p; }) portsByServer);
+                    ]
+                    ++ (lib.mapAttrsToList (name: p: { inherit name p; }) portsByServer);
                   in
                   lib.filter (e: 1 < lib.length (lib.filter (o: o.p == e.p) entries)) entries;
 
@@ -941,22 +933,13 @@
                     terminal.speed = prime-agent.settings.speed;
                   }
                   // {
-                    # peon.sh reads Claude-style hook payloads on stdin.
                     hooks =
-                      let
-                        peon = [ "${config.home.homeDirectory}/.openpeon/peon.sh" ];
-                        merged =
-                          lib.optionalAttrs (prime-agent.extensions.peonPing && peonPingEnabled) {
-                            sessionStart = peon;
-                            agentStart = peon;
-                            agentEnd = peon;
-                            agentError = peon;
-                          }
-                          // lib.optionalAttrs (prime-agent.hooks.rateLimit != [ ]) {
-                            rateLimit = map (lib.filterAttrs (_: v: v != null)) prime-agent.hooks.rateLimit;
-                          };
-                      in
-                      if merged == { } then null else merged;
+                      if prime-agent.hooks.rateLimit == [ ] then
+                        null
+                      else
+                        {
+                          rateLimit = map (lib.filterAttrs (_: v: v != null)) prime-agent.hooks.rateLimit;
+                        };
                   }
                   // {
                     contextWindowPercent =
@@ -1463,7 +1446,9 @@
                       '';
                     }
                     {
-                      assertion = lib.all (hook: hook.command != [ ] && hook.providers != [ ]) prime-agent.hooks.rateLimit;
+                      assertion = lib.all (
+                        hook: hook.command != [ ] && hook.providers != [ ]
+                      ) prime-agent.hooks.rateLimit;
                       message = "Every icedos.ai-tools.prime-agent.hooks.rateLimit entry needs a non-empty command and providers.";
                     }
                     {

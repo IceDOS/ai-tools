@@ -15,7 +15,6 @@
         desktopEntry
         enableMcpIntegration
         extra-mcp-servers
-        peonPing
         rules
         skills
         statusLine
@@ -33,10 +32,6 @@
 
       # Additional MCP servers registered exclusively for Antigravity.
       extra-mcp-servers = mkAttrsOfOption { default = extra-mcp-servers; } lib.types.anything;
-
-      # Play peon-ping sounds for agy sessions (upstream antigravity watcher as a user service),
-      # for users with icedos.ai-tools.peon-ping configured.
-      peonPing = mkBoolOption { default = peonPing; };
 
       # Global rules, written to ~/.gemini/config/rules/<name>.md (agy reads that folder's top level only).
       rules = mkAttrsOfOption { default = rules; } lib.types.lines;
@@ -83,7 +78,6 @@
             desktopEntry
             enableMcpIntegration
             extra-mcp-servers
-            peonPing
             statusLine
             statusLineStackWithDefault
             terminal-title
@@ -92,23 +86,6 @@
           # Shared icedos.ai-tools entries first, so a same-named antigravity entry wins.
           rules = config.icedos.ai-tools.rules // config.icedos.ai-tools.antigravity.rules;
 
-          peonPingUsers = config.icedos.ai-tools.peon-ping.users or { };
-
-          # Upstream watcher already globs ~/.gemini/antigravity-cli; it needs python3 with watchdog.
-          peonWatcher =
-            peonPkg:
-            pkgs.writeShellApplication {
-              name = "peon-ping-antigravity";
-              runtimeInputs = [
-                (pkgs.python3.withPackages (p: [ p.watchdog ]))
-                pkgs.coreutils
-                pkgs.gnugrep
-                pkgs.procps
-              ];
-              text = ''
-                exec bash ${peonPkg}/share/peon-ping/adapters/antigravity-py.sh
-              '';
-            };
           skills = config.icedos.ai-tools.skills // config.icedos.ai-tools.antigravity.skills;
 
           inherit (lib)
@@ -216,25 +193,27 @@
                       else
                         { };
                   in
-                  (if (s.command or null) != null then
-                    {
-                      inherit (s) command;
-                    }
-                    // optionalAttrs ((s.args or [ ]) != [ ]) { inherit (s) args; }
-                    // optionalAttrs ((s.env or { }) != { }) {
-                      env = mapAttrs (_: v: if builtins.isAttrs v && v ? file then v.file else v) s.env;
-                    }
-                  else if (s.url or null) != null then
-                    {
-                      serverUrl = s.url;
-                    }
-                    // optionalAttrs ((s.headers or { }) != { }) { inherit (s) headers; }
-                  else if (s.serverUrl or null) != null then
-                    {
-                      inherit (s) serverUrl;
-                    }
-                  else
-                    s)
+                  (
+                    if (s.command or null) != null then
+                      {
+                        inherit (s) command;
+                      }
+                      // optionalAttrs ((s.args or [ ]) != [ ]) { inherit (s) args; }
+                      // optionalAttrs ((s.env or { }) != { }) {
+                        env = mapAttrs (_: v: if builtins.isAttrs v && v ? file then v.file else v) s.env;
+                      }
+                    else if (s.url or null) != null then
+                      {
+                        serverUrl = s.url;
+                      }
+                      // optionalAttrs ((s.headers or { }) != { }) { inherit (s) headers; }
+                    else if (s.serverUrl or null) != null then
+                      {
+                        inherit (s) serverUrl;
+                      }
+                    else
+                      s
+                  )
                   // timeoutAttrs;
 
                 mcpConfig = {
@@ -295,26 +274,6 @@
                       lib.optionalString (statusLineStackWithDefault || !statusLine) " --stack"
                     }
                   '';
-
-                  systemd.user.services.peon-ping-antigravity =
-                    mkIf (peonPing && peonPingUsers ? ${config.home.username})
-                      {
-                        Unit = {
-                          Description = "peon-ping sounds for Antigravity CLI";
-                          After = [ "graphical-session.target" ];
-                          PartOf = [ "graphical-session.target" ];
-                        };
-                        Service = {
-                          ExecStart = lib.getExe (peonWatcher config.programs.peon-ping.package);
-                          Environment = [
-                            "CLAUDE_PEON_DIR=%h/.openpeon"
-                            "PEON_DIR=%h/.openpeon"
-                          ];
-                          Restart = "on-failure";
-                          RestartSec = 5;
-                        };
-                        Install.WantedBy = [ "graphical-session.target" ];
-                      };
                 };
               }
             )

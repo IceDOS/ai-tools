@@ -14,7 +14,6 @@
         desktopEntry
         extra-settings
         includeInIcedosGc
-        peon-ping-overrides
         sessionRetentionDays
         skills
         ;
@@ -24,19 +23,6 @@
       desktopEntry = mkBoolOption { default = desktopEntry; };
 
       extra-settings = mkAttrsOfOption { default = extra-settings; } lib.types.anything;
-
-      # Merged on top of the resolved peon-ping user settings when generating
-      # ~/.config/opencode/peon-ping/config.json. The plugin's loadConfig()
-      # reads that file and merges it over its own DEFAULT_CONFIG, so writing
-      # only overrides would silently restore plugin defaults for every omitted
-      # key — therefore the module writes the *full* resolved config (base
-      # settings + overrides via recursiveUpdate, so every key here wins over
-      # the base). Keys recognised by the adapter:
-      # default_pack, active_pack, volume, enabled, desktop_notifications,
-      # pack_rotation, pack_rotation_mode, path_rules, exclude_dirs, ide_rules,
-      # mobile_notify, spam_threshold, spam_window_seconds, plus categories
-      # (deep-merged over the base map, not replaced).
-      peon-ping-overrides = mkAttrsOfOption { default = peon-ping-overrides; } lib.types.anything;
 
       skills = mkAttrsOfOption { default = skills; } lib.types.anything;
 
@@ -53,7 +39,7 @@
     };
 
   outputs.nixosModules =
-    { inputs, repoUrl, ... }:
+    { repoUrl, ... }:
     [
       (
         {
@@ -75,16 +61,12 @@
             desktopEntry
             extra-settings
             includeInIcedosGc
-            peon-ping-overrides
             sessionRetentionDays
             ;
 
           # Shared icedos.ai-tools entries first, so a same-named opencode skill wins.
           skills = config.icedos.ai-tools.skills // config.icedos.ai-tools.opencode.skills;
           inherit (config.icedos.ai-tools) rules;
-
-          peonPingUsers = config.icedos.ai-tools.peon-ping.users or { };
-          peonPingEnabled = peonPingUsers != { };
 
           # Pin sqlite3 for the prune; it's absent from the minimal gc PATH.
           sqlite = "${pkgs.sqlite}/bin/sqlite3";
@@ -209,56 +191,6 @@
                   ];
                 };
               }
-            )
-
-            (
-              {
-                config,
-                lib,
-                pkgs,
-                ...
-              }:
-
-              lib.mkIf peonPingEnabled (
-                let
-                  userCfg = peonPingUsers.${config.home.username} or null;
-
-                  baseSettings =
-                    if userCfg != null then
-                      {
-                        default_pack = userCfg.defaultPack;
-                        volume = userCfg.volume;
-                        desktop_notifications = userCfg.desktopNotifications;
-                        suppress_subagent_complete = userCfg.suppressSubagentComplete;
-                        silent_window_seconds = userCfg.silentWindowSeconds;
-                      }
-                      // lib.optionalAttrs (userCfg.categories or { } != { }) {
-                        categories = userCfg.categories;
-                      }
-                    else
-                      { };
-
-                  fullConfig = lib.recursiveUpdate baseSettings peon-ping-overrides;
-                in
-                {
-                  # Upstream plugin writes an OSC set-title escape to stdout with no
-                  # TTY guard. Harmless in the TUI, but under Zed's ACP mode opencode's
-                  # stdout is the JSON-RPC pipe, so the escape corrupts the stream and
-                  # Zed hangs at "loading…". Guard the write on an interactive TTY.
-                  xdg.configFile."opencode/plugins/peon-ping.ts".source =
-                    pkgs.runCommand "peon-ping-opencode.ts" { }
-                      ''
-                        substitute ${inputs.peon-ping}/adapters/opencode/peon-ping.ts "$out" \
-                          --replace-fail \
-                            'process.stdout.write(`\x1b]0;' \
-                            'if (process.stdout.isTTY) process.stdout.write(`\x1b]0;'
-                      '';
-
-                  xdg.configFile."opencode/peon-ping/config.json" = lib.mkIf (userCfg != null) {
-                    source = (pkgs.formats.json { }).generate "opencode-peon-ping.json" fullConfig;
-                  };
-                }
-              )
             )
           ];
 

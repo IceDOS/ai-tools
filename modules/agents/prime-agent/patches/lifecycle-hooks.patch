@@ -125,7 +125,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/lifecycle_hooks.rs
 +    }
 +}
 +
-+/// The payload shape Claude-Code-style hook scripts (peon-ping) read.
++/// The payload shape Claude-Code-style hook scripts read.
 +#[must_use]
 +pub fn hook_payload(
 +    event_name: &str,
@@ -268,18 +268,18 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/lifecycle_hooks.rs
 +    #[test]
 +    fn entries_resolve_with_default_and_overridden_event_names() {
 +        let hooks = LifecycleHooks::from_settings(&settings(serde_json::json!({
-+            "sessionStart": ["/bin/peon.sh"],
-+            "agentStart": [{ "command": ["/bin/peon.sh", "--quiet"], "eventName": "Prompt" }],
++            "sessionStart": ["/bin/hook.sh"],
++            "agentStart": [{ "command": ["/bin/hook.sh", "--quiet"], "eventName": "Prompt" }],
 +            "agentEnd": ["", { "command": [] }]
 +        })));
 +        assert_eq!(
 +            hooks.session_start,
 +            vec![HookCommand {
-+                argv: vec!["/bin/peon.sh".into()],
++                argv: vec!["/bin/hook.sh".into()],
 +                event_name: SESSION_START.into(),
 +            }]
 +        );
-+        assert_eq!(hooks.agent_start[0].argv, vec!["/bin/peon.sh", "--quiet"]);
++        assert_eq!(hooks.agent_start[0].argv, vec!["/bin/hook.sh", "--quiet"]);
 +        assert_eq!(hooks.agent_start[0].event_name, "Prompt");
 +        assert!(hooks.agent_end.is_empty(), "empty programs drop out");
 +        assert!(!hooks.is_empty());
@@ -300,7 +300,7 @@ Index: prime-agent-src/crates/pa-core/src/session_engine/lifecycle_hooks.rs
 +    }
 +
 +    #[test]
-+    fn payload_carries_the_peon_fields() {
++    fn payload_carries_the_hook_fields() {
 +        let payload = hook_payload("Stop", "/work", "0199-abc", Some("error"));
 +        assert_eq!(payload["hook_event_name"], "Stop");
 +        assert_eq!(payload["cwd"], "/work");
@@ -438,8 +438,8 @@ Index: prime-agent-src/crates/pa-core/src/settings/manager.rs
 +
 +        std::fs::write(
 +            agent_dir.join("settings.json"),
-+            r#"{ "hooks": { "sessionStart": ["/bin/peon.sh"],
-+                "agentEnd": [{ "command": ["/bin/peon.sh"], "eventName": "Stop" }] } }"#,
++            r#"{ "hooks": { "sessionStart": ["/bin/hook.sh"],
++                "agentEnd": [{ "command": ["/bin/hook.sh"], "eventName": "Stop" }] } }"#,
 +        )
 +        .unwrap();
 +        let manager = SettingsManager::create(&cwd, &agent_dir);
@@ -447,13 +447,13 @@ Index: prime-agent-src/crates/pa-core/src/settings/manager.rs
 +        assert_eq!(
 +            hooks.session_start,
 +            Some(vec![crate::settings::LifecycleHookEntry::Program(
-+                "/bin/peon.sh".into()
++                "/bin/hook.sh".into()
 +            )])
 +        );
 +        assert_eq!(
 +            hooks.agent_end,
 +            Some(vec![crate::settings::LifecycleHookEntry::Detailed {
-+                command: vec!["/bin/peon.sh".into()],
++                command: vec!["/bin/hook.sh".into()],
 +                event_name: Some("Stop".into()),
 +            }])
 +        );

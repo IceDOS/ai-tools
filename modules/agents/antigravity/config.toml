@@ -15,10 +15,6 @@ desktopEntry = false
 # into ~/.gemini/config/mcp_config.json for Antigravity.
 enableMcpIntegration = true
 
-# Play peon-ping sounds for agy sessions, for users with icedos.ai-tools.peon-ping configured.
-# Runs upstream's antigravity watcher as a systemd user service.
-peonPing = true
-
 # Antigravity CLI bottom status bar (/statusline), rendered by alimit like the other agents' bars;
 # configured via agy's own settings.json.
 statusLine = true

@@ -15,7 +15,7 @@
 
 ## Purpose
 AI agents, local model servers and their glue: `claude-code`, `antigravity`, `opencode`, `prime-agent`
-(agents), `llamacpp`, `ollama` (model servers), `peon-ping` (agent-event audio),
+(agents), `llamacpp`, `ollama` (model servers),
 `mcp-server` (`icedos mcp serve`), one module per MCP server (`aws-mcp`, `basic-memory-mcp`,
 `chrome-devtools-mcp`, `context7-mcp`, `ddev-mcp`, `kwin-mcp`, `nixos-mcp`, `opencart-mcp`, `pagespeed-insights-mcp`, `plesk-mcp`, `rea-mcp`,
 `signal-mcp`), `alimit` (usage limits for every agent and provider),
@@ -32,7 +32,7 @@ attrset per module (`icedos.ai-tools.prime-agent`, ...).
 `meta.name` (not the folder) names the module. The categories are `agents` (antigravity,
 claude-code, opencode, prime-agent), `models` (llamacpp, ollama), `mcp` (one folder per MCP server: icedos-mcp, whose module name is `mcp-server`, and
 aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pagespeed-insights, plesk, rea, signal, each named
-`<folder>-mcp` except `kwin-mcp`; `mcp/lib` holds their shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence, peon-ping).
+`<folder>-mcp` except `kwin-mcp`; `mcp/lib` holds their shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence).
 `modules/default` loads whenever the repo is listed and owns the shared options.
 
 ## Shared options (`icedos.ai-tools.*`)
@@ -48,7 +48,7 @@ aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pages
 - Per-agent options of the same name win over the shared entry
   (`antigravity.{rules,skills}`, `opencode.skills`, `prime-agent.extensions.rules`,
   `prime-agent.skills.extra-builtin`).
-- Non-agent modules (`llamacpp`, `ollama`, `peon-ping` and the `mcp` modules) have a `skills`
+- Non-agent modules (`llamacpp`, `ollama` and the `mcp` modules) have a `skills`
   option that adds to `icedos.ai-tools.skills`, so a skill ships with the module it documents.
 - `icedos.ai-tools.mcp-servers` — name = `programs.mcp.servers` entry. `default` gives every hm
   user these servers (mkDefault per entry, so a same-named `programs.mcp.servers` entry wins),
@@ -103,11 +103,6 @@ Point this repo's `overrideUrl` at the local checkout in the config root
 (`path:/home/ice/Projects/icedos/ai-tools`), then `icedos rebuild --build`.
 
 ## Notable modules / gotchas
-- `peon-ping` — Warcraft-peon-style agent-event audio. **Standalone** module: owns
-  `icedos.ai-tools.peon-ping.users.<name>` (self-materialised via `genDefaults`).
-  Claude Code integration is upstream's own `programs.peon-ping.claudeCodeIntegration`
-  (per-user opt-in, `claudeCodeIntegration = true`), and `opencode` consumes the user
-  settings for its own peon plugin. See core's *Per-user (`users`) options*.
 - `prime-agent` — mirrors the bundled models.dev catalog into `models.json`. Only models in
   that snapshot show up today (it lags upstream). To add a newly released model without waiting
   for a prime-agent bump, define it under `icedos.ai-tools.prime-agent.settings.providers.<name>.models`:
@@ -125,8 +120,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
     `[[icedos.ai-tools.claude-code.users.<name>.marketplaces]]` with a `source` enum
     (`fetchFromGitHub`/`fetchFromGitLab`/`fetchgit`/`path`) and that source's fields.
     `path` is copied into the store at eval time, and pure eval forbids host paths there.
-  - It declares no hooks. peon-ping registers its own via
-    `icedos.ai-tools.peon-ping.users.<u>.claudeCodeIntegration`.
+  - It declares no hooks.
 - `ai-accounts` — **standalone** module that owns `icedos.ai-tools.ai-accounts.users.<name>`
   (self-materialised via `genDefaults`). `ai-account exec <agent> --` picks an account (flag,
   `AI_ACCOUNT_<AGENT>`, sticky, alimit headroom, `default`) and execs the real binary with

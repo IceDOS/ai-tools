@@ -32,9 +32,6 @@ inline = {}
 # Plain-text rules, name = markdown, written together to <dataDir>/APPEND_SYSTEM.md and appended to every session's system prompt.
 rules = {}
 
-# Fire peon-ping on session start, prompt submit and turn end (settings `hooks`).
-peonPing = true
-
 [icedos.ai-tools.prime-agent.extensions.context-window-cap]
 enable = false
 # Cap every model's contextWindow at this percentage of its native context (1-99).
