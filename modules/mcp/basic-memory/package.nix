@@ -13,6 +13,17 @@ let
 
     # basic-memory pins an exact FastMCP release; update.sh follows that pin.
     extraOverrides = final: prev: {
+      # CVE-2026-119716 has no upstream fix; the patch escapes the [...] segments it injects through.
+      pybars3 = prev.pybars3.overridePythonAttrs (old: {
+        patches = (old.patches or [ ]) ++ [ ./pybars3-escape-path-segments.patch ];
+        meta = old.meta // {
+          # Clears only this CVE, so a later one still stops the build.
+          knownVulnerabilities = builtins.filter (v: !pkgs.lib.hasPrefix "CVE-2026-119716" v) (
+            old.meta.knownVulnerabilities or [ ]
+          );
+        };
+      });
+
       fastmcp-slim = final.mkWheel {
         pname = "fastmcp-slim";
         inherit (source.fastmcp-slim) version url hash;

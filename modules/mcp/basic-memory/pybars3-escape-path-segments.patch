@@ -1,0 +1,8 @@
+--- a/pybars/_compiler.py
++++ b/pybars/_compiler.py
+@@ -117,3 +117,3 @@
+ partialname ::= <subexpression>:s => s
+     | ~<alt_inner> ('['|'"')? (~(<space>|<finish>|']'|'"' ) <anything>)+:symbol (']'|'"')? => ('literalparam', '"' + u''.join(symbol) + '"')
+-pathseg ::= '[' <notclosebracket>+:symbol ']' => u''.join(symbol)
++pathseg ::= '[' <notclosebracket>+:symbol ']' => u''.join(symbol).encode('unicode_escape').decode('ascii').replace("'", "\\'").replace('"', '\\"')
+     | ('@' '.' '.' '/') => u'@@_parent'
