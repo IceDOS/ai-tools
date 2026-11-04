@@ -1,12 +1,12 @@
 {
   "proxy": {
-    "version": "1.7.0",
-    "rev": "22f1b3f8b7c4ef37112114b4af3d6c5a6c0a83bb",
-    "hash": "sha256-nYTa/a5UI9p1ZAqfTDJ8r909YNsIbWevPMhVn9ysyNg="
+    "version": "1.8.0",
+    "rev": "a5dd25e0ad99d0d874f2b779435b12b10932eae7",
+    "hash": "sha256-kB13sqkZQ7m5jZvkozABSXqXkDbChOT/MJc3UOHy9fk="
   },
   "toolkit": {
-    "version": "0-unstable-2026-11-03",
-    "rev": "bb650731099fcc5be4df00f76df1d0701273fed6",
-    "hash": "sha256-w8eV66/VLLi2Pr+Wyg9E/B8xVHhLLP0BLJYGkrGWtwg="
+    "version": "0-unstable-2026-11-04",
+    "rev": "b2a94d85e6673f54511df0b5d78b82b0e716d73b",
+    "hash": "sha256-pCFqu5U7PaorSVn2lDXVbAsSVOeJA6CXay6q9wZEepo="
   }
 }
