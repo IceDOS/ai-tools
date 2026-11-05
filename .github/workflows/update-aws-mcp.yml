@@ -15,4 +15,6 @@ jobs:
       paths: modules/mcp/aws
       command: nix-shell modules/mcp/aws/update.sh
       version-file: modules/mcp/aws/source.json
+      # Two pins, no top-level version: the default .version filter titled commits null -> null.
+      version-jq: '.proxy.version + "/" + .toolkit.version'
     secrets: inherit
