@@ -145,6 +145,9 @@ def _link_weekly(rlist, rows_of):
     """Tag each weekly window with how much of its 5h window 1% of it costs."""
     by = {r.window: i for i, r in enumerate(rlist)}
     for short in rlist:
+        # Reset with no sample since and stale: the provider stopped reporting this window.
+        if short.reset_ts is None and short.stale:
+            continue
         for key in config.weekly_of(short.window):
             if key not in by:
                 continue

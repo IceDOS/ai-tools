@@ -67,6 +67,18 @@ class TestCollect(unittest.TestCase):
         self.assertIsNone(got["five_hour"].exchange)
         self.assertAlmostEqual(cli.cross_metric(list(got.values()))["session_pct_per_weekly_pct"], 10.0)
 
+    def test_no_exchange_once_short_window_stops_reporting(self):
+        h = 3_600_000
+        short_reset = "1970-01-01T05:00:00+00:00"
+        weekly_reset = "2999-01-01T00:00:00+00:00"
+        for ts, fh, wk in ((0, 0.0, 10.0), (h, 20.0, 12.0), (2 * h, 40.0, 14.0)):
+            store.record(self.con, ts, {"five_hour": {"util": fh, "resets_at": short_reset},
+                                        "seven_day": {"util": wk, "resets_at": weekly_reset}}, "poll")
+        store.record(self.con, 24 * h, {"seven_day": {"util": 20.0, "resets_at": weekly_reset}}, "poll")
+        got = {r.window: r for r in cli.collect(self.con, 24 * h)}
+        self.assertIsNone(got["seven_day"].exchange)
+        self.assertIsNone(cli.cross_metric(list(got.values())))
+
     def test_provider_weekly_is_paced(self):
         h = 3_600_000
         reset = "1970-01-08T00:00:00+00:00"  # opened at t=0
