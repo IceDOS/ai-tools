@@ -3,8 +3,8 @@
 Python mirror of ``core/lib/config/config-files.nix`` and
 ``load-user-config.nix`` — KEEP THEM IN SYNC. The load order (config.toml, then
 every ``*.toml`` under the ``icedos.system.extraConfigs`` dirs recursively,
-sorted by relative path), inclusion of hidden ``.*.toml``, the top-level
-``enable = false`` opt-out, and the strict merge (tables recurse, lists
+sorted by top-level ``order`` then relative path), inclusion of hidden ``.*.toml``,
+the top-level ``enable = false`` opt-out, and the strict merge (tables recurse, lists
 concatenate, the same scalar in two files is an error) must match core, or the
 server's view will drift from what the system actually builds.
 
@@ -28,6 +28,8 @@ from .config_path import APPEND
 # Sandbox-only file holding repo overrideUrls set through the MCP. Core loads it
 # like any config file; edits never target it and sandbox diffs leave it out.
 OVERRIDES_FILE = ".icedos-mcp-overrides.toml"
+
+DEFAULT_ORDER = 1000
 
 
 def _read(path: Path) -> dict[str, Any]:
@@ -83,11 +85,29 @@ def all_config_tomls(root: Path) -> list[Path]:
     return files
 
 
+def _order(path: Path) -> int:
+    doc = _read(path)
+    order = doc.get("order", DEFAULT_ORDER)
+    if isinstance(order, int) and not isinstance(order, bool):
+        return order
+    # Core filters disabled files out before it reads their order.
+    if doc.get("enable") is False:
+        return DEFAULT_ORDER
+    raise ValueError(f"top-level 'order' in '{path}' must be an integer")
+
+
+def config_tomls_in_load_order(root: Path) -> list[Path]:
+    """all_config_tomls() in core's load order. Parses every file, so a broken one raises."""
+    main = root / "config.toml"
+    # sorted() is stable, like core's sort, so equal orders keep path order.
+    return sorted(all_config_tomls(root), key=lambda p: (p != main, _order(p)))
+
+
 def list_config_files(root: Path) -> list[Path]:
     """Ordered config files that core loads: ``config.toml`` (optional, never
     gated) then every extra ``*.toml`` whose top-level ``enable`` is not ``false``."""
     files = []
-    for p in all_config_tomls(root):
+    for p in config_tomls_in_load_order(root):
         if p.name == "config.toml" and p.parent == root or _read(p).get("enable") is not False:
             files.append(p)
     return files
@@ -98,8 +118,8 @@ def writable_files(root: Path) -> list[Path]:
     return [f for f in list_config_files(root) if f.name != OVERRIDES_FILE]
 
 
-def _strip_enable(d: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in d.items() if k != "enable"}
+def _strip_loader_keys(d: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in d.items() if k not in ("enable", "order")}
 
 
 def _merge_strict(a: dict[str, Any], b: dict[str, Any], rel: str, path: list[str]) -> dict[str, Any]:
@@ -127,7 +147,7 @@ def merged_config(root: Path) -> dict[str, Any]:
     """The merged config core builds from, or a ValueError where core would throw."""
     result: dict[str, Any] = {}
     for f in list_config_files(root):
-        result = _merge_strict(result, _strip_enable(_read(f)), f.relative_to(root).as_posix(), [])
+        result = _merge_strict(result, _strip_loader_keys(_read(f)), f.relative_to(root).as_posix(), [])
     return result
 
 
@@ -178,7 +198,7 @@ class Located:
 
 
 def locate(root: Path, tokens: list[Any]) -> Located:
-    nodes: list[tuple[Path, Any]] = [(f, _strip_enable(_read(f))) for f in writable_files(root)]
+    nodes: list[tuple[Path, Any]] = [(f, _strip_loader_keys(_read(f))) for f in writable_files(root)]
     local: list[Any] = []
     for i, tok in enumerate(tokens):
         if tok is APPEND:

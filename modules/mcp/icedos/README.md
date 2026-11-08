@@ -39,7 +39,7 @@ blank line between blocks to match the hand-written style.
 
 ### Tools (50)
 
-**Config**. The user config is the merged set of `config.toml` and every `*.toml` under `icedos.system.extraConfigs` (default `configs/`), recursively and sorted by path, like core. Hidden `configs/.*.toml` load too but are gitignored. A file opts out with top-level `enable = false`. The server merges like core: tables recurse, arrays concatenate, and a scalar set in two files is an error. A broken TOML file is an error, not skipped. Every `extraConfigs` entry must be a relative dir inside the config root.
+**Config**. The user config is the merged set of `config.toml` and every `*.toml` under `icedos.system.extraConfigs` (default `configs/`), recursively and sorted by top-level `order` (default 1000, lower first) then path, like core. Hidden `configs/.*.toml` load too but are gitignored. A file opts out with top-level `enable = false`. The server merges like core: tables recurse, arrays concatenate, and a scalar set in two files is an error. A broken TOML file is an error, not skipped. Every `extraConfigs` entry must be a relative dir inside the config root.
 
 Paths read the merged view. A write lands in the file that declares the key, and a new key goes next to its nearest existing parent, else `config.toml`. `[N]` counts items across every file that adds to the array and edits the file holding item N. A final `[]` appends to the last file holding the array. Keys with dots go in quotes, e.g. `environment.etc."foo.conf".text`. A `file=` argument forces one file, and indices are then local to it.
 

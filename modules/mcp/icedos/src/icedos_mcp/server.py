@@ -1826,7 +1826,8 @@ async def list_config_files() -> str:
     """Every config file in load order, with whether core loads it.
 
     config.toml first, then each *.toml under the extraConfigs dirs sorted by
-    path. A file with top-level `enable = false` is listed with loaded=false.
+    top-level `order` (default 1000), then path. A file with top-level
+    `enable = false` is listed with loaded=false.
     """
     try:
         root = find_config_root()
@@ -1837,7 +1838,7 @@ async def list_config_files() -> str:
                 "loaded": p in loaded,
                 "managed_by_server": p.name == config_files.OVERRIDES_FILE,
             }
-            for p in config_files.all_config_tomls(root)
+            for p in config_files.config_tomls_in_load_order(root)
         ]
         return json.dumps(rows, indent=2)
     except Exception as e:

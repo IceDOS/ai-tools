@@ -140,6 +140,27 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("enable = false", note)
         asyncio.run(server.set_config_file_enabled("configs/extra.toml", True))
         self.assertNotIn("enable", self.read("configs/extra.toml"))
+
+    def test_order_key_sorts_extra_files_like_core(self) -> None:
+        (self.root / "configs" / "early.toml").write_text('order = 500\n\n[icedos.system]\npackages = ["e"]\n')
+        (self.root / "configs" / "earliest.toml").write_text('order = 400\n\n[icedos.system]\npackages = ["f"]\n')
+        expected = ["config.toml", "configs/earliest.toml", "configs/early.toml", "configs/extra.toml"]
+        files = [p.relative_to(self.root).as_posix() for p in config_files.list_config_files(self.root)]
+        self.assertEqual(files, expected)
+        merged = config_files.merged_config(self.root)
+        self.assertEqual(merged["icedos"]["system"]["packages"], ["a", "b", "f", "e", "c", "d"])
+        self.assertNotIn("order", merged)
+        rows = json.loads(asyncio.run(server.list_config_files()))
+        self.assertEqual([r["file"] for r in rows], expected)
+
+    def test_bad_order_raises_unless_file_is_disabled(self) -> None:
+        bad = self.root / "configs" / "bad.toml"
+        bad.write_text('enable = false\norder = "high"\n')
+        config_files.merged_config(self.root)
+        bad.write_text('order = "high"\n')
+        with self.assertRaisesRegex(ValueError, "must be an integer"):
+            config_files.list_config_files(self.root)
+
     def test_config_root_needs_mkicedos(self) -> None:
         repo = Path(self._tmp.name) / "repo"
         (repo / "modules").mkdir(parents=True)
