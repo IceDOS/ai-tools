@@ -1,0 +1,144 @@
+[icedos.ai-tools.pi-agent]
+# Install a desktop entry that runs pi in the default terminal (Terminal=true).
+desktopEntry = false
+
+# Whether `icedos gc` prunes old pi sessions and pi-rlm snapshots.
+includeInIcedosGc = false
+
+# `icedos gc` prunes those older than this many days.
+sessionRetentionDays = 30
+
+# name = markdown, written with the shared icedos.ai-tools.rules to <dataDir>/APPEND_SYSTEM.md. A name here wins.
+rules = {}
+
+# pi packages pi installs at startup and lists in settings.json, e.g. "npm:pi-freeflow@1.44.1".
+# An exact @version stops pi from updating it. Entries you add with `pi install` stay.
+packages = []
+
+# Seeded defaultProvider/defaultModel in settings.json; empty keeps pi's choice.
+[icedos.ai-tools.pi-agent.default]
+model = ""
+provider = ""
+
+[icedos.ai-tools.pi-agent.skills]
+# Ship the code-review skill: reviewer children per dimension, then an adversarial verify pass.
+# Needs extensions.recursive-language-models, with maxDepth at least 2.
+codeReview = false
+# Extra skill directories listed in settings.json `skills`.
+dirs = []
+
+# name = full SKILL.md, added to the shared icedos.ai-tools.skills. A name here wins.
+extra-builtin = {}
+
+[icedos.ai-tools.pi-agent.settings]
+# "" means $XDG_CONFIG_HOME/pi-agent; $XDG_CONFIG_HOME, $XDG_DATA_HOME, $HOME and ~ expand per user.
+dataDir = ""
+
+# Per-request MCP timeout in seconds for every mcp.json server; pi's own default is 60.
+mcpCallTimeout = 900
+
+# Providers merged into models.json; each named provider is replaced whole on activation.
+providers = {}
+
+# Raw keys merged into settings.json on activation.
+extra = {}
+
+[icedos.ai-tools.pi-agent.hooks]
+# Commands run when a listed provider fails; exit 0 makes pi retry the request. Each entry:
+# command (argv, gets a JSON payload on stdin), providers, errorKinds (rate_limit, usage_limit,
+# not_found, timeout; default ["rate_limit"]) and timeoutMs (0 means 120000).
+rateLimit = []
+
+[icedos.ai-tools.pi-agent.extensions]
+# pi example extensions to load, by name under pi's examples/extensions/.
+builtin = ["todo", "git-checkpoint", "confirm-destructive", "status-line"]
+# Registers the opencode-free provider: OpenCode Zen's free models through a Bun transport.
+opencodeFree = false
+
+# name = TypeScript source, loaded after the shipped extensions. Modules add theirs here.
+inline = {}
+
+[icedos.ai-tools.pi-agent.extensions.context-window-cap]
+# Cap every model's contextWindow at this percent of its native context.
+# Skips llamacpp and models with a contextWindow override in models.json.
+enable = false
+percent = 30
+
+[icedos.ai-tools.pi-agent.extensions.vpn-rotate]
+# Rotates the ProtonVPN server and retries when a listed provider rate-limits, and shows the
+# server in a status row. Installs proton-vpn-cli; needs a signed-in Proton account and an active tunnel.
+enable = false
+# Providers whose limit follows the egress IP; an account-keyed quota survives a rotation.
+providers = ["opencode-free"]
+# Country codes to rotate through; empty uses every country.
+countries = []
+# No rotation within this many seconds of the last one, from any session.
+cooldownSeconds = 600
+# At most this many rotations in any hour.
+maxPerHour = 3
+
+[icedos.ai-tools.pi-agent.extensions.ghost-text]
+# pi-ghost-text-x: inline prompt suggestions; adds /suggest and /suggest-model.
+enable = true
+# Exact npm version to pin, e.g. "1.0.0"; "" installs the newest release once.
+version = ""
+
+[icedos.ai-tools.pi-agent.extensions.session-name]
+# pi-session-name: names each session with the active model and shows it in the terminal title.
+enable = true
+# Exact npm version to pin, e.g. "0.1.7"; "" installs the newest release once.
+version = ""
+
+[icedos.ai-tools.pi-agent.extensions.context-language-models]
+# pi-clm: the model curates its own context. pi installs it as a package. Empty strings keep pi-clm's defaults.
+enable = false
+# Exact npm version to pin, e.g. "1.0.0"; "" installs the newest release once.
+version = ""
+budget = ""
+reserve = ""
+remindAt = ""
+observationCap = ""
+# Steering brief path; "" uses steering/house-brief.md from the installed package, "none" turns it off.
+steering = ""
+overflow = "withhold"
+estimateFactor = ""
+oneToolPerTurn = false
+sizeTrailer = false
+nativeCompaction = "auto"
+compactPrompt = ""
+
+[icedos.ai-tools.pi-agent.extensions.recursive-language-models]
+# pi-rlm: an ipython tool whose rlm(prompt, context) runs a child pi agent; adds /rlm and /refine.
+enable = false
+# Exact npm version to pin, e.g. "0.2.0"; "" installs the newest release once.
+version = ""
+# rlm() recursion limit, exported as PI_RLM_MAX_DEPTH; 0 turns recursion off.
+maxDepth = 2
+
+[icedos.ai-tools.pi-agent.extensions.meters]
+# cost-footer: live session cost and token totals below the editor; /cost toggles it.
+cost = true
+# Output tok/s per response and the session average in the cost footer; /speed toggles it.
+speed = true
+
+[icedos.ai-tools.pi-agent.extensions.meters.power]
+# Meter GPU electricity for locally served models in the cost footer. Needs meters.cost.
+# With kde's vigor module, an unset currency, rateKwh, idleWatts or windows uses vigor's value.
+enable = false
+
+# DRM card ("card1"); "" autodetects the first GPU with an average-power sensor.
+card = ""
+
+# Price per kWh in `currency`. Must be > 0 when enabled.
+rateKwh = 0
+
+# Idle draw subtracted from each sample, so the meter reports the marginal cost.
+idleWatts = 0
+
+currency = ""
+
+# Providers served by the local GPU; llamacpp adds itself.
+providers = []
+
+# Rolling windows: a positive integer plus s, m, h, d, w or M. Empty uses 1h, 24h, 7d, 30d.
+windows = []

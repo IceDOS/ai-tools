@@ -16,14 +16,14 @@ PROVIDERS = {
     "antigravity": ("antigravity",),
     "ollama": ("ollama",),
     "opencode": ("opencode-go", "openrouter"),
-    "prime-agent": ("opencode-go", "openrouter"),
+    "pi-agent": ("opencode-go", "openrouter"),
 }
 
 
 def tag(agent: str, name: str) -> str:
     if name == "default":
         return "default"
-    return f"{agent}.{name}" if agent in ("opencode", "prime-agent") else name
+    return f"{agent}.{name}" if agent in ("opencode", "pi-agent") else name
 
 
 def _headroom(cfg, agent, eligible):
@@ -237,9 +237,9 @@ def cmd_doctor(args) -> int:
             if agent == "claude":
                 problems += mirror.check(config.Path(real), a.dir, adapters.CLAUDE_PRIVATE,
                                              seed=adapters.CLAUDE_SEED)
-            elif agent == "prime-agent":
-                problems += mirror.check(config.Path(real), a.dir, adapters.PRIME_PRIVATE,
-                                             seed=adapters.PRIME_SEED)
+            elif agent == "pi-agent":
+                problems += mirror.check(config.Path(real), a.dir, adapters.PI_PRIVATE,
+                                             seed=adapters.PI_SEED)
             elif agent == "antigravity":
                 home = a.dir / "home"
                 problems += mirror.check(config.Path(real), home, skip={".gemini"})

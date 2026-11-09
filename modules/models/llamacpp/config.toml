@@ -7,8 +7,8 @@ priorityUsers = []
 
 service = false
 
-# Starts the server when prime-agent uses its model and stops it after `idle` seconds of idle /slots.
-# Needs the prime-agent module and settings.model.path.
+# Starts the server when pi-agent uses its model and stops it after `idle` seconds of idle /slots.
+# Needs the pi-agent module and settings.model.path.
 [icedos.ai-tools.llamacpp.lifecycle]
 enable = true
 
@@ -46,7 +46,7 @@ path = ""
 # Whether the model emits reasoning content.
 reasoning = true
 
-# Maps prime-agent thinking levels to the reasoning_effort this model accepts; unmapped levels pass through.
+# Maps agent thinking levels to the reasoning_effort this model accepts; unmapped levels pass through.
 [icedos.ai-tools.llamacpp.settings.model.thinking-level-map]
 
 # llama.cpp --prio (-1 to 3) and --prio-batch (0 to 3).

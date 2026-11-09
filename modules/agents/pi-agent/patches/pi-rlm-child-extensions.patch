@@ -1,0 +1,91 @@
+--- package/src/child.ts	1985-10-26 10:15:00.000000000 +0200
++++ package/src/child.ts	2026-11-11 04:50:24.576015589 +0200
+@@ -56,6 +56,34 @@
+ 	signal?: AbortSignal;
+ }
+ 
++const ESSENTIAL_EXTENSIONS = [
++	"opencode-free",
++	"context-cap",
++	"alimit",
++	"llamacpp-lifecycle",
++];
++
++export function coreChildExtensions(): string[] {
++	if (process.env.PI_RLM_EXTENSIONS) {
++		return process.env.PI_RLM_EXTENSIONS.split(path.delimiter)
++			.map((s) => s.trim())
++			.filter(Boolean);
++	}
++	const configDir = process.env.PI_CONFIG_DIR || path.join(process.env.HOME || "", ".config", "pi-agent");
++	const settingsPath = path.join(configDir, "settings.json");
++	if (!fs.existsSync(settingsPath)) return [];
++	try {
++		const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
++		const exts: string[] = Array.isArray(settings?.extensions) ? settings.extensions : [];
++		return exts.filter((extPath) => {
++			const base = path.basename(extPath);
++			return ESSENTIAL_EXTENSIONS.some((name) => base.includes(name));
++		});
++	} catch {
++		return [];
++	}
++}
++
+ export function emptyUsage(): Usage {
+ 	return {
+ 		input: 0,
+@@ -208,6 +236,7 @@
+ 		};
+ 	}
+ 
++	const coreExts = coreChildExtensions().filter((p) => p !== opts.extensionPath);
+ 	const args = [
+ 		"--mode",
+ 		"json",
+@@ -218,10 +247,15 @@
+ 		// …except this one, which re-enables rlm() for deeper recursion.
+ 		"-e",
+ 		opts.extensionPath,
++	];
++	for (const ext of coreExts) {
++		args.push("-e", ext);
++	}
++	args.push(
+ 		"--rlm",
+ 		"--rlm-max-depth",
+ 		String(opts.maxDepth),
+-	];
++	);
+ 	if (opts.model) args.push("--model", opts.model);
+ 	args.push(opts.prompt);
+ 
+--- package/src/refine.ts	1985-10-26 10:15:00.000000000 +0200
++++ package/src/refine.ts	2026-11-11 04:01:16.882226205 +0200
+@@ -20,7 +20,7 @@
+ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+ import { dirname } from "node:path";
+ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+-import { runPiJson } from "./child.ts";
++import { runPiJson, coreChildExtensions } from "./child.ts";
+ 
+ export type HarnessKind = "memory" | "prompt";
+ export type HarnessScope = "local" | "global";
+@@ -291,6 +291,7 @@
+ 	cwd: string;
+ 	signal?: AbortSignal;
+ }): Promise<RunRefinementResult> {
++	const coreExts = coreChildExtensions();
+ 	const args = [
+ 		"--mode",
+ 		"json",
+@@ -299,6 +300,9 @@
+ 		"--no-extensions",
+ 		"--no-builtin-tools", // pure analysis: fast and cheap
+ 	];
++	for (const ext of coreExts) {
++		args.push("-e", ext);
++	}
+ 	if (opts.model) args.push("--model", opts.model);
+ 	args.push(
+ 		buildRefinePrompt({

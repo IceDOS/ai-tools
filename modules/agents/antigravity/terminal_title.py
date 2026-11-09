@@ -1,4 +1,4 @@
-"""Antigravity CLI terminal title, "<status glyph> <headline>" like Claude Code and prime-agent.
+"""Antigravity CLI terminal title, "<status glyph> <headline>" like Claude Code and pi-agent.
 
 agy never sets one. It reruns the status line command on every agent state change, so that call
 drives the title, and a detached ticker animates the working glyph between calls.

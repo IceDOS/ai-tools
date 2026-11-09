@@ -22,9 +22,9 @@ class AdapterTest(unittest.TestCase):
         self.real = root / "real"
         self.real.mkdir()
         (self.real / "settings.json").write_text("{}")
-        self.cfg = Config(real_dirs={a: str(self.real) for a in ("claude", "prime-agent", "antigravity")},
+        self.cfg = Config(real_dirs={a: str(self.real) for a in ("claude", "pi-agent", "antigravity")},
                           bins={"claude": "/x/claude", "opencode": "/x/opencode", "antigravity": "/x/agy",
-                                "prime-agent": "/x/prime-agent"},
+                                "pi-agent": "/x/pi"},
                           bus_talk=["org.kde.*"])
 
     def tearDown(self):
@@ -47,12 +47,23 @@ class AdapterTest(unittest.TestCase):
         adapters.prepare(acct, self.cfg)
         self.assertFalse((acct.dir / "settings.json").exists())
 
-    def test_prime_agent_private_daemon_dirs(self):
-        (self.real / "daemon-workers").mkdir()
-        acct = Account("prime-agent", "work")
+    def test_pi_agent_shared_keeps_auth_private(self):
+        (self.real / "auth.json").write_text('{"openrouter": {"type": "api_key", "key": "k"}}')
+        (self.real / "sessions").mkdir()
+        acct = Account("pi-agent", "work")
         launch = adapters.prepare(acct, self.cfg)
-        self.assertEqual(launch.env["PRIME_AGENT_CODING_AGENT_DIR"], str(acct.dir))
-        self.assertFalse((acct.dir / "daemon-workers").exists())
+        self.assertEqual((launch.env, launch.args), ({"PI_CODING_AGENT_DIR": str(acct.dir)}, []))
+        self.assertTrue((acct.dir / "sessions").is_symlink())
+        self.assertFalse((acct.dir / "auth.json").exists())
+        self.assertTrue((acct.dir / "settings.json").is_file())
+        self.assertFalse((acct.dir / "settings.json").is_symlink())
+
+    def test_pi_agent_logged_in_needs_auth(self):
+        acct = Account("pi-agent", "work")
+        self.assertFalse(adapters.logged_in(acct))
+        acct.dir.mkdir(parents=True)
+        (acct.dir / "auth.json").write_text("{}")
+        self.assertTrue(adapters.logged_in(acct))
 
     def test_opencode_shared_passes_auth_content(self):
         acct = Account("opencode", "work")

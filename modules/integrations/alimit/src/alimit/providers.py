@@ -42,10 +42,10 @@ def _read_keys(path, names):
     return out
 
 
-def _keys(env: str, prime_names=(), opencode_names=()):
-    """Candidate keys in order: env var, prime-agent's auth.json, opencode's auth.json."""
+def _keys(env: str, pi_names=(), opencode_names=()):
+    """Candidate keys in order: env var, pi-agent's auth.json, opencode's auth.json."""
     keys = [os.environ[env]] if os.environ.get(env) else []
-    keys += _read_keys(config.PRIME_AGENT_AUTH, prime_names)
+    keys += _read_keys(config.PI_AGENT_AUTH, pi_names)
     keys += _read_keys(config.OPENCODE_AUTH, opencode_names)
     # dedupe, keep order
     return list(dict.fromkeys(keys))
@@ -113,7 +113,7 @@ def parse_opencode_go(data) -> dict:
     return out
 
 
-# auth.json entry names holding each provider's key, in prime-agent and opencode.
+# auth.json entry names holding each provider's key, in pi-agent and opencode.
 KEY_NAMES = {
     "opencode-go": ("opencode-go", "opencode"),
     "ollama": ("ollama",),

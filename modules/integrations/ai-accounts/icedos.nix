@@ -79,7 +79,7 @@
           alimitPkg = pkgs.callPackage ../alimit/package.nix { };
           agents = [
             "claude"
-            "prime-agent"
+            "pi-agent"
             "opencode"
             "antigravity"
             "ollama"
@@ -100,14 +100,14 @@
                 home = config.home.homeDirectory;
                 realDirs = {
                   claude = "${home}/.claude";
-                  prime-agent = "${config.xdg.configHome}/prime-agent";
+                  pi-agent = "${config.xdg.configHome}/pi-agent";
                   opencode = "${config.xdg.dataHome}/opencode";
                   antigravity = home;
                   ollama = "";
                 };
                 bins = {
                   claude = lib.getExe pkgs.claude-code;
-                  prime-agent = lib.getExe pkgs.prime-agent;
+                  pi-agent = lib.getExe pkgs.pi-agent;
                   opencode = lib.getExe pkgs.opencode;
                   antigravity = "${pkgs.antigravity-cli}/bin/agy";
                   ollama = "";

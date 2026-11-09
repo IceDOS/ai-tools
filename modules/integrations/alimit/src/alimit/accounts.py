@@ -33,7 +33,7 @@ def read_json(path: Path) -> dict:
 
 CREDENTIALS = {
     "claude": ".credentials.json",
-    "prime-agent": "auth.json",
+    "pi-agent": "auth.json",
     "opencode": "opencode/auth.json",
     "ollama": "key",
 }

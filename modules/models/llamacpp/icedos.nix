@@ -38,7 +38,7 @@
       service = mkBoolOption { default = defaults.service; };
 
       lifecycle = {
-        # Owned here, not by prime-agent, so its conflict with sleepIdleSeconds is asserted in one module.
+        # Owned here, not by pi-agent, so its conflict with sleepIdleSeconds is asserted in one module.
         enable = mkBoolOption { default = lifecycle.enable; };
 
         idle = mkIntBetweenOption {
@@ -108,7 +108,7 @@
           path = mkStrOption { default = settings.model.path; };
           reasoning = mkBoolOption { default = settings.model.reasoning; };
 
-          # See prime-agent's thinkingLevelMap for the accepted keys.
+          # See pi-agent's thinkingLevelMap for the accepted keys.
           thinking-level-map = mkAttrsOfOption {
             default = settings.model.thinking-level-map;
           } (types.nullOr types.str);
@@ -265,7 +265,7 @@
           lifecycle = cfg.lifecycle.enable;
           lifecycleIdleSeconds = cfg.lifecycle.idle;
 
-          # Not configurable: opencode and prime-agent's context-cap match this exact name.
+          # Not configurable: opencode and pi-agent's context-cap match this exact name.
           provider = "llamacpp";
 
           # The GGUF file name, minus a split model's -00001-of-00003 suffix.
@@ -299,32 +299,52 @@
             else
               host;
 
-          hasPrimeAgent = icedosLib.hasModule {
+          hasPiAgent = icedosLib.hasModule {
             inherit config repoUrl;
-            name = "prime-agent";
+            name = "pi-agent";
           };
 
-          # Any before_provider_request handler disables prime-agent's Idempotency-Key reuse,
+          # Any before_provider_request handler disables pi-agent's Idempotency-Key reuse,
           # so an extension that can never start a server would make every auto-retry billable.
-          lifecycleEnabled = lifecycle && hasPrimeAgent && model != "" && modelId != "";
+          lifecycleEnabled = lifecycle && hasPiAgent && model != "" && modelId != "";
 
-          # Markers sit inside TypeScript string literals; escapeShellArg only protects the builder,
-          # so values also need JS escaping.
-          jsStr =
-            v: lib.escapeShellArg (lib.replaceStrings [ "\\" "\"" "\n" "\r" ] [ "\\\\" "\\\"" "\\n" "\\r" ] v);
+          # pi-agent loads inline source, so the markers are filled in Nix with the same JS escaping.
+          lifecycleText = lib.replaceStrings [ "@llamacppUrl@" "@llamacppIdleSeconds@" ] (map
+            (lib.replaceStrings [ "\\" "\"" "\n" "\r" ] [ "\\\\" "\\\"" "\\n" "\\r" ])
+            [
+              "http://${clientHost}:${toString port}"
+              (toString lifecycleIdleSeconds)
+            ]
+          ) (builtins.readFile ./extensions/llamacpp-lifecycle.ts);
+          lifecycleLeftover = lib.length (builtins.split "@[a-zA-Z_][0-9A-Za-z_-]*@" lifecycleText) > 1;
 
-          lifecycleSrc = pkgs.runCommand "prime-agent-llamacpp-lifecycle.ts" { } ''
-            cp ${./extensions/llamacpp-lifecycle.ts} $out
-            chmod +w $out
-            substituteInPlace $out \
-              --replace-fail "@llamacppUrl@" ${jsStr "http://${clientHost}:${toString port}"} \
-              --replace-fail "@llamacppIdleSeconds@" ${jsStr (toString lifecycleIdleSeconds)}
+          # Zero cost: the power meter reports the real electricity instead.
+          llamacppProviders = lib.optionalAttrs (model != "") {
+            ${provider} = {
+              api = "openai-completions";
+              apiKey = "no-key";
+              baseUrl = "http://${clientHost}:${toString port}/v1";
 
-            if ${pkgs.gnugrep}/bin/grep -qE '@[a-zA-Z_][0-9A-Za-z_-]*@' $out; then
-              echo "unsubstituted placeholder left in llamacpp-lifecycle.ts" >&2
-              exit 1
-            fi
-          '';
+              models = lib.optional (modelId != "") {
+                id = modelId;
+                name = if modelName != "" then modelName else modelId;
+                reasoning = modelReasoning;
+                contextWindow = contextSize;
+                maxTokens = modelMaxTokens;
+                # The server only accepts images with a projector loaded.
+                input = [ "text" ] ++ lib.optional (mmproj != "") "image";
+
+                cost = {
+                  input = 0;
+                  output = 0;
+                  cacheRead = 0;
+                  cacheWrite = 0;
+                };
+
+                thinkingLevelMap = modelThinkingLevelMap;
+              };
+            };
+          };
 
           llamaServer = pkgs.writeShellScript "llamacpp-serve" ''
             ${lib.optionalString vkDisableHostVisibleVidmem "export GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1"}
@@ -760,41 +780,16 @@
             }
           ];
 
-          # optionalAttrs, not mkIf: mkIf still resolves the option path, which fails without prime-agent.
+          # optionalAttrs, not mkIf: mkIf still resolves the option path, which fails without pi-agent.
           icedos.ai-tools = {
             # Skills for this module, added to the shared icedos.ai-tools.skills pool.
             skills = lib.mapAttrs (_: lib.mkDefault) config.icedos.ai-tools.llamacpp.skills;
           }
-          // lib.optionalAttrs hasPrimeAgent {
-            # Local GPU, so metered by power instead of per token. listOf merges with user-added providers.
-            prime-agent.extensions.meters.power.providers = lib.optional (model != "") provider;
-
-            # Zero cost: the power meter reports the real electricity instead.
-            prime-agent.settings.providers = lib.optionalAttrs (model != "") {
-              ${provider} = {
-                api = "openai-completions";
-                apiKey = "no-key";
-                baseUrl = "http://${clientHost}:${toString port}/v1";
-
-                models = lib.optional (modelId != "") {
-                  id = modelId;
-                  name = if modelName != "" then modelName else modelId;
-                  reasoning = modelReasoning;
-                  contextWindow = contextSize;
-                  maxTokens = modelMaxTokens;
-                  # The server only accepts images with a projector loaded.
-                  input = [ "text" ] ++ lib.optional (mmproj != "") "image";
-
-                  cost = {
-                    input = 0;
-                    output = 0;
-                    cacheRead = 0;
-                    cacheWrite = 0;
-                  };
-
-                  thinkingLevelMap = modelThinkingLevelMap;
-                };
-              };
+          // lib.optionalAttrs hasPiAgent {
+            pi-agent.extensions.meters.power.providers = lib.optional (model != "") provider;
+            pi-agent.settings.providers = llamacppProviders;
+            pi-agent.extensions.inline = lib.optionalAttrs lifecycleEnabled {
+              llamacpp-lifecycle = lib.mkDefault lifecycleText;
             };
           };
 
@@ -856,6 +851,10 @@
                 }
               '';
             }
+            {
+              assertion = !(hasPiAgent && lifecycleEnabled && lifecycleLeftover);
+              message = "llamacpp: unsubstituted placeholder left in llamacpp-lifecycle.ts for pi-agent.";
+            }
           ];
 
           # Lets --prio set a negative nice. RLIMIT_RTPRIO stays unraised on purpose: ggml's
@@ -915,19 +914,6 @@
           };
 
           home-manager.sharedModules = [
-            (
-              { config, lib, ... }:
-              let
-                # Resolved by prime-agent. Not settings.dataDir: `config` here is home-manager's,
-                # and that option is still unexpanded.
-                dataDir = config.home.sessionVariables.PRIME_AGENT_CODING_AGENT_DIR;
-                relDataDir = lib.removePrefix (config.home.homeDirectory + "/") dataDir;
-              in
-              # sharedModules runs for every user; only prime-agent users have this variable.
-              lib.mkIf (lifecycleEnabled && config.home.sessionVariables ? PRIME_AGENT_CODING_AGENT_DIR) {
-                home.file."${relDataDir}/extensions/llamacpp-lifecycle.ts".source = lifecycleSrc;
-              }
-            )
             {
               programs.opencode.settings.provider.llamacpp = {
                 npm = "@ai-sdk/openai-compatible";

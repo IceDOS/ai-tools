@@ -85,7 +85,7 @@ class TestKeys(unittest.TestCase):
             auth = Path(tmp) / "auth.json"
             auth.write_text(json.dumps({"opencode-go": {"type": "api", "key": "stale"},
                                         "opencode": {"type": "api", "key": "valid"}}))
-            with mock.patch.object(config, "PRIME_AGENT_AUTH", auth), \
+            with mock.patch.object(config, "PI_AGENT_AUTH", auth), \
                     mock.patch.object(config, "OPENCODE_AUTH", Path(tmp) / "none.json"), \
                     mock.patch.object(providers, "_get", side_effect=fake_get):
                 with self.assertRaises(providers.NotSubscribed):
@@ -93,7 +93,7 @@ class TestKeys(unittest.TestCase):
         self.assertEqual(calls, ["stale", "valid"])
 
     def test_no_keys(self):
-        with mock.patch.object(config, "PRIME_AGENT_AUTH", Path("/nonexistent")), \
+        with mock.patch.object(config, "PI_AGENT_AUTH", Path("/nonexistent")), \
                 mock.patch.dict("os.environ", {}, clear=True):
             with self.assertRaises(providers.NoCredentials):
                 providers.fetch_ollama()

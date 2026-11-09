@@ -38,4 +38,4 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(cm.exception.valid, ["default", "home", "work"])
 
     def test_env_var_name(self):
-        self.assertEqual(env_var("prime-agent"), "AI_ACCOUNT_PRIME_AGENT")
+        self.assertEqual(env_var("pi-agent"), "AI_ACCOUNT_PI_AGENT")

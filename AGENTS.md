@@ -14,7 +14,7 @@
 - Format with `icedos nixf .` after editing any `.nix`.
 
 ## Purpose
-AI agents, local model servers and their glue: `claude-code`, `antigravity`, `opencode`, `prime-agent`
+AI agents, local model servers and their glue: `claude-code`, `antigravity`, `opencode`, `pi-agent`
 (agents), `llamacpp`, `ollama` (model servers),
 `mcp-server` (`icedos mcp serve`), one module per MCP server (`aws-mcp`, `basic-memory-mcp`,
 `chrome-devtools-mcp`, `context7-mcp`, `ddev-mcp`, `kwin-mcp`, `nixos-mcp`, `opencart-mcp`, `pagespeed-insights-mcp`, `plesk-mcp`, `rea-mcp`,
@@ -24,30 +24,28 @@ AI agents, local model servers and their glue: `claude-code`, `antigravity`, `op
 
 ## Namespace
 Every option here lives under `icedos.ai-tools`: the shared `rules`, `skills` and `mcp-servers`, and one
-attrset per module (`icedos.ai-tools.prime-agent`, ...).
+attrset per module (`icedos.ai-tools.pi-agent`, ...).
 
 ## Layout
 `modules/<category>/<name>/{icedos.nix,config.toml}`; `flake.nix` exposes them via
 `icedosLib.scanModules { path = ./modules; filename = "icedos.nix"; }`, which recurses, and
 `meta.name` (not the folder) names the module. The categories are `agents` (antigravity,
-claude-code, opencode, prime-agent), `models` (llamacpp, ollama), `mcp` (one folder per MCP server: icedos-mcp, whose module name is `mcp-server`, and
+claude-code, opencode, pi-agent), `models` (llamacpp, ollama), `mcp` (one folder per MCP server: icedos-mcp, whose module name is `mcp-server`, and
 aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pagespeed-insights, plesk, rea, signal, each named
 `<folder>-mcp` except `kwin-mcp`; `mcp/lib` holds their shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence).
 `modules/default` loads whenever the repo is listed and owns the shared options.
 
 ## Shared options (`icedos.ai-tools.*`)
-- `icedos.ai-tools.rules` — name = markdown. prime-agent writes them all to
-  `<dataDir>/APPEND_SYSTEM.md`, which 0.10.0 appends to every system prompt,
+- `icedos.ai-tools.rules` — name = markdown. pi-agent writes them all to
+  `<dataDir>/APPEND_SYSTEM.md`, which pi appends to every system prompt,
   antigravity writes `~/.gemini/config/rules/<name>.md`, opencode
   writes `~/.config/opencode/rules/<name>.md` and lists it in `instructions`, and `claude-code`
   sets `programs.claude-code.rules` (mkDefault per entry).
-- `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: prime-agent
-  `skills.extra-builtin`, antigravity `~/.gemini/antigravity-cli/skills/`, opencode
-  `programs.opencode.skills`, Claude Code `programs.claude-code.skills`. prime-agent bakes
-  them into a wrapper layer over `prime-agent.unwrapped`, so skill edits never recompile Rust.
+- `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: antigravity `~/.gemini/antigravity-cli/skills/`, opencode
+  `programs.opencode.skills`, Claude Code `programs.claude-code.skills`.
+  pi-agent builds them into a store dir that its settings.json lists under skills.
 - Per-agent options of the same name win over the shared entry
-  (`antigravity.{rules,skills}`, `opencode.skills`, `prime-agent.extensions.rules`,
-  `prime-agent.skills.extra-builtin`).
+  (`antigravity.{rules,skills}`, `opencode.skills`, `pi-agent.{rules,skills.extra-builtin}`).
 - Non-agent modules (`llamacpp`, `ollama` and the `mcp` modules) have a `skills`
   option that adds to `icedos.ai-tools.skills`, so a skill ships with the module it documents.
 - `icedos.ai-tools.mcp-servers` — name = `programs.mcp.servers` entry. `default` gives every hm
@@ -103,12 +101,33 @@ Point this repo's `overrideUrl` at the local checkout in the config root
 (`path:/home/ice/Projects/icedos/ai-tools`), then `icedos rebuild --build`.
 
 ## Notable modules / gotchas
-- `prime-agent` — mirrors the bundled models.dev catalog into `models.json`. Only models in
-  that snapshot show up today (it lags upstream). To add a newly released model without waiting
-  for a prime-agent bump, define it under `icedos.ai-tools.prime-agent.settings.providers.<name>.models`:
-  prime-agent's `models[]` **merges** with the catalog — an unknown id is added (inheriting the
-  built-in provider's api/baseUrl), a known id replaces the bundled definition. Use the model's
-  real dot id (e.g. `glm-5.3-flash`, not `glm-5-3-flash`) and the same id in `modelOverrides`.
+- `pi-agent`: upstream pi (`pkgs.pi-coding-agent`) wrapped to use `$XDG_CONFIG_HOME/pi-agent`
+  (`settings.dataDir`) and to refuse `pi update`. Nix owns `mcp.json` (from `programs.mcp.servers`,
+  `timeout = settings.mcpCallTimeout`) and `APPEND_SYSTEM.md`, so `pi mcp add` cannot write there;
+  add servers to `icedos.ai-tools.mcp-servers` instead. Activation (`lib/seed.sh`) merges the managed
+  keys into pi's `settings.json` and replaces each `settings.providers` entry in `models.json`, keeping
+  everything else pi wrote. `auth.json` is never written; sign in with `/login`.
+  Extensions are store paths listed in the managed `settings.json` `extensions` key, in order:
+  `extensions.builtin` (pi's examples, by name), the shipped cost-footer (behind `meters.cost`), context-cap
+  (behind `context-window-cap.enable`), rate-limit-hook (when `hooks.rateLimit` or `vpn-rotate` is set), opencode-free (behind `extensions.opencodeFree`) and vpn-row (behind `vpn-rotate.enable`, which also adds a `hooks.rateLimit` entry and installs `proton-vpn-cli`), then `extensions.inline` by name. llamacpp
+  adds `inline.llamacpp-lifecycle` and alimit adds `inline.alimit` with `mkDefault`. pi-clm's other
+  `PI_CLM_*` env goes into the wrapper as `--set-default`. Check sources with `tests/typecheck.sh`.
+  `packages` entries go into settings.json `packages` and pi installs them, with `npmCommand` set to
+  a store npm; activation keeps `pi install` entries and drops only those listed in
+  `<dataDir>/.icedos-packages.json`. pi-ghost-text-x (`extensions.ghost-text`) and pi-session-name
+  (`extensions.session-name`), both on by default, pi-clm (`extensions.context-language-models`) and
+  pi-rlm (`extensions.recursive-language-models`) are such packages, appended after `packages` and unpinned unless their
+  `version` is set. New default packages get an `enable` and `version` option and an `optionPackages` entry. pi loads package extensions before the `extensions` list. With `steering = ""`
+  the wrapper points `PI_CLM_STEERING` at the brief inside pi's npm dir, and pi-rlm gets
+  `PI_RLM_PYTHON` and `PI_RLM_MAX_DEPTH`. Prefer an upstream pi package in `packages` over a new
+  shipped extension; ship code here only when no package does the job.
+  `hooks.rateLimit` entries run their `command` when a listed provider's error has one of their
+  `errorKinds` (`usage_limit` covers pi's non-retryable account limits). At most one hook runs per
+  prompt, and on exit 0 `rate-limit-hook.ts` rewrites the error so pi's own retry fires.
+  `skills.codeReview` ships `skills/code-review` when pi-rlm is on. `meters.speed` adds the tok/s readout to the cost
+  footer. `includeInIcedosGc` prunes `sessions/*/*.jsonl` and pi-rlm snapshots older than `sessionRetentionDays`.
+  With kde's `vigor` module, unset `meters.power` values come from vigor's tariff, `gpuIdleWatts` and `windows`.
+  `agent-launch` registers locator `pi-agent`, which zed's bridge resolves from pi's per-cwd session dirs.
 - `claude-code` — owns `icedos.ai-tools.claude-code.users.<name>` (`mkSubmoduleAttrsOption`,
   filled per normal user via `genDefaults`) and enables `programs.claude-code` for every hm user
   (`enable = lib.mkDefault true`, `enableMcpIntegration = true`). It feeds the shared
@@ -148,7 +167,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   (claude, opencode-go, ollama, openrouter) for idle periods. Antigravity has no quota API,
   so only its status line records it.
   - Every bar shows only its own agent's usage: Claude Code's status line shows claude,
-    antigravity's shows antigravity, prime-agent's footer and opencode's sidebar show the
+    antigravity's shows antigravity, pi-agent's footer and opencode's sidebar show the
     provider of the current model.
   - Weekly and monthly windows (`config.period_of`) project their end from the average burn since
     the window opened (reset minus 7 days, or one calendar month), blended with the previous
@@ -163,7 +182,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
     opencode's sidebar print it as `1%=X% 5h`, the dashboard one line per pair. Ollama's `session`
     is unpaired: its length is undocumented, and current Ollama plans only have a monthly allowance.
   - `alimit headroom` ranks accounts by each window's peak (`rates.compute`), not its last row.
-  - API keys come from env, then prime-agent's `auth.json`, then opencode's; alimit never
+  - API keys come from env, then pi-agent's `auth.json`, then opencode's; alimit never
     refreshes Claude Code's OAuth token.
   - `icedos ai limits` opens the full dashboard. `widget` installs the Plasma applet
     `org.icedos.alimit`.
