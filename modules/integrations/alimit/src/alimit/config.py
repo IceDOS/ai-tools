@@ -156,13 +156,13 @@ PROVIDER_SHORT = {"antigravity": "ag", "opencode-go": "go", "ollama": "ol", "ope
 # Non-default accounts: "<provider>@<tag>/<window>"; Claude's bare keys become "claude@<tag>/<key>".
 ACCOUNT_SEP = "@"
 # Agents whose auth file holds several providers tag their windows "<agent>.<account>".
-MULTI_PROVIDER_AGENTS = ("opencode", "prime-agent")
+MULTI_PROVIDER_AGENTS = ("opencode", "pi-agent")
 AGENT_PROVIDERS = {
     "claude": ("claude",),
     "antigravity": ("antigravity",),
     "ollama": ("ollama",),
     "opencode": ("opencode-go", "openrouter"),
-    "prime-agent": ("opencode-go", "openrouter"),
+    "pi-agent": ("opencode-go", "openrouter"),
 }
 
 
@@ -192,7 +192,7 @@ def with_account(window: str, tag: str) -> str:
 ENABLED_PROVIDERS = tuple(p for p in os.environ.get("ALIMIT_PROVIDERS", "").split(",") if p)
 
 # Credentials other agents already keep; alimit only reads them.
-PRIME_AGENT_AUTH = _env_path("ALIMIT_PRIME_AGENT_AUTH", HOME / ".config" / "prime-agent" / "auth.json")
+PI_AGENT_AUTH = _env_path("ALIMIT_PI_AGENT_AUTH", HOME / ".config" / "pi-agent" / "auth.json")
 OPENCODE_AUTH = _env_path("OPENCODE_DATA_DIR", _DATA_HOME / "opencode") / "auth.json"
 
 OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"

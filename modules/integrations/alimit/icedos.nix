@@ -32,7 +32,7 @@
       alerts = mkBoolOption { default = alerts; };
       widget = mkBoolOption { default = widget; };
 
-      # alimit's usage bar in Claude Code's status line, prime-agent's footer and opencode's sidebar.
+      # alimit's usage bar in Claude Code's status line, pi-agent's footer and opencode's sidebar.
       statusLine = mkBoolOption { default = statusLine; };
 
       # Providers the timer polls: claude, opencode-go, ollama, openrouter.
@@ -85,12 +85,31 @@
             mkDefault
             mkIf
             optional
+            optionalAttrs
             replaceStrings
             ;
 
           alimitUsers = config.icedos.ai-tools.alimit.users;
           alimitPkg = pkgs.callPackage ./package.nix { };
           alimit = lib.getExe alimitPkg;
+          hasPiAgent = icedosLib.hasModule {
+            inherit config repoUrl;
+            name = "pi-agent";
+          };
+
+          # cost-footer already shows the opencode-go plan rows.
+          piAgentSkip = optional (
+            hasPiAgent && config.icedos.ai-tools.pi-agent.extensions.meters.cost
+          ) "opencode-go";
+
+          piAgentExtension =
+            replaceStrings
+              [ "@alimit@" "@skip@" ]
+              [
+                alimit
+                (builtins.toJSON piAgentSkip)
+              ]
+              (builtins.readFile ./pi-agent.ts);
           pollable = [
             "claude"
             "opencode-go"
@@ -127,6 +146,11 @@
             alimit.users = icedosLib.users.genDefaults {
               inherit (config.icedos) users;
             };
+          }
+          // optionalAttrs hasPiAgent {
+            pi-agent.extensions.inline.alimit = mkIf (any (u: u.statusLine) (attrValues alimitUsers)) (
+              mkDefault piAgentExtension
+            );
           };
 
           icedos.system.toolset.commands = mkIf (alimitUsers != { }) [

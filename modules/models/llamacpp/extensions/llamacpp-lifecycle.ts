@@ -29,7 +29,8 @@ const INSTANCE_STALE_MS = 120_000;
 const INSTANCE = `${process.pid}-${randomUUID()}`;
 const instanceDir = () =>
   join(
-    process.env.PRIME_AGENT_CODING_AGENT_DIR ?? join(homedir(), ".config", "prime-agent"),
+    process.env.PI_CODING_AGENT_DIR ??
+      join(homedir(), ".config", "pi-agent"),
     "llamacpp-lifecycle",
     "instances",
   );

@@ -9,7 +9,7 @@ select = "auto"
 # Usage percent at which auto-pick skips an account.
 threshold = 90
 
-# Agents: claude, prime-agent, opencode, antigravity, ollama. "default" is the real config dir.
+# Agents: claude, pi-agent, opencode, antigravity, ollama. "default" is the real config dir.
 [icedos.ai-tools.ai-accounts.users.username.agents.agentname.accounts.accountname]
 # "shared" links settings, skills and history from the real dir; "isolated" keeps them separate.
 mode = "shared"
