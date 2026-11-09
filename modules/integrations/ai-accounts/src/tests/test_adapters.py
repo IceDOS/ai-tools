@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -167,6 +168,37 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(json.loads((own / "settings.json").read_text())["statusLine"]["command"], "bar")
         self.assertFalse(os.path.lexists(own / "cli.log"))
         self.assertFalse(os.path.lexists(own / "log"))
+
+    def test_antigravity_builtin_survives_agy_reextract(self):
+        cli = self.real / ".gemini" / "antigravity-cli"
+        (cli / "builtin" / "skills").mkdir(parents=True)
+        (cli / "builtin" / ".checksum").write_text("builtin:real")
+        acct = Account("antigravity", "work")
+        own = acct.dir / "home" / ".gemini" / "antigravity-cli" / "builtin"
+        with mock.patch.object(adapters.dbusproxy, "start", return_value=7):
+            adapters.prepare(acct, self.cfg)
+            self.assertFalse(own.is_symlink())
+            self.assertEqual((own / ".checksum").read_text(), "builtin:real")
+            # agy deletes builtin and extracts a new one when its checksum differs.
+            shutil.rmtree(own)
+            own.mkdir()
+            (own / ".checksum").write_text("builtin:account")
+            adapters.prepare(acct, self.cfg)
+        self.assertEqual((own / ".checksum").read_text(), "builtin:account")
+        self.assertEqual((cli / "builtin" / ".checksum").read_text(), "builtin:real")
+
+    def test_antigravity_builtin_link_becomes_copy(self):
+        cli = self.real / ".gemini" / "antigravity-cli"
+        (cli / "builtin").mkdir(parents=True)
+        (cli / "builtin" / ".checksum").write_text("builtin:real")
+        acct = Account("antigravity", "work")
+        own = acct.dir / "home" / ".gemini" / "antigravity-cli" / "builtin"
+        own.parent.mkdir(parents=True)
+        own.symlink_to(cli / "builtin")
+        with mock.patch.object(adapters.dbusproxy, "start", return_value=7):
+            adapters.prepare(acct, self.cfg)
+        self.assertFalse(own.is_symlink())
+        self.assertEqual((own / ".checksum").read_text(), "builtin:real")
 
     def test_opencode_settings_file_passed(self):
         acct = Account("opencode", "work", settings={"model": "x/y"})

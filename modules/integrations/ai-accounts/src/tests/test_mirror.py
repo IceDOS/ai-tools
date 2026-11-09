@@ -32,6 +32,20 @@ class MirrorTest(unittest.TestCase):
         mirror.sync(self.real, self.acct, {".credentials.json"})
         self.assertEqual((self.acct / ".credentials.json").read_text(), "MINE")
 
+    def test_private_link_into_real_is_removed(self):
+        self.acct.mkdir()
+        (self.acct / ".credentials.json").symlink_to(self.real / ".credentials.json")
+        self.assertEqual(len(mirror.check(self.real, self.acct, {".credentials.json"})), 1)
+        mirror.sync(self.real, self.acct, {".credentials.json"})
+        self.assertFalse(os.path.lexists(self.acct / ".credentials.json"))
+        self.assertEqual((self.real / ".credentials.json").read_text(), "REAL")
+
+    def test_private_link_elsewhere_left_alone(self):
+        self.acct.mkdir()
+        (self.acct / ".credentials.json").symlink_to("own/creds")
+        mirror.sync(self.real, self.acct, {".credentials.json"})
+        self.assertEqual(os.readlink(self.acct / ".credentials.json"), "own/creds")
+
     def test_prunes_dangling_links(self):
         mirror.sync(self.real, self.acct)
         (self.real / "settings.json").unlink()
