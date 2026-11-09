@@ -147,7 +147,7 @@ in
             for d in "''${C}"/projects/*/*/; do
               [ -d "$d" ] || continue
               case "''${d%/}" in */memory) continue ;; esac
-              # Keep sidecars while the sibling transcript still exists (prime-agent-style).
+              # Keep sidecars while the sibling transcript still exists.
               [ -f "''${d%/}.jsonl" ] && continue
               find "$d" -type f -newermt "@$(( $(date +%s) - ${toString gcDays}*86400 ))" -print -quit | grep -q . || rm -rf -- "$d"
             done

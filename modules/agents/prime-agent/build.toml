@@ -1,7 +1,0 @@
-[[icedos.repositories]]
-url = "github:icedos/ai-tools"
-fetchDependencies = false
-modules = ["prime-agent"]
-
-[icedos.system]
-version = "26.05"

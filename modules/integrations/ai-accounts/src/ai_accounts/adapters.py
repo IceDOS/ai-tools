@@ -8,9 +8,7 @@ from . import config, dbusproxy, mirror, settings
 from .config import Account, Config
 
 CLAUDE_PRIVATE = frozenset({".credentials.json", ".claude.json"})
-PRIME_PRIVATE = frozenset({"auth.json", "daemon-workers", "supervisor-owners", "session-leases"})
-# Task 1: the socket is $TMPDIR/prime-agent-<uid>/daemon.sock, not under the agent dir.
-PRIME_DAEMON_SOCKET_FOLLOWS_DIR = False
+PI_PRIVATE = frozenset({"auth.json"})
 # agy keeps per account: the token file plus its project and onboarding cache (probe 2026-10-10).
 AGY_PRIVATE: frozenset = frozenset({
     "antigravity-cli/antigravity-oauth-token",
@@ -22,13 +20,13 @@ AGY_PRIVATE: frozenset = frozenset({
 AGY_CREDS: tuple = ("antigravity-cli/antigravity-oauth-token",)
 
 CLAUDE_SEED = frozenset({"settings.json"})
-PRIME_SEED = frozenset({"settings.json"})
+PI_SEED = frozenset({"settings.json"})
 # agy rewrites these with rename-over-save, so a symlink would not survive (2026-10-11, Step 1 of Task 16).
 AGY_SEED = frozenset({"antigravity-cli/settings.json", "antigravity-cli/cache",
                         "antigravity-cli/jetbox_summaries_proto.pb"})
 SETTINGS_FILE = {
     "claude": "settings.json",
-    "prime-agent": "settings.json",
+    "pi-agent": "settings.json",
     "antigravity": "home/.gemini/antigravity-cli/settings.json",
     "opencode": "opencode-settings.json",
 }
@@ -36,7 +34,7 @@ LEDGER = ".ai-account-settings.json"
 
 CREDS = {
     "claude": (".credentials.json",),
-    "prime-agent": ("auth.json",),
+    "pi-agent": ("auth.json",),
     "opencode": ("opencode/auth.json",),
     "ollama": ("key",),
 }
@@ -70,12 +68,9 @@ def _claude(acct, cfg):
     return Launch({"CLAUDE_CONFIG_DIR": str(acct.dir)}, [])
 
 
-def _prime_agent(acct, cfg):
-    _mirrored(acct, cfg.real_dirs["prime-agent"], PRIME_PRIVATE, PRIME_SEED)
-    args = []
-    if not PRIME_DAEMON_SOCKET_FOLLOWS_DIR:
-        args = ["--daemon-socket", str(config.runtime_dir() / f"prime-agent-{acct.name}.sock")]
-    return Launch({"PRIME_AGENT_CODING_AGENT_DIR": str(acct.dir)}, args)
+def _pi_agent(acct, cfg):
+    _mirrored(acct, cfg.real_dirs["pi-agent"], PI_PRIVATE, PI_SEED)
+    return Launch({"PI_CODING_AGENT_DIR": str(acct.dir)}, [])
 
 
 def _opencode(acct, cfg):
@@ -111,7 +106,7 @@ def _ollama(acct, cfg):
 
 PREPARE = {
     "claude": _claude,
-    "prime-agent": _prime_agent,
+    "pi-agent": _pi_agent,
     "opencode": _opencode,
     "antigravity": _antigravity,
     "ollama": _ollama,

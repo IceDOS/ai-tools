@@ -1,4 +1,4 @@
-"""Output tok/s from a Claude Code transcript, like prime-agent's /speed footer."""
+"""Output tok/s from a Claude Code transcript, like pi-agent's /speed footer."""
 import json
 import os
 from datetime import datetime
@@ -42,7 +42,7 @@ def samples(rows):
     """(output_tokens, seconds) per finished assistant response, oldest first.
 
     A response spans from the last user entry (prompt or tool result) to its final streamed
-    block, so time-to-first-token counts, as in prime-agent. Attachment and system rows are
+    block, so time-to-first-token counts, as in pi-agent's footer. Attachment and system rows are
     written next to the response, not before it, so they never start a span.
     """
     out, start, cur = [], None, None

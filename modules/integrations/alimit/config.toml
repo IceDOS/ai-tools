@@ -5,7 +5,7 @@ alerts = true
 widget = true
 
 # Render alimit's usage bar in every agent that has one: Claude Code's status line,
-# prime-agent's footer and opencode's sidebar. Antigravity's bar always uses alimit.
+# pi-agent's footer and opencode's sidebar. Antigravity's bar always uses alimit.
 statusLine = true
 
 # Providers the timer polls. Antigravity is recorded by its own status line.

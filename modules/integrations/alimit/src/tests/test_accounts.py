@@ -36,7 +36,7 @@ class AccountsTest(unittest.TestCase):
         st = self.root / "state"
         self.assertEqual(accounts.Account("claude", "work").credentials, st / "claude/work/.credentials.json")
         self.assertEqual(accounts.Account("opencode", "solo").credentials, st / "opencode/solo/opencode/auth.json")
-        self.assertEqual(accounts.Account("prime-agent", "w").credentials, st / "prime-agent/w/auth.json")
+        self.assertEqual(accounts.Account("pi-agent", "w").credentials, st / "pi-agent/w/auth.json")
         self.assertEqual(accounts.Account("ollama", "h").credentials, st / "ollama/h/key")
 
     def test_env_tags(self):

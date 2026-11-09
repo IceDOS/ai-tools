@@ -12,7 +12,7 @@ import agent_launch as al
 
 AGENTS = {
     "claude": {"command": ["claude"], "label": "Claude Code"},
-    "prime-agent": {"command": ["prime-agent"], "label": ""},
+    "pi-agent": {"command": ["pi-agent"], "label": ""},
 }
 
 
@@ -25,7 +25,7 @@ class ChooseTest(unittest.TestCase):
 
     def test_empty_default_prompts_picker(self):
         cfg = {"defaultAgent": "", "agents": AGENTS}
-        self.assertEqual(al.choose(cfg, lambda c: "prime-agent"), ("prime-agent", ["prime-agent"]))
+        self.assertEqual(al.choose(cfg, lambda c: "pi-agent"), ("pi-agent", ["pi-agent"]))
 
     def test_unknown_default_prompts_picker(self):
         cfg = {"defaultAgent": "removed", "agents": AGENTS}
@@ -40,7 +40,7 @@ class ChooseTest(unittest.TestCase):
         self.assertEqual(al.choose(cfg), ("x", ["x"]))
 
     def test_label_falls_back_to_title_case(self):
-        self.assertEqual(al.label("prime-agent", AGENTS["prime-agent"]), "Prime Agent")
+        self.assertEqual(al.label("pi-agent", AGENTS["pi-agent"]), "Pi Agent")
         self.assertEqual(al.label("claude", AGENTS["claude"]), "Claude Code")
 
     def test_single_agent_skips_fzf(self):
@@ -52,7 +52,7 @@ class ChooseTest(unittest.TestCase):
 class MainTest(unittest.TestCase):
     def setUp(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
-            json.dump({"defaultAgent": "prime-agent", "agents": AGENTS}, tmp)
+            json.dump({"defaultAgent": "pi-agent", "agents": AGENTS}, tmp)
         self.cfg = tmp.name
         self.addCleanup(Path(tmp.name).unlink)
 
@@ -60,12 +60,12 @@ class MainTest(unittest.TestCase):
         out = io.StringIO()
         with redirect_stdout(out):
             self.assertEqual(al.main(["--config", self.cfg, "--print"]), 0)
-        self.assertEqual(json.loads(out.getvalue()), {"agent": "prime-agent", "argv": ["prime-agent"], "account": None, "env": {}})
+        self.assertEqual(json.loads(out.getvalue()), {"agent": "pi-agent", "argv": ["pi-agent"], "account": None, "env": {}})
 
     def test_launch_execs_agent(self):
         with mock.patch.object(al.os, "execvp") as execvp:
             al.main(["--config", self.cfg])
-        execvp.assert_called_once_with("prime-agent", ["prime-agent"])
+        execvp.assert_called_once_with("pi-agent", ["pi-agent"])
 
 
 if __name__ == "__main__":

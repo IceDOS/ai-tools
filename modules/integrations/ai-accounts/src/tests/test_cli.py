@@ -78,11 +78,11 @@ class CliTest(unittest.TestCase):
         self.assertEqual(env["OLLAMA_API_KEY"], "sk-h")
         self.assertIn("ollama=home", env["AI_ACCOUNT_TAGS"])
 
-    def test_build_env_leaves_ollama_out_of_prime_agent(self):
+    def test_build_env_leaves_ollama_out_of_pi_agent(self):
         self.login("ollama", "home", "key", "sk-h")
         state.set_sticky("ollama", "home")
-        acct = config.Account("prime-agent", "default")
-        env = cli.build_env(self.cfg, "prime-agent", acct, adapters.Launch({}, []), {})
+        acct = config.Account("pi-agent", "default")
+        env = cli.build_env(self.cfg, "pi-agent", acct, adapters.Launch({}, []), {})
         self.assertNotIn("OLLAMA_API_KEY", env)
         self.assertNotIn("ollama=", env["AI_ACCOUNT_TAGS"])
 
