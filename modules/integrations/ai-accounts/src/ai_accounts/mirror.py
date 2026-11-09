@@ -55,6 +55,14 @@ def _walk(real: Path, acct: Path, private, skip, fix: bool, seed=frozenset()) ->
     names = {e.name for e in real.iterdir()} if real.is_dir() else set()
     if fix:
         acct.mkdir(parents=True, exist_ok=True)
+    # Accounts made before an entry turned private still hold a link to the real one.
+    for name in sorted(here):
+        dst = acct / name
+        if dst.is_symlink() and os.readlink(dst) == str(real / name):
+            if fix:
+                dst.unlink()
+            else:
+                problems.append(f"{dst}: private entry links to the real one")
     for name in sorted(names - here - set(skip)):
         src, dst = real / name, acct / name
         if name in seed_here:

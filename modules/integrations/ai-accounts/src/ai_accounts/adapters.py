@@ -22,8 +22,9 @@ AGY_CREDS: tuple = ("antigravity-cli/antigravity-oauth-token",)
 CLAUDE_SEED = frozenset({"settings.json"})
 PI_SEED = frozenset({"settings.json"})
 # agy rewrites these with rename-over-save, so a symlink would not survive (2026-10-11, Step 1 of Task 16).
+# agy also replaces builtin with a real dir when its checksum differs after an upgrade.
 AGY_SEED = frozenset({"antigravity-cli/settings.json", "antigravity-cli/cache",
-                        "antigravity-cli/jetbox_summaries_proto.pb"})
+                        "antigravity-cli/jetbox_summaries_proto.pb", "antigravity-cli/builtin"})
 SETTINGS_FILE = {
     "claude": "settings.json",
     "pi-agent": "settings.json",
