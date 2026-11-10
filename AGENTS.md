@@ -66,7 +66,8 @@ aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pages
   `${package.src}` (`pkgs.context7-mcp.src` for context7), an IFD that only needs the fetch,
   so skills always match the packaged version. basic-memory builds from its GitHub release
   for this, since its wheel leaves out `skills/`. The module's own `skills`
-  replaces an upstream skill of the same name.
+  replaces an upstream skill of the same name. `opencart-mcp` has no upstream skills; its
+  `shippedSkills` reads the same layout from its own `skills/` folder (`opencart-extension`).
 - `aws-mcp` runs the AWS proxy from `github:aws/mcp-proxy-for-aws` as the shared `aws-mcp` server and installs
   the plugins in `plugins` from `github:aws/agent-toolkit-for-aws` for Claude Code only, since their skills ship
   scripts that the text-only shared `skills` pool would lose. `package.nix` removes each plugin's uvx `aws-mcp`

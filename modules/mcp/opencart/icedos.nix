@@ -1,7 +1,12 @@
 { icedosLib, lib, ... }:
 
 let
-  inherit (icedosLib) mkAttrsOfOption mkIntBetweenOption mkStrOption;
+  inherit (icedosLib)
+    mkAttrsOfOption
+    mkIntBetweenOption
+    mkStrListOption
+    mkStrOption
+    ;
   defaults = (lib.importTOML ./config.toml).icedos.ai-tools.opencart-mcp;
 in
 {
@@ -19,6 +24,10 @@ in
     # Plain OPENCART_* settings passed to the server.
     env = mkAttrsOfOption { default = defaults.env; } lib.types.str;
 
+    # Skills shipped in ./skills, references inlined.
+    shippedSkills = mkStrListOption { default = defaults.shippedSkills; };
+
+    # Extra skills, name = full SKILL.md content; replaces a same-named shipped skill.
     skills = mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
   };
 
@@ -36,6 +45,7 @@ in
         let
           cfg = config.icedos.ai-tools.opencart-mcp;
           package = import ./package.nix { inherit pkgs; };
+          shipped = import ../lib/upstream-skills.nix { inherit lib; } ./skills cfg.shippedSkills;
         in
         {
           environment.systemPackages = [ package ];
@@ -47,7 +57,7 @@ in
             inherit (cfg) timeout;
           };
 
-          icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) cfg.skills;
+          icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) (shipped // cfg.skills);
         }
       )
     ];
