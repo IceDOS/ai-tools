@@ -61,6 +61,19 @@ def runway_ms(r) -> float | None:
     return ms if ms >= 1000 else None
 
 
+def _runway_code(r, now_ms: int | None = None) -> str:
+    if now_ms is None:
+        now_ms = _now_ms()
+    ms = runway_ms(r)
+    if ms is None or not getattr(r, "reset_ts", None):
+        return "31"
+    until_reset_ms = r.reset_ts - now_ms
+    if until_reset_ms <= 0:
+        return "31"
+    lost = max(0.0, min(100.0, 100 * (1 - ms / until_reset_ms)))
+    return _util_code(lost)
+
+
 def fmt_num(v: float) -> str:
     """One decimal, dropped when .0. Truncated so 99.96 never reads as 100."""
     t = math.floor(v * 10 + 1e-9) / 10
@@ -217,7 +230,7 @@ def render_section(r, now_ms: int, col: int, mark: str = "") -> str:
     labels = "".join(label.center(col) for label in METRIC_LABELS)
     cells = [v.center(col) for v in _metric_values(r, now_ms)]
     if runway_ms(r) is not None:
-        cells[4] = _c("31", cells[4])
+        cells[4] = _c(_runway_code(r, now_ms), cells[4])
 
     # blank line under the bar, mirroring the widget's spacing
     return "\n".join([head, _c(code, bar(r.util, width)), "", _c("2", labels), "".join(cells)])
@@ -262,7 +275,7 @@ def render_statusline(rlist, now_ms: int, color: bool | None = None) -> str:
         return "alimit: no usage"
     groups = []
     for reset_ts, rates in group_by_reset(rlist):
-        groups.append(_c("2", " · ", color).join(_statusline_segment(r, color) for r in rates))
+        groups.append(_c("2", " · ", color).join(_statusline_segment(r, color, now_ms=now_ms) for r in rates))
         if reset_ts:
             groups[-1] += " " + _c("2", RESET_GLYPH + fmt_dur(reset_ts - now_ms), color)
     return _c("2", SEP, color).join(groups)
@@ -327,13 +340,13 @@ def _bar_label(window: str, single: bool) -> str:
     return label
 
 
-def _statusline_segment(r, color, label_width: int = 0, single: bool = False) -> str:
-    # a red runway already marks a window that caps before reset, so no separate alert
+def _statusline_segment(r, color, label_width: int = 0, single: bool = False, now_ms: int | None = None) -> str:
+    # a runway already marks a window that caps before reset, so no separate alert
     seg = [_bar_label(r.window, single).rjust(label_width), _c(f"{_util_code(r.util)};1", f"{fmt_num(r.util)}%", color)]
     if r.per_hour >= 0.1:
         seg.append(_c("2", f"{fmt_num(r.per_hour)}/h", color))
     if (ms := runway_ms(r)) is not None:
-        seg.append(_c("31", ENDS_GLYPH + fmt_dur(ms), color))
+        seg.append(_c(_runway_code(r, now_ms), ENDS_GLYPH + fmt_dur(ms), color))
     if r.exchange:
         seg.append(_c("2", f"1%={fmt_num(r.exchange)}% 5h", color))
     return " ".join(seg)
@@ -443,7 +456,7 @@ def render_bar(rlist, now_ms: int) -> str:
     label_width = max((len(_bar_label(r.window, single)) for r in active), default=0)
     usage, resets = [], []
     for reset_ts, rates in group_by_reset(active):
-        usage += [_statusline_segment(r, True, label_width, single) for r in rates]
+        usage += [_statusline_segment(r, True, label_width, single, now_ms=now_ms) for r in rates]
         resets.append((_c("2", RESET_GLYPH + fmt_dur(reset_ts - now_ms), True) if reset_ts else "", len(rates)))
     rows = [usage or ["alimit: no usage"]]
     if any(text for text, _ in resets):
