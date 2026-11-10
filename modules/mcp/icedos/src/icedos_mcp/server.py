@@ -1264,9 +1264,10 @@ async def nix_build(
     the flake's source copy for build_cleanup too.
 
     Args:
-        installable: Flake ref or store path, e.g. 'nixpkgs#hello' or
-                     'path:/abs/dir#packages.x86_64-linux.foo'. Use absolute
-                     paths; the server's working dir is not yours.
+        installable: Flake ref or store path, e.g. 'nixpkgs#hello',
+                     'path:/abs/dir#packages.x86_64-linux.foo' or
+                     '/nix/store/...-foo.drv' (builds every output, like '^*').
+                     Use absolute paths; the server's working dir is not yours.
         host: "auto" asks build_hosts, "local" builds here, or a configured host.
               Keep small builds and evaluations on "local".
         store: For a local build: "auto" takes the first fit in storage.priority
@@ -1281,6 +1282,8 @@ async def nix_build(
     """
     if not installable or installable.startswith("-"):
         return _err("bad_args", "installable must be a flake ref or store path, not a flag")
+    asked = installable
+    installable = remote.drv_installable(installable)
     try:
         check = await asyncio.to_thread(leftovers.preflight, installable)
     except ValueError as e:
@@ -1325,11 +1328,15 @@ async def nix_build(
     where = (f"on {host}" if host != "local" else f"in {store_path or 'the host store'}") + (f" ({why})" if why else "")
     if rc != 0:
         return f"Build failed {where} (exit {rc}):\n{out}"
-    paths = [p for r in result for p in r.get("outputs", {}).values()]
+    paths = remote.result_paths(result)[0]
     lines = [f"Build succeeded {where}."]
+    if installable != asked:
+        lines.append(f"Built {installable}, every output of the .drv.")
     if store_path:
         lines += [f"output: {p} (on disk: {store_path}{p})" for p in paths]
-        lines.append(f"Run it with: nix shell --store {store_path} {installable}")
+        # The drive store has the outputs but not a store path's .drv.
+        run = " ".join(paths) if installable.startswith("/nix/store/") else installable
+        lines.append(f"Run it with: nix shell --store {store_path} {run}")
     else:
         lines += [f"output: {p}" for p in paths]
     if host != "local":

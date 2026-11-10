@@ -91,6 +91,21 @@ class ParseTest(unittest.TestCase):
     def test_full_pressure_ignored(self) -> None:
         self.assertEqual(build_hosts.parse_probe(probe())["pressure"], 0.0)
 
+    def test_result_paths_reads_both_shapes(self) -> None:
+        drv = "/nix/store/aaa-x.drv"
+        shown, every = build_hosts.result_paths([
+            {"drvPath": drv, "outputs": {"out": "/nix/store/bbb-x", "doc": "/nix/store/ccc-x-doc"}},
+            "/nix/store/ddd-opaque",
+        ])
+        self.assertEqual(shown, ["/nix/store/bbb-x", "/nix/store/ccc-x-doc", "/nix/store/ddd-opaque"])
+        self.assertEqual(every, {drv, "/nix/store/bbb-x", "/nix/store/ccc-x-doc", "/nix/store/ddd-opaque"})
+
+    def test_drv_installable(self) -> None:
+        drv = "/nix/store/aaa-x.drv"
+        self.assertEqual(build_hosts.drv_installable(drv), drv + "^*")
+        for same in (drv + "^out", drv + "^*", "/nix/store/bbb-x", "nixpkgs#hello", "/abs/flake#x"):
+            self.assertEqual(build_hosts.drv_installable(same), same)
+
 
 class ChooseTest(_EnvMixin, unittest.TestCase):
     def choose(self, local: str, h1: str | None, h2: str | None, need_gb: float = 0) -> dict:
@@ -169,6 +184,39 @@ class BuildTest(_EnvMixin, unittest.TestCase):
                          ["nix", "build", "--no-link", "--json", "nixpkgs#hello"])
         self.assertEqual(build_hosts.build_argv("x#y", "a@h1")[2:6],
                          ["--eval-store", "auto", "--store", "ssh-ng://a@h1"])
+
+    def test_argv_drive_store_reads_store_paths_from_host(self) -> None:
+        self.assertEqual(
+            build_hosts.build_argv("/nix/store/aaa-x.drv^*", "local", "/d/nix-store"),
+            ["nix", "build", "--eval-store", "auto", "--store", "/d/nix-store",
+             "--no-link", "--json", "/nix/store/aaa-x.drv^*"],
+        )
+        self.assertEqual(
+            build_hosts.build_argv("nixpkgs#hello", "local", "/d/nix-store"),
+            ["nix", "build", "--store", "/d/nix-store", "--no-link", "--json", "nixpkgs#hello"],
+        )
+
+    def test_plain_drv_builds_outputs(self) -> None:
+        argv = self.tmp / "argv"
+        self.fake("nix", f"""
+echo "$*" >> {argv}
+echo '[{{"drvPath":"/nix/store/aaa-x.drv","outputs":{{"out":"/nix/store/bbb-x"}}}}]'
+""")
+        out = asyncio.run(server.nix_build(mock.MagicMock(), "/nix/store/aaa-x.drv", host="local", store="host"))
+        self.assertIn("build --no-link --json /nix/store/aaa-x.drv^*", argv.read_text())
+        self.assertIn("output: /nix/store/bbb-x", out)
+        self.assertIn("/nix/store/aaa-x.drv^*", out)
+
+    def test_opaque_result_does_not_crash(self) -> None:
+        # Nix 2.34 prints an opaque store path as a plain string in `nix build --json`.
+        self.fake("nix", """echo '["/nix/store/eee-top"]'""")
+        out = asyncio.run(server.nix_build(mock.MagicMock(), "/nix/store/eee-top", host="local", store="host"))
+        self.assertIn("Build succeeded", out)
+        self.assertIn("output: /nix/store/eee-top", out)
+
+    def test_drive_store_records_opaque_result(self) -> None:
+        build_hosts.record("/drive", "", ["/nix/store/eee-top"])
+        self.assertEqual(build_hosts._created["/drive"], {"/nix/store/eee-top"})
 
     def test_remote_build_records_only_new_paths(self) -> None:
         log = self.tmp / "argv"
@@ -249,6 +297,52 @@ fi
         self.assertEqual(report["ssh-ng://a@h1"], "deleted 3 paths")
         deletes = [c.split()[-1] for c in calls.read_text().splitlines() if c.startswith("store delete")]
         self.assertEqual(deletes, [top, lib, libc])
+
+    def test_remote_drv_build_is_cleaned_up(self) -> None:
+        drv, out, src = "/nix/store/aaa-x.drv", "/nix/store/bbb-x", "/nix/store/ccc-src"
+        calls = self.tmp / "calls"
+        # `derivation show` uses the 2.34 layout; path-info and store delete always succeed.
+        self.fake("nix", f"""
+echo "$*" >> {calls}
+case "$1" in
+  derivation) echo '{{"derivations":{{"aaa-x.drv":{{"outputs":{{"out":{{"path":"bbb-x"}}}}}}}}}}' ;;
+  build)
+    echo "copying path '{src}' to 'ssh-ng://a@h1'..." >&2
+    echo "building '{drv}'..." >&2
+    echo '[{{"drvPath":"{drv}","outputs":{{"out":"{out}"}}}}]' ;;
+  path-info) echo '{{"{drv}":{{"references":[]}},"{out}":{{"references":[]}},"{src}":{{"references":[]}}}}' ;;
+esac
+""")
+        res = asyncio.run(server.nix_build(mock.MagicMock(), drv, host="a@h1"))
+        self.assertIn("Build succeeded on a@h1", res)
+        self.assertIn("queued for build_cleanup", res)
+        self.assertIn(f"--store ssh-ng://a@h1 --no-link --json {drv}^*", calls.read_text())
+        self.assertEqual(build_hosts._created["ssh-ng://a@h1"], {drv, out, src})
+        report = json.loads(asyncio.run(server.build_cleanup("a@h1")))
+        self.assertEqual(report["ssh-ng://a@h1"], "deleted 3 paths")
+        self.assertNotIn("ssh-ng://a@h1", build_hosts._created)
+        self.assertIn("store delete --store ssh-ng://a@h1", calls.read_text())
+
+    def test_drive_store_drv_build_is_cleaned_up(self) -> None:
+        drv, out = "/nix/store/aaa-x.drv", "/nix/store/bbb-x"
+        argv = self.tmp / "argv"
+        # Real Nix keeps the .drv in the host store, so path-info reports it as null here.
+        self.fake("nix", f"""
+echo "$*" >> {argv}
+case "$1" in
+  build) echo '[{{"drvPath":"{drv}","outputs":{{"out":"{out}"}}}}]' ;;
+  path-info) echo '{{"{drv}":null,"{out}":{{"references":[]}}}}' ;;
+esac
+""")
+        store = storage.store_dir(self.ssd)
+        res = asyncio.run(server.nix_build(mock.MagicMock(), drv, host="local", need_gb=10))
+        self.assertIn(f"build --eval-store auto --store {store} --no-link --json {drv}^*", argv.read_text())
+        self.assertIn(f"output: {out} (on disk: {store}{out})", res)
+        self.assertIn(f"Run it with: nix shell --store {store} {out}", res)
+        report = json.loads(asyncio.run(server.build_cleanup(self.ssd)))
+        self.assertEqual(report[store], "deleted 1 paths")
+        self.assertNotIn(store, build_hosts._created)
+        self.assertIn(f"store delete --store {store} {out}", argv.read_text())
 
 
 class StorageTest(_EnvMixin, unittest.TestCase):

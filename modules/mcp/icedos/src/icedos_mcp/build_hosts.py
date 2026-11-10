@@ -198,7 +198,26 @@ def _outputs_of(drvs: list[str]) -> set[str]:
     return paths
 
 
-def record(store: str, log: str, result: list[dict[str, Any]] | None = None) -> set[str]:
+def result_paths(result: list[Any]) -> tuple[list[str], set[str]]:
+    """(outputs to show, every path) of `nix build --json`.
+
+    Derivations come as {"drvPath", "outputs"}; opaque store paths come as plain strings."""
+    shown: list[str] = []
+    every: set[str] = set()
+    for r in result:
+        if isinstance(r, str):
+            shown.append(r)
+            every.add(r)
+        elif isinstance(r, dict):
+            outs = list(r.get("outputs", {}).values())
+            shown += outs
+            every.update(outs)
+            if drv := r.get("drvPath"):
+                every.add(drv)
+    return shown, every
+
+
+def record(store: str, log: str, result: list[Any] | None = None) -> set[str]:
     """Remember what a build put in store: built drvs and outputs, copied and substituted paths.
 
     On a host only paths the log shows arriving count, so paths it already had are never
@@ -206,9 +225,7 @@ def record(store: str, log: str, result: list[dict[str, Any]] | None = None) -> 
     """
     built = _BUILDING_RE.findall(log)
     paths = set(built) | set(_COPYING_RE.findall(log)) | _outputs_of(built)
-    for r in result or []:
-        paths.add(r["drvPath"])
-        paths.update(r.get("outputs", {}).values())
+    paths |= result_paths(result or [])[1]
     _created.setdefault(store, set()).update(paths)
     return paths
 
@@ -218,22 +235,32 @@ def add(store: str, paths: set[str]) -> set[str]:
     return paths
 
 
+def drv_installable(installable: str) -> str:
+    """A bare .drv path names the file itself and builds nothing, so ask for every output."""
+    if installable.startswith("/nix/store/") and installable.endswith(".drv"):
+        return installable + "^*"
+    return installable
+
+
 def build_argv(installable: str, host: str, store: str = "") -> list[str]:
     """`store` is a drive store dir for a local build; a remote host brings its own store."""
     if host != "local":
         flags = ["--eval-store", "auto", "--store", remote_store(host)]
     else:
         flags = ["--store", store] if store else []
+        # A store path lives in the host store, which a drive store cannot see.
+        if store and installable.startswith("/nix/store/"):
+            flags = ["--eval-store", "auto", *flags]
     return ["nix", "build", *flags, "--no-link", "--json", installable]
 
 
 async def build(
     installable: str, host: str, timeout: float, on_line=None, store: str = ""
-) -> tuple[int, str, list[dict[str, Any]]]:
+) -> tuple[int, str, list[Any]]:
     """Run the build; the JSON result is the last stdout line that parses as a list."""
     with lease(host):
         rc, log, _ = await run_streaming(*build_argv(installable, host, store), timeout=timeout, on_line=on_line)
-    result: list[dict[str, Any]] = []
+    result: list[Any] = []
     for line in reversed(log.splitlines()):
         if line.startswith("["):
             with contextlib.suppress(ValueError):
