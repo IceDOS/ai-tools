@@ -131,9 +131,20 @@ PlasmoidItem {
         return "";
     }
 
+    function runwayColor(r) {
+        var ms = root.runwayMs(r);
+        if (ms < 0 || !r.reset_ts)
+            return Kirigami.Theme.negativeTextColor;
+        var untilResetMs = r.reset_ts - (root.nowMs || Date.now());
+        if (untilResetMs <= 0)
+            return Kirigami.Theme.negativeTextColor;
+        var lost = Math.max(0, Math.min(100, 100 * (1 - ms / untilResetMs)));
+        return root.utilColor(lost);
+    }
+
     function metricColor(r, i) {
         return (i === 4 && root.runwayMs(r) >= 0)
-               ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor;
+               ? root.runwayColor(r) : Kirigami.Theme.textColor;
     }
 
     // cli.py:render_cross, shortened to fit a popup footer

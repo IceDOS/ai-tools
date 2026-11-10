@@ -252,6 +252,32 @@ class TestRenderStatusline(unittest.TestCase):
         r = self._rate(per_hour=0.0, runway_min=None, will_exhaust_before_reset=False)
         self.assertEqual(cli._statusline_segment(r, False, 3), " 5h 40%")
 
+    def test_runway_code_grades_by_lost_window(self):
+        # 10h window: 9h runway -> 10% lost (<50) -> green
+        green = self._rate(runway_min=540.0, reset_ts=10 * 3_600_000)
+        self.assertEqual(cli._runway_code(green, 0), "32")
+        # 10h window: 4h runway -> 60% lost (50..80) -> yellow
+        yellow = self._rate(runway_min=240.0, reset_ts=10 * 3_600_000)
+        self.assertEqual(cli._runway_code(yellow, 0), "33")
+        # 10h window: 1h runway -> 90% lost (>=80) -> red
+        red = self._rate(runway_min=60.0, reset_ts=10 * 3_600_000)
+        self.assertEqual(cli._runway_code(red, 0), "31")
+        # missing or elapsed reset falls back to red
+        no_reset = self._rate(reset_ts=None)
+        self.assertEqual(cli._runway_code(no_reset, 0), "31")
+        past_reset = self._rate(reset_ts=1000)
+        self.assertEqual(cli._runway_code(past_reset, 2000), "31")
+
+    def test_statusline_runway_colour(self):
+        green = self._rate(runway_min=540.0, reset_ts=10 * 3_600_000)
+        self.assertIn(f"\x1b[32m{cli.ENDS_GLYPH}9h\x1b[0m", cli._statusline_segment(green, True, now_ms=0))
+        yellow = self._rate(runway_min=240.0, reset_ts=10 * 3_600_000)
+        self.assertIn(f"\x1b[33m{cli.ENDS_GLYPH}4h\x1b[0m", cli._statusline_segment(yellow, True, now_ms=0))
+        red = self._rate(runway_min=60.0, reset_ts=10 * 3_600_000)
+        self.assertIn(f"\x1b[31m{cli.ENDS_GLYPH}1h\x1b[0m", cli._statusline_segment(red, True, now_ms=0))
+        no_reset = self._rate(runway_min=540.0, reset_ts=None)
+        self.assertIn(f"\x1b[31m{cli.ENDS_GLYPH}9h\x1b[0m", cli._statusline_segment(no_reset, True, now_ms=0))
+
     def test_zero_util_window_hidden(self):
         zero = self._rate(window="seven_day", util=0.0, per_min=0.0, per_hour=0.0,
                           runway_min=None, will_exhaust_before_reset=False)
