@@ -136,26 +136,61 @@ in
           desktopEntry = config.icedos.ai-tools.claude-code.desktopEntry;
           inherit (config.icedos.ai-tools) rules skills;
 
-          # Prune stale claude session data during `icedos gc` (unshade-style).
+          # Prune stale claude session data during `icedos gc` in nh clean style.
           claudeGcHook = ''
             C="''${HOME}/.claude"
             [ -d "''${C}" ] || exit 0
-            # *.jsonl only: ~/.claude/projects/<slug>/memory/*.md holds persistent memory.
-            find "''${C}/projects" -mindepth 2 -type f -name '*.jsonl' -mtime "+${toString gcDays}" -delete 2>/dev/null || true
-            # Each session's <id>/ subdir (tool-results, subagents) is pruned only
-            # when nothing under it changed within retention; memory/ is untouched.
-            for d in "''${C}"/projects/*/*/; do
-              [ -d "$d" ] || continue
-              case "''${d%/}" in */memory) continue ;; esac
-              # Keep sidecars while the sibling transcript still exists.
-              [ -f "''${d%/}.jsonl" ] && continue
-              find "$d" -type f -newermt "@$(( $(date +%s) - ${toString gcDays}*86400 ))" -print -quit | grep -q . || rm -rf -- "$d"
-            done
-            find "''${C}/plans" -maxdepth 1 -type f -name '*.md' -mtime "+${toString gcDays}" -delete 2>/dev/null || true
-            find "''${C}/session-env" -mindepth 1 -maxdepth 1 -type d -mtime "+${toString gcDays}" -exec rm -rf -- {} + 2>/dev/null || true
-            find "''${C}/file-history" -type f -mtime "+${toString gcDays}" -delete 2>/dev/null || true
-            find "''${C}/file-history" -mindepth 1 -type d -empty -delete 2>/dev/null || true
-            find "''${C}/shell-snapshots" -type f -mtime "+${toString gcDays}" -delete 2>/dev/null || true
+
+            gc_section "''${C}" "path"
+
+            # Track stale transcripts so session subdirs can check sibling status before deferred deletion.
+            declare -A stale_jsonl=()
+            if [ -d "''${C}/projects" ]; then
+              while IFS= read -r -d $'\0' f; do
+                stale_jsonl["$f"]=1
+                gc_del "$f"
+              done < <(find "''${C}/projects" -mindepth 2 -type f -name '*.jsonl' -mtime "+${toString gcDays}" -print0 2>/dev/null)
+
+              shopt -s nullglob
+              for d in "''${C}"/projects/*/*/; do
+                [ -d "$d" ] || continue
+                case "''${d%/}" in */memory) continue ;; esac
+                sibling="''${d%/}.jsonl"
+                [ -f "$sibling" ] && [ -z "''${stale_jsonl["$sibling"]-}" ] && continue
+                find "$d" -type f -newermt "@$(( $(date +%s) - ${toString gcDays}*86400 ))" -print -quit | grep -q . || gc_del "''${d%/}"
+              done
+              shopt -u nullglob
+            fi
+
+            if [ -d "''${C}/plans" ]; then
+              while IFS= read -r -d $'\0' f; do
+                gc_del "$f"
+              done < <(find "''${C}/plans" -maxdepth 1 -type f -name '*.md' -mtime "+${toString gcDays}" -print0 2>/dev/null)
+            fi
+
+            if [ -d "''${C}/session-env" ]; then
+              while IFS= read -r -d $'\0' d; do
+                gc_del "$d"
+              done < <(find "''${C}/session-env" -mindepth 1 -maxdepth 1 -type d -mtime "+${toString gcDays}" -print0 2>/dev/null)
+            fi
+
+            if [ -d "''${C}/file-history" ]; then
+              while IFS= read -r -d $'\0' f; do
+                gc_del "$f"
+              done < <(find "''${C}/file-history" -type f -mtime "+${toString gcDays}" -print0 2>/dev/null)
+            fi
+
+            if [ -d "''${C}/shell-snapshots" ]; then
+              while IFS= read -r -d $'\0' f; do
+                gc_del "$f"
+              done < <(find "''${C}/shell-snapshots" -type f -mtime "+${toString gcDays}" -print0 2>/dev/null)
+            fi
+
+            gc_commit
+            if [ -d "''${C}/file-history" ]; then
+              find "''${C}/file-history" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+            fi
+            exit 0
           '';
 
           # Fetcher attr named by source value; "path" copies into store at eval time (pure eval forbids host paths).

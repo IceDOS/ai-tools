@@ -557,9 +557,31 @@
             D=''${D/#\~/$HOME}
             D=''${D//\$HOME/$HOME}
             [ -d "$D" ] || { log_warn "pi-agent gc: data dir $D not found; skipping"; exit 0; }
-            find "$D/sessions" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl' -mtime "+${toString cfg.sessionRetentionDays}" -delete 2>/dev/null || true
-            find "$D/sessions" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
-            find "$D/pi-rlm/snapshots" -maxdepth 1 -type f -name '*.pickle' -mtime "+${toString cfg.sessionRetentionDays}" -delete 2>/dev/null || true
+
+            gc_section "$D" "path"
+
+            if [ -d "$D/sessions" ]; then
+              while IFS= read -r -d $'\0' f; do
+                gc_del "$f"
+              done < <(find "$D/sessions" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl' -mtime "+${toString cfg.sessionRetentionDays}" -print0 2>/dev/null)
+            fi
+
+            if [ -d "$D/pi-rlm/snapshots" ]; then
+              while IFS= read -r -d $'\0' f; do
+                gc_del "$f"
+              done < <(find "$D/pi-rlm/snapshots" -maxdepth 1 -type f -name '*.pickle' -mtime "+${toString cfg.sessionRetentionDays}" -print0 2>/dev/null)
+            fi
+
+            gc_commit
+
+            if [ -d "$D/sessions" ]; then
+              gc_section "$D/sessions" "empty session dir"
+              while IFS= read -r -d $'\0' d; do
+                gc_del "$d"
+              done < <(find "$D/sessions" -mindepth 1 -maxdepth 1 -type d -empty -print0 2>/dev/null)
+              gc_commit
+            fi
+            exit 0
           '';
 
           settingsSeed = pkgs.writeText "pi-agent-settings.json" (builtins.toJSON seedSettings);

@@ -71,36 +71,65 @@
           # Pin sqlite3 for the prune; it's absent from the minimal gc PATH.
           sqlite = "${pkgs.sqlite}/bin/sqlite3";
 
-          # Prune idle opencode runtime data during `icedos gc` (unshade-style).
+          # Prune idle opencode runtime data during `icedos gc` in nh clean style.
           opencodeGcHook = ''
             O="''${HOME}/.local/share/opencode"
             [ -d "''${O}" ] || exit 0
-            find "''${O}/log" -maxdepth 1 -type f -mtime "+${toString sessionRetentionDays}" -delete 2>/dev/null || true
-            find "''${O}/tool-output" -maxdepth 1 -type f -mtime "+${toString sessionRetentionDays}" -delete 2>/dev/null || true
-            find "''${O}/storage/session_diff" -maxdepth 1 -type f -name '*.json' -mtime "+${toString sessionRetentionDays}" -delete 2>/dev/null || true
-            # snapshot/<id> are git object stores. Dir mtime tracks only the single
-            # worktree child's creation, so test file recency, not -mtime.
-            for d in "''${O}"/snapshot/*/; do
-              [ -d "$d" ] || continue
-              case "''${d%/}" in */global) continue ;; esac
-              find "$d" -type f -newermt "@$(( $(date +%s) - ${toString sessionRetentionDays}*86400 ))" -print -quit | grep -q . || rm -rf -- "$d"
-            done
-            # SQLite store dominates disk. Delete per-session children explicitly
-            # (FKs are off) and VACUUM only while no live writer holds the lock.
+
+            gc_section "''${O}" "path"
+
+            if [ -d "''${O}/log" ]; then
+              while IFS= read -r -d $'\0' f; do
+                gc_del "$f"
+              done < <(find "''${O}/log" -maxdepth 1 -type f -mtime "+${toString sessionRetentionDays}" -print0 2>/dev/null)
+            fi
+
+            if [ -d "''${O}/tool-output" ]; then
+              while IFS= read -r -d $'\0' f; do
+                gc_del "$f"
+              done < <(find "''${O}/tool-output" -maxdepth 1 -type f -mtime "+${toString sessionRetentionDays}" -print0 2>/dev/null)
+            fi
+
+            if [ -d "''${O}/storage/session_diff" ]; then
+              while IFS= read -r -d $'\0' f; do
+                gc_del "$f"
+              done < <(find "''${O}/storage/session_diff" -maxdepth 1 -type f -name '*.json' -mtime "+${toString sessionRetentionDays}" -print0 2>/dev/null)
+            fi
+
+            # snapshot/<id> are git object stores.
+            if [ -d "''${O}/snapshot" ]; then
+              shopt -s nullglob
+              for d in "''${O}"/snapshot/*/; do
+                [ -d "$d" ] || continue
+                case "''${d%/}" in */global) continue ;; esac
+                find "$d" -type f -newermt "@$(( $(date +%s) - ${toString sessionRetentionDays}*86400 ))" -print -quit | grep -q . || gc_del "''${d%/}"
+              done
+              shopt -u nullglob
+            fi
+
+            # SQLite store dominates disk. Delete per-session children explicitly.
             NOW_MS=$(( $(date +%s) * 1000 ))
+            CUTOFF_MS=$(( NOW_MS - ${toString sessionRetentionDays}*86400000 ))
+            shopt -s nullglob
             for DB in "''${O}"/*.db; do
               [ -f "$DB" ] || continue
-              # Probe units; an empty store or non-ms timestamps must not mass-delete.
               probe=$("${sqlite}" "$DB" "SELECT CASE WHEN (SELECT COUNT(*) FROM session)=0 THEN 'empty' WHEN (SELECT MAX(time_updated) FROM session)>1000000000000 THEN 'ms' ELSE 'x' END;" 2>/dev/null)
               case "$probe" in
                 empty) continue ;;
                 ms) ;;
                 *) log_warn "opencode gc: $DB timestamps not epoch-ms; skipping prune"; continue ;;
               esac
+
+              stale_count=$("${sqlite}" "$DB" "SELECT COUNT(*) FROM session WHERE time_updated < $CUTOFF_MS;" 2>/dev/null) || stale_count=0
+              [ "$stale_count" -gt 0 ] || continue
+
+              gc_del_entry "$DB ($stale_count stale sessions)"
+              db_before=$(du -sk -- "$DB" 2>/dev/null | cut -f1) || db_before=0
+
               if ! perr=$("${sqlite}" "$DB" "
                 PRAGMA busy_timeout=8000;
                 BEGIN;
-                CREATE TEMP TABLE _stale AS SELECT id FROM session WHERE time_updated < $NOW_MS - ${toString sessionRetentionDays}*86400000;
+                CREATE TEMP TABLE _stale AS SELECT id FROM session WHERE time_updated < $CUTOFF_MS;
                 DELETE FROM part WHERE session_id IN (SELECT id FROM _stale);
                 DELETE FROM message WHERE session_id IN (SELECT id FROM _stale);
                 DELETE FROM session_message WHERE session_id IN (SELECT id FROM _stale);
@@ -117,8 +146,15 @@
                 log_warn "opencode gc: prune failed for $DB: $perr"
               elif ! v_err=$("${sqlite}" "$DB" "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;" 2>&1 >/dev/null); then
                 log_warn "opencode gc: VACUUM skipped for $DB (in use?): $v_err"
+              else
+                db_after=$(du -sk -- "$DB" 2>/dev/null | cut -f1) || db_after=0
+                if [ "$db_before" -gt "$db_after" ]; then
+                  gc_freed_kb $(( db_before - db_after ))
+                fi
               fi
             done
+            shopt -u nullglob
+            exit 0
           '';
         in
         {
