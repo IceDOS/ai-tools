@@ -77,35 +77,24 @@
             [ -d "''${O}" ] || exit 0
 
             gc_section "''${O}" "path"
+            gc_note "Keeping paths newer than ''${DIM_GREEN}${toString sessionRetentionDays}''${NC}d"
 
-            if [ -d "''${O}/log" ]; then
-              while IFS= read -r -d $'\0' f; do
-                gc_del "$f"
-              done < <(find "''${O}/log" -maxdepth 1 -type f -mtime "+${toString sessionRetentionDays}" -print0 2>/dev/null)
-            fi
-
-            if [ -d "''${O}/tool-output" ]; then
-              while IFS= read -r -d $'\0' f; do
-                gc_del "$f"
-              done < <(find "''${O}/tool-output" -maxdepth 1 -type f -mtime "+${toString sessionRetentionDays}" -print0 2>/dev/null)
-            fi
-
-            if [ -d "''${O}/storage/session_diff" ]; then
-              while IFS= read -r -d $'\0' f; do
-                gc_del "$f"
-              done < <(find "''${O}/storage/session_diff" -maxdepth 1 -type f -name '*.json' -mtime "+${toString sessionRetentionDays}" -print0 2>/dev/null)
-            fi
+            gc_by_age ${toString sessionRetentionDays} "''${O}/log" -maxdepth 1 -type f
+            gc_by_age ${toString sessionRetentionDays} "''${O}/tool-output" -maxdepth 1 -type f
+            gc_by_age ${toString sessionRetentionDays} "''${O}/storage/session_diff" -maxdepth 1 -type f -name '*.json'
 
             # snapshot/<id> are git object stores.
-            if [ -d "''${O}/snapshot" ]; then
-              shopt -s nullglob
-              for d in "''${O}"/snapshot/*/; do
-                [ -d "$d" ] || continue
-                case "''${d%/}" in */global) continue ;; esac
-                find "$d" -type f -newermt "@$(( $(date +%s) - ${toString sessionRetentionDays}*86400 ))" -print -quit | grep -q . || gc_del "''${d%/}"
-              done
-              shopt -u nullglob
-            fi
+            shopt -s nullglob
+            for d in "''${O}"/snapshot/*/; do
+              d="''${d%/}"
+              case "$d" in */global) continue ;; esac
+              if find "$d" -type f -newermt "@$(( $(date +%s) - ${toString sessionRetentionDays}*86400 ))" -print -quit | grep -q .; then
+                gc_ok "$d"
+              else
+                gc_del "$d"
+              fi
+            done
+            shopt -u nullglob
 
             # SQLite store dominates disk. Delete per-session children explicitly.
             NOW_MS=$(( $(date +%s) * 1000 ))
@@ -115,13 +104,13 @@
               [ -f "$DB" ] || continue
               probe=$("${sqlite}" "$DB" "SELECT CASE WHEN (SELECT COUNT(*) FROM session)=0 THEN 'empty' WHEN (SELECT MAX(time_updated) FROM session)>1000000000000 THEN 'ms' ELSE 'x' END;" 2>/dev/null)
               case "$probe" in
-                empty) continue ;;
+                empty) gc_ok "$DB"; continue ;;
                 ms) ;;
                 *) log_warn "opencode gc: $DB timestamps not epoch-ms; skipping prune"; continue ;;
               esac
 
               stale_count=$("${sqlite}" "$DB" "SELECT COUNT(*) FROM session WHERE time_updated < $CUTOFF_MS;" 2>/dev/null) || stale_count=0
-              [ "$stale_count" -gt 0 ] || continue
+              [ "$stale_count" -gt 0 ] || { gc_ok "$DB"; continue; }
 
               gc_del_entry "$DB ($stale_count stale sessions)"
               db_before=$(du -sk -- "$DB" 2>/dev/null | cut -f1) || db_before=0

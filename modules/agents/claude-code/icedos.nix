@@ -142,49 +142,29 @@ in
             [ -d "''${C}" ] || exit 0
 
             gc_section "''${C}" "path"
+            gc_note "Keeping paths newer than ''${DIM_GREEN}${toString gcDays}''${NC}d"
 
-            # Track stale transcripts so session subdirs can check sibling status before deferred deletion.
-            declare -A stale_jsonl=()
-            if [ -d "''${C}/projects" ]; then
-              while IFS= read -r -d $'\0' f; do
-                stale_jsonl["$f"]=1
-                gc_del "$f"
-              done < <(find "''${C}/projects" -mindepth 2 -type f -name '*.jsonl' -mtime "+${toString gcDays}" -print0 2>/dev/null)
+            gc_by_age ${toString gcDays} "''${C}/projects" -mindepth 2 -type f -name '*.jsonl'
 
-              shopt -s nullglob
-              for d in "''${C}"/projects/*/*/; do
-                [ -d "$d" ] || continue
-                case "''${d%/}" in */memory) continue ;; esac
-                sibling="''${d%/}.jsonl"
-                [ -f "$sibling" ] && [ -z "''${stale_jsonl["$sibling"]-}" ] && continue
-                find "$d" -type f -newermt "@$(( $(date +%s) - ${toString gcDays}*86400 ))" -print -quit | grep -q . || gc_del "''${d%/}"
-              done
-              shopt -u nullglob
-            fi
-
-            if [ -d "''${C}/plans" ]; then
-              while IFS= read -r -d $'\0' f; do
-                gc_del "$f"
-              done < <(find "''${C}/plans" -maxdepth 1 -type f -name '*.md' -mtime "+${toString gcDays}" -print0 2>/dev/null)
-            fi
-
-            if [ -d "''${C}/session-env" ]; then
-              while IFS= read -r -d $'\0' d; do
+            # A session subdir stays with a recent transcript, else until nothing in it is recent.
+            shopt -s nullglob
+            for d in "''${C}"/projects/*/*/; do
+              d="''${d%/}"
+              case "$d" in */memory) continue ;; esac
+              if [ -f "$d.jsonl" ] && ! find "$d.jsonl" -mtime "+${toString gcDays}" -print -quit | grep -q .; then
+                gc_ok "$d"
+              elif find "$d" -type f -newermt "@$(( $(date +%s) - ${toString gcDays}*86400 ))" -print -quit | grep -q .; then
+                gc_ok "$d"
+              else
                 gc_del "$d"
-              done < <(find "''${C}/session-env" -mindepth 1 -maxdepth 1 -type d -mtime "+${toString gcDays}" -print0 2>/dev/null)
-            fi
+              fi
+            done
+            shopt -u nullglob
 
-            if [ -d "''${C}/file-history" ]; then
-              while IFS= read -r -d $'\0' f; do
-                gc_del "$f"
-              done < <(find "''${C}/file-history" -type f -mtime "+${toString gcDays}" -print0 2>/dev/null)
-            fi
-
-            if [ -d "''${C}/shell-snapshots" ]; then
-              while IFS= read -r -d $'\0' f; do
-                gc_del "$f"
-              done < <(find "''${C}/shell-snapshots" -type f -mtime "+${toString gcDays}" -print0 2>/dev/null)
-            fi
+            gc_by_age ${toString gcDays} "''${C}/plans" -maxdepth 1 -type f -name '*.md'
+            gc_by_age ${toString gcDays} "''${C}/session-env" -mindepth 1 -maxdepth 1 -type d
+            gc_by_age ${toString gcDays} "''${C}/file-history" -type f
+            gc_by_age ${toString gcDays} "''${C}/shell-snapshots" -type f
 
             gc_commit
             if [ -d "''${C}/file-history" ]; then

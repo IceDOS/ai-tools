@@ -559,18 +559,10 @@
             [ -d "$D" ] || { log_warn "pi-agent gc: data dir $D not found; skipping"; exit 0; }
 
             gc_section "$D" "path"
+            gc_note "Keeping paths newer than ''${DIM_GREEN}${toString cfg.sessionRetentionDays}''${NC}d"
 
-            if [ -d "$D/sessions" ]; then
-              while IFS= read -r -d $'\0' f; do
-                gc_del "$f"
-              done < <(find "$D/sessions" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl' -mtime "+${toString cfg.sessionRetentionDays}" -print0 2>/dev/null)
-            fi
-
-            if [ -d "$D/pi-rlm/snapshots" ]; then
-              while IFS= read -r -d $'\0' f; do
-                gc_del "$f"
-              done < <(find "$D/pi-rlm/snapshots" -maxdepth 1 -type f -name '*.pickle' -mtime "+${toString cfg.sessionRetentionDays}" -print0 2>/dev/null)
-            fi
+            gc_by_age ${toString cfg.sessionRetentionDays} "$D/sessions" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl'
+            gc_by_age ${toString cfg.sessionRetentionDays} "$D/pi-rlm/snapshots" -maxdepth 1 -type f -name '*.pickle'
 
             gc_commit
 
