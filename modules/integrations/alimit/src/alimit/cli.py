@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-from . import __version__, accounts, config, poller, rates, sources, speed, store
+from . import __version__, accounts, config, poller, rates, relay, sources, speed, store
 from .rates import compute, to_ms
 
 
@@ -488,6 +488,8 @@ def render_prompt(payload, rlist, now_ms: int, agent: str = "claude") -> str:
     if rate := speed.render(payload.get("transcript_path")):
         last, sep, avg = rate.partition(" · ")
         head.append(_c(CYAN, last, True) + (_c("2", sep, True) + _c(GREY, avg, True) if avg else ""))
+    if seg := relay.segment():
+        head.append(_c(CYAN, seg, True))
     return "  ".join(head) + "\n" + render_bar(rlist, now_ms)
 
 

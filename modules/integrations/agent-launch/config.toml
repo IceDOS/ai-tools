@@ -5,6 +5,9 @@ defaultAgent = ""
 # Whether the launcher shows an "Agent Launcher" entry that opens in the default terminal.
 desktopEntry = true
 
+# Give each launched agent an AGENT_RELAY_ID (set by the agent-relay module).
+relayIds = false
+
 # Agents in the picker, filled by the agent modules. Each entry:
 # command = argv, label = picker text ("" = title-cased name),
 # resumeArgs = extra argv to resume a session ("{id}" = session ID),

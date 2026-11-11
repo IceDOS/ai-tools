@@ -14,6 +14,7 @@
         agents
         defaultAgent
         desktopEntry
+        relayIds
         ;
     in
     {
@@ -31,6 +32,8 @@
 
       # Whether the launcher installs a desktop entry opening in the default terminal.
       desktopEntry = mkBoolOption { default = desktopEntry; };
+
+      relayIds = mkBoolOption { default = relayIds; };
     };
 
   outputs.nixosModules =
@@ -49,7 +52,7 @@
           aiAccountPkg = pkgs.callPackage ../ai-accounts/package.nix { };
 
           launcherConfig = pkgs.writeText "agent-launch.json" (
-            builtins.toJSON { inherit (cfg) agents defaultAgent; }
+            builtins.toJSON { inherit (cfg) agents defaultAgent relayIds; }
           );
 
           agentLaunch = pkgs.writeShellScriptBin "agent-launch" ''

@@ -1,0 +1,6 @@
+[icedos.ai-tools.agent-relay]
+# Agent-to-agent messages allowed in a row before a human message.
+hopLimit = 10
+
+# Relay ID and peer count in alimit's shared status bar.
+statusSegment = true

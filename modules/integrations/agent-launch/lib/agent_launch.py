@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -87,6 +88,17 @@ def choose(cfg: dict, picker=None, agent: str | None = None) -> tuple[str | None
     return name, list(agents.get(name, {}).get("command") or [name])
 
 
+def relay_env(cfg: dict, gen=None) -> dict:
+    """AGENT_RELAY_ID for agent-relay, so the ID is known before the agent starts."""
+    if not cfg.get("relayIds"):
+        return {}
+    return {"AGENT_RELAY_ID": (gen or (lambda: secrets.token_hex(3)[:5]))()}
+
+
+def relay_title(name: str, rid: str) -> str:
+    return f"\033]0;{name} · {rid}\007"
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="agent-launch")
     parser.add_argument("--config", required=True)
@@ -106,9 +118,13 @@ def main(argv: list[str]) -> int:
     cmd += args.args
     account = None if args.auto_account else pick_account(name)
     env = {"AI_ACCOUNT_" + name.upper().replace("-", "_"): account} if account else {}
+    env |= relay_env(cfg)
     if args.print:
         print(json.dumps({"agent": name, "argv": cmd, "account": account, "env": env}), flush=True)
         return 0
+    if rid := env.get("AGENT_RELAY_ID"):
+        sys.stdout.write(relay_title(name, rid) + f"relay ID {rid}\n")
+        sys.stdout.flush()
     os.environ.update(env)
     os.execvp(cmd[0], cmd)
 

@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -119,4 +120,29 @@ class AccountStepTest(unittest.TestCase):
         out = json.loads(buf.getvalue())
         self.assertEqual(out["account"], "work")
         self.assertEqual(out["env"], {"AI_ACCOUNT_CLAUDE": "work"})
+
+
+def test_relay_env_off_by_default():
+    assert al.relay_env({}) == {}
+
+
+def test_relay_env_generates_five_hex():
+    env = al.relay_env({"relayIds": True})
+    assert re.fullmatch(r"[0-9a-f]{5}", env["AGENT_RELAY_ID"])
+
+
+def test_relay_env_uses_generator():
+    assert al.relay_env({"relayIds": True}, gen=lambda: "3f2a9") == {"AGENT_RELAY_ID": "3f2a9"}
+
+
+def test_relay_title():
+    assert al.relay_title("claude", "3f2a9") == "\033]0;claude · 3f2a9\007"
+
+
+def test_print_includes_relay_id(tmp_path, capsys):
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"relayIds": True, "agents": {"pi": {"command": ["pi"]}}}))
+    assert al.main(["--config", str(cfg), "--agent", "pi", "--auto-account", "--print"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert re.fullmatch(r"[0-9a-f]{5}", out["env"]["AGENT_RELAY_ID"])
 

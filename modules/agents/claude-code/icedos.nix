@@ -7,6 +7,7 @@ let
     mkBoolOption
     mkEnumOption
     mkIntBetweenOption
+    mkStrListOption
     mkStrOption
     mkSubmoduleAttrsOption
     mkSubmoduleListOption
@@ -57,6 +58,8 @@ in
 
     # Whether the launcher installs a desktop entry opening in the default terminal.
     desktopEntry = mkBoolOption { default = gcDefaults.desktopEntry; };
+
+    extraArgs = mkStrListOption { default = gcDefaults.extraArgs; };
 
     users = mkSubmoduleAttrsOption { default = { }; } {
       marketplaces = mkSubmoduleListOption { default = [ ]; } {
@@ -134,6 +137,7 @@ in
           claudeUsers = config.icedos.ai-tools.claude-code.users;
           gcDays = config.icedos.ai-tools.claude-code.sessionRetentionDays;
           desktopEntry = config.icedos.ai-tools.claude-code.desktopEntry;
+          claudeExtraArgs = config.icedos.ai-tools.claude-code.extraArgs;
           inherit (config.icedos.ai-tools) rules skills;
 
           # Prune stale claude session data during `icedos gc` in nh clean style.
@@ -387,11 +391,35 @@ in
 
                 config = {
                   programs.claude-code = {
-                    package = lib.mkIf (aiAccountsOn && hasAccounts "claude") (wrapAccounts {
-                      agent = "claude";
-                      package = pkgs.claude-code;
-                      bin = "claude";
-                    });
+                    package =
+                      let
+                        base =
+                          if aiAccountsOn && hasAccounts "claude" then
+                            wrapAccounts {
+                              agent = "claude";
+                              package = pkgs.claude-code;
+                              bin = "claude";
+                            }
+                          else
+                            pkgs.claude-code;
+                      in
+                      lib.mkIf (claudeExtraArgs != [ ] || (aiAccountsOn && hasAccounts "claude")) (
+                        if claudeExtraArgs == [ ] then
+                          base
+                        else
+                          pkgs.symlinkJoin {
+                            name = "claude-code-extra-args";
+                            version = pkgs.claude-code.version;
+                            paths = [ base ];
+                            nativeBuildInputs = [ pkgs.makeWrapper ];
+                            postBuild = ''
+                              rm "$out/bin/claude"
+                              makeWrapper ${base}/bin/claude "$out/bin/claude" \
+                                --add-flags ${lib.escapeShellArg (lib.concatStringsSep " " claudeExtraArgs)}
+                            '';
+                            meta.mainProgram = "claude";
+                          }
+                      );
                     enable = lib.mkDefault true;
                     enableMcpIntegration = true;
                     # Shared icedos.ai-tools entries; mkDefault lets a same-named programs.claude-code entry win.

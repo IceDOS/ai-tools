@@ -5,6 +5,8 @@ includeInIcedosGc = false
 sessionRetentionDays = 30
 # Whether the launcher shows a desktop entry that opens in the default terminal.
 desktopEntry = false
+# Arguments added to every claude invocation, e.g. channel flags from agent-relay.
+extraArgs = []
 
 [[icedos.ai-tools.claude-code.users.username.marketplaces]]
 name = ""
