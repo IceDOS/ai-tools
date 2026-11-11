@@ -67,6 +67,16 @@ class MainTest(unittest.TestCase):
             al.main(["--config", self.cfg])
         execvp.assert_called_once_with("pi-agent", ["pi-agent"])
 
+    def test_agent_flag_auto_account_and_extra_args(self):
+        with mock.patch.object(al, "pick_account") as pick, mock.patch.object(al.os, "execvp") as execvp:
+            al.main(["--config", self.cfg, "--agent", "claude", "--auto-account", "--", "-p", "hi"])
+        pick.assert_not_called()
+        execvp.assert_called_once_with("claude", ["claude", "-p", "hi"])
+
+    def test_unknown_agent_flag_fails(self):
+        with redirect_stdout(io.StringIO()), mock.patch.object(al.sys, "stderr", io.StringIO()):
+            self.assertEqual(al.main(["--config", self.cfg, "--agent", "nope"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

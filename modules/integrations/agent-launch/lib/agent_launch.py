@@ -75,10 +75,13 @@ def pick_account(name: str, lister=None, picker=None) -> str | None:
     return rows[lines.index(chosen)]["account"] if chosen in lines else None
 
 
-def choose(cfg: dict, picker=None) -> tuple[str | None, list[str] | None]:
+def choose(cfg: dict, picker=None, agent: str | None = None) -> tuple[str | None, list[str] | None]:
     agents = cfg.get("agents", {})
     default = cfg.get("defaultAgent", "")
-    name = default if default in agents else (picker or pick_agent)(cfg)
+    if agent:
+        name = agent if agent in agents else None
+    else:
+        name = default if default in agents else (picker or pick_agent)(cfg)
     if name is None:
         return None, None
     return name, list(agents.get(name, {}).get("command") or [name])
@@ -89,12 +92,19 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--config", required=True)
     # For wrappers such as zed-agent-bridge that start the agent themselves.
     parser.add_argument("--print", action="store_true", help="print the choice as JSON instead of starting it")
+    parser.add_argument("--agent", help="start this agent without the picker")
+    parser.add_argument("--auto-account", action="store_true",
+                        help="skip the account picker; ai-account picks the sticky or auto account")
+    parser.add_argument("args", nargs="*", help="extra arguments for the agent, after --")
     args = parser.parse_args(argv)
     cfg = json.loads(Path(args.config).read_text())
-    name, cmd = choose(cfg)
+    name, cmd = choose(cfg, agent=args.agent)
     if not name or not cmd:
+        if args.agent:
+            print(f"agent-launch: unknown agent {args.agent!r}; valid: {', '.join(cfg.get('agents', {}))}", file=sys.stderr)
         return 1
-    account = pick_account(name)
+    cmd += args.args
+    account = None if args.auto_account else pick_account(name)
     env = {"AI_ACCOUNT_" + name.upper().replace("-", "_"): account} if account else {}
     if args.print:
         print(json.dumps({"agent": name, "argv": cmd, "account": account, "env": env}), flush=True)
