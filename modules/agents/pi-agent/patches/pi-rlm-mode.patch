@@ -1,0 +1,48 @@
+--- package/src/index.ts
++++ package/src/index.ts
+@@ -65,6 +65,14 @@
+ 	}
+ }
+ 
++// pi-clm appends its guidance before this handler runs; RLM mode would otherwise drop it.
++const CLM_HEADINGS = ["## Editable context", "## Live context management"];
++function clmSection(prompt: string): string {
++	const at = Math.min(...CLM_HEADINGS.map((h) => prompt.indexOf(h)).filter((i) => i >= 0));
++	if (!Number.isFinite(at)) return "";
++	return `\n\n${prompt.slice(at)}\n\nIn RLM mode, edit the context mirror with Python file I/O in ipython.`;
++}
++
+ export default function (pi: ExtensionAPI) {
+ 	// Our own depth in the rlm() recursion (0 = root interactive agent).
+ 	const depth = Number.parseInt(process.env.PI_RLM_DEPTH ?? "", 10) || 0;
+@@ -182,7 +190,8 @@
+ 		if (!defaultTools) {
+ 			defaultTools = active.includes("ipython") ? active : [...active, "ipython"];
+ 		}
+-		pi.setActiveTools(["ipython"]);
++		// pi-clm's tools stay, so RLM mode keeps context management.
++		pi.setActiveTools(["ipython", ...active.filter((t) => t.startsWith("live_context_"))]);
+ 	};
+ 
+ 	const restoreTools = () => {
+@@ -268,7 +277,11 @@
+ 			snapshotPath = null;
+ 		}
+ 
++		// getFlag() only returns the parsed CLI value once the session starts.
++		if (pi.getFlag("rlm")) rlmMode = true;
+ 		if (!rlmMode) {
++			// PI_RLM_AUTOLOAD=1 starts in RLM mode unless /rlm turned it off in this session.
++			rlmMode = process.env.PI_RLM_AUTOLOAD === "1";
+ 			// restore a mode persisted by /rlm in a previous run of this session
+ 			for (const entry of ctx.sessionManager.getEntries()) {
+ 				if (entry.type === "custom" && entry.customType === MODE_ENTRY_TYPE) {
+@@ -296,7 +309,7 @@
+ 		const info = { cwd: ctx.cwd, depth, maxDepth: getMaxDepth() };
+ 		const harness = buildHarnessSection(loadGlobalHarness(globalHarnessPath), loadLocalHarness(ctx));
+ 		const base = rlmMode
+-			? buildRlmSystemPrompt(info)
++			? `${buildRlmSystemPrompt(info)}${clmSection(event.systemPrompt)}`
+ 			: `${event.systemPrompt}\n\n${buildRlmAddendum(info)}`;
+ 		return { systemPrompt: harness ? `${base}\n\n${harness}` : base };
+ 	});

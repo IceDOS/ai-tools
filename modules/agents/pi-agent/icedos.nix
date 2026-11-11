@@ -132,6 +132,7 @@
           recursive-language-models = {
             enable = mkBoolOption { default = e.recursive-language-models.enable; };
             version = mkStrOption { default = e.recursive-language-models.version; };
+            autoload = mkBoolOption { default = e.recursive-language-models.autoload; };
 
             maxDepth = mkIntBetweenOption {
               path = "icedos.ai-tools.pi-agent.extensions.recursive-language-models.maxDepth";
@@ -477,6 +478,11 @@
                 echo "warning: failed to apply pi-rlm-child-extensions.patch to $dir" >&2
               fi
             fi
+            if [ -d "$dir" ] && ! ${pkgs.gnugrep}/bin/grep -q "PI_RLM_AUTOLOAD" "$dir/src/index.ts" 2>/dev/null; then
+              if ! ${pkgs.patch}/bin/patch -p1 -d "$dir" --forward --no-backup-if-mismatch -r - < ${./patches/pi-rlm-mode.patch}; then
+                echo "warning: failed to apply pi-rlm-mode.patch to $dir" >&2
+              fi
+            fi
           '';
 
           npmWrapper = pkgs.writeShellScriptBin "npm" ''
@@ -512,6 +518,9 @@
             "--set-default"
             "PI_RLM_PYTHON"
             "${pkgs.python3}/bin/python3"
+            "--set-default"
+            "PI_RLM_AUTOLOAD"
+            (if rlm.autoload then "1" else "0")
             "--set-default"
             "PI_RLM_MAX_DEPTH"
             (toString rlm.maxDepth)

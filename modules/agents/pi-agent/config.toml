@@ -112,6 +112,8 @@ compactPrompt = ""
 enable = false
 # Exact npm version to pin, e.g. "0.2.0"; "" installs the newest release once.
 version = ""
+# Start every session in RLM mode (ipython-only tools, RLM system prompt); /rlm still toggles it per session.
+autoload = false
 # rlm() recursion limit, exported as PI_RLM_MAX_DEPTH; 0 turns recursion off.
 maxDepth = 2
 
