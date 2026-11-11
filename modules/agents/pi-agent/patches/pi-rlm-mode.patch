@@ -1,6 +1,6 @@
 --- package/src/index.ts
 +++ package/src/index.ts
-@@ -65,6 +65,14 @@
+@@ -65,6 +65,25 @@
  	}
  }
  
@@ -12,20 +12,30 @@
 +	return `\n\n${prompt.slice(at)}\n\nIn RLM mode, edit the context mirror with Python file I/O in ipython.`;
 +}
 +
++// icedos pi-rlm-mode.patch v3. RLM mode swaps only these for ipython; other tools stay.
++const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
++
++// The RLM prompt replaces pi's, which carried the kept tools' guidelines.
++function otherToolsSection(tools: string[], guidelines: Record<string, string[] | string> | undefined): string {
++	const others = tools.filter((t) => t !== "ipython");
++	if (others.length === 0) return "";
++	const rules = others.flatMap((t) => guidelines?.[t] ?? []).map((g) => `- ${g}`);
++	return `\n\n# Other tools\nBesides ipython you can call: ${others.join(", ")}.${rules.length ? `\n${rules.join("\n")}` : ""}`;
++}
++
  export default function (pi: ExtensionAPI) {
  	// Our own depth in the rlm() recursion (0 = root interactive agent).
  	const depth = Number.parseInt(process.env.PI_RLM_DEPTH ?? "", 10) || 0;
-@@ -182,7 +190,8 @@
+@@ -182,7 +201,7 @@
  		if (!defaultTools) {
  			defaultTools = active.includes("ipython") ? active : [...active, "ipython"];
  		}
 -		pi.setActiveTools(["ipython"]);
-+		// pi-clm's tools stay, so RLM mode keeps context management.
-+		pi.setActiveTools(["ipython", ...active.filter((t) => t.startsWith("live_context_"))]);
++		pi.setActiveTools(["ipython", ...active.filter((t) => t !== "ipython" && !BUILTIN_TOOLS.has(t))]);
  	};
  
  	const restoreTools = () => {
-@@ -268,7 +277,11 @@
+@@ -268,7 +287,11 @@
  			snapshotPath = null;
  		}
  
@@ -37,12 +47,12 @@
  			// restore a mode persisted by /rlm in a previous run of this session
  			for (const entry of ctx.sessionManager.getEntries()) {
  				if (entry.type === "custom" && entry.customType === MODE_ENTRY_TYPE) {
-@@ -296,7 +309,7 @@
+@@ -296,7 +319,7 @@
  		const info = { cwd: ctx.cwd, depth, maxDepth: getMaxDepth() };
  		const harness = buildHarnessSection(loadGlobalHarness(globalHarnessPath), loadLocalHarness(ctx));
  		const base = rlmMode
 -			? buildRlmSystemPrompt(info)
-+			? `${buildRlmSystemPrompt(info)}${clmSection(event.systemPrompt)}`
++			? `${buildRlmSystemPrompt(info)}${otherToolsSection(pi.getActiveTools(), event.systemPromptOptions?.toolGuidelines)}${clmSection(event.systemPrompt)}`
  			: `${event.systemPrompt}\n\n${buildRlmAddendum(info)}`;
  		return { systemPrompt: harness ? `${base}\n\n${harness}` : base };
  	});

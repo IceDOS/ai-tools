@@ -478,8 +478,11 @@
                 echo "warning: failed to apply pi-rlm-child-extensions.patch to $dir" >&2
               fi
             fi
-            if [ -d "$dir" ] && ! ${pkgs.gnugrep}/bin/grep -q "PI_RLM_AUTOLOAD" "$dir/src/index.ts" 2>/dev/null; then
-              if ! ${pkgs.patch}/bin/patch -p1 -d "$dir" --forward --no-backup-if-mismatch -r - < ${./patches/pi-rlm-mode.patch}; then
+            if [ -d "$dir" ] && ! ${pkgs.gnugrep}/bin/grep -q "pi-rlm-mode.patch v3" "$dir/src/index.ts" 2>/dev/null; then
+              # An older version cannot be patched over; pi reinstalls the package and the npm shim patches it.
+              if ${pkgs.gnugrep}/bin/grep -q "clmSection" "$dir/src/index.ts" 2>/dev/null; then
+                rm -rf "$dir"
+              elif ! ${pkgs.patch}/bin/patch -p1 -d "$dir" --forward --no-backup-if-mismatch -r - < ${./patches/pi-rlm-mode.patch}; then
                 echo "warning: failed to apply pi-rlm-mode.patch to $dir" >&2
               fi
             fi

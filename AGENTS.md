@@ -122,7 +122,8 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   the wrapper points `PI_CLM_STEERING` at the brief inside pi's npm dir, and pi-rlm gets
   `PI_RLM_PYTHON` and `PI_RLM_MAX_DEPTH`. The wrapper and its npm shim patch the installed pi-rlm:
   `patches/pi-rlm-child-extensions.patch` loads `PI_RLM_EXTENSIONS` into `rlm()` children, and
-  `patches/pi-rlm-mode.patch` reads `--rlm` at session start, starts in RLM mode when `PI_RLM_AUTOLOAD=1` (`recursive-language-models.autoload`), and keeps pi-clm's guidance and tools in RLM mode. Prefer an upstream pi package in `packages` over a new
+  `patches/pi-rlm-mode.patch` reads `--rlm` at session start, starts in RLM mode when `PI_RLM_AUTOLOAD=1` (`recursive-language-models.autoload`), and in RLM mode swaps only pi's built-in coding tools for ipython, keeping extension and MCP tools, their guidelines and pi-clm's guidance.
+  Bump its `v<N>` marker on every change; the wrapper removes an older patched copy so pi reinstalls it. Prefer an upstream pi package in `packages` over a new
   shipped extension; ship code here only when no package does the job.
   `hooks.rateLimit` entries run their `command` when a listed provider's error has one of their
   `errorKinds` (`usage_limit` covers pi's non-retryable account limits). At most one hook runs per
