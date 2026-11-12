@@ -29,7 +29,9 @@ pkgs.buildNpmPackage {
 
   # package-lock.json was generated from this trimmed package.json. frida is dropped:
   # its install script downloads a prebuilt binding, which the sandbox forbids.
+  # fetchNpmDeps prefers npm-shrinkwrap.json over package-lock.json, so drop the shipped one.
   postPatch = ''
+    rm -f npm-shrinkwrap.json
     ${lib.getExe pkgs.jq} 'del(.devDependencies, .optionalDependencies.frida, .scripts.prepare, .scripts.prepack)' \
       package.json > package.json.new
     mv package.json.new package.json
