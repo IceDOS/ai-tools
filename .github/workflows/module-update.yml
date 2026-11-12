@@ -229,3 +229,39 @@ jobs:
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           PR_HEAD: ${{ steps.pr.outputs.head }}
+
+      # A fresh token, since the first mint may be what failed. The App has no issues
+      # permission, so cache-server's report-failure workflow posts the issue comment.
+      - name: Mint report token
+        id: report-token
+        if: failure()
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.DISPATCH_APP_ID }}
+          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
+          owner: IceDOS
+          repositories: cache-server
+          permission-actions: write
+
+      - name: Report failure to cache-server
+        if: failure() && steps.report-token.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.report-token.outputs.token }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'IceDOS',
+              repo: 'cache-server',
+              workflow_id: 'report-failure.yml',
+              ref: 'main',
+              inputs: {
+                'source-repo': context.repo.repo,
+                workflow: context.workflow,
+                module: process.env.MODULE,
+                'run-id': String(context.runId),
+                ref: context.ref,
+                event: context.eventName,
+              },
+            });
+        env:
+          MODULE: ${{ inputs.module }}
