@@ -27,14 +27,18 @@ export function runHook(
       if (!isRelay) relay.markHuman(rec.id);
       return "";
     }
-    case "agy-session-start":
+    case "agy-session-start": {
+      // agy runs this at the first prompt, after the watcher may have marked it busy.
+      const known = rec?.pid === pid && rec.agent?.busy !== undefined;
       relay.register({
         kind: "agy",
         pid,
         cwd: cwdOf(pid),
         id: env.AGENT_RELAY_ID,
+        ...(known ? {} : { agent: { busy: false } }),
       });
       return "{}";
+    }
     case "agy-pre-invocation": {
       if (!rec) return "{}";
       let text = "";
@@ -45,11 +49,12 @@ export function runHook(
         text = stdin;
       }
       const isRelay = text.trim().startsWith(RELAY_PREFIX.trim());
-      const lastInput = rec.agent?.lastInput as string | undefined;
-      if (text !== lastInput) {
+      const agent: Record<string, unknown> = { ...rec.agent, busy: true };
+      if (text !== rec.agent?.lastInput) {
         if (!isRelay) relay.markHuman(rec.id);
-        relay.update(rec.id, { agent: { ...rec.agent, lastInput: text } });
+        agent.lastInput = text;
       }
+      relay.update(rec.id, { agent });
       return "{}";
     }
     case "agy-stop": {
@@ -65,7 +70,10 @@ export function runHook(
         } catch {}
         fs.rmSync(path.join(dir, f), { force: true });
       }
-      return texts.length ? JSON.stringify({ decision: "continue", reason: texts.join("\n\n") }) : "{}";
+      if (texts.length) return JSON.stringify({ decision: "continue", reason: texts.join("\n\n") });
+      // agent-relay-agy-watch pastes queued messages only while this flag is false.
+      relay.update(rec.id, { agent: { ...relay.get(rec.id)?.agent, busy: false } });
+      return "{}";
     }
     default:
       return "";

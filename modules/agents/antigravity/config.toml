@@ -11,6 +11,9 @@
 # Whether the launcher shows a desktop entry that opens in the default terminal.
 desktopEntry = false
 
+# Command prepended to agy in agent-launch and the desktop entry (set by agent-relay).
+launchWrapper = []
+
 # Whether to wire Home Manager's shared programs.mcp.servers registry
 # into ~/.gemini/config/mcp_config.json for Antigravity.
 enableMcpIntegration = true

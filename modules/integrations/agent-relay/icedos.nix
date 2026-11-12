@@ -68,9 +68,12 @@
               ];
             }
             // optionalAttrs (has "antigravity") {
-              antigravity.extra-mcp-servers.agent-relay = {
-                command = "${pkg}/bin/agent-relay-mcp";
-                args = [ "agy" ];
+              antigravity = {
+                extra-mcp-servers.agent-relay = {
+                  command = "${pkg}/bin/agent-relay-mcp";
+                  args = [ "agy" ];
+                };
+                launchWrapper = [ "${pkg}/bin/agent-relay-agy" ];
               };
             }
             // optionalAttrs (has "agent-launch") {

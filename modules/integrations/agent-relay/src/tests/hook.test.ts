@@ -83,3 +83,40 @@ test("agy-pre-invocation tracks lastInput: repeated calls with same input reset 
   assert.ok(reset2! > reset1!);
   assert.equal(relay.get(r.id)!.agent?.lastInput, "second prompt");
 });
+
+test("agy-session-start marks the session idle", () => {
+  const { relay } = tmpRelay();
+  runHook("agy-session-start", "{}", relay, 300, {}, () => "/c");
+  assert.equal(relay.findByPid([300])!.agent?.busy, false);
+});
+
+test("agy-session-start keeps a busy flag the watcher already set", () => {
+  const { relay } = tmpRelay();
+  const r = relay.register({ kind: "agy", pid: 300, cwd: "/c", agent: { busy: true } });
+  runHook("agy-session-start", "{}", relay, 300, {}, () => "/c");
+  assert.equal(relay.get(r.id)!.agent?.busy, true);
+});
+
+test("agy-pre-invocation marks busy on every call, also for a repeated input", () => {
+  const { relay } = tmpRelay();
+  const r = relay.register({ kind: "agy", pid: 300, cwd: "/c", agent: { busy: false } });
+  runHook("agy-pre-invocation", JSON.stringify({ lastUserInput: "same" }), relay, 300, {});
+  assert.equal(relay.get(r.id)!.agent?.busy, true);
+  assert.equal(relay.get(r.id)!.agent?.lastInput, "same");
+  relay.update(r.id, { agent: { ...relay.get(r.id)!.agent, busy: false } });
+  runHook("agy-pre-invocation", JSON.stringify({ lastUserInput: "same" }), relay, 300, {});
+  assert.equal(relay.get(r.id)!.agent?.busy, true);
+});
+
+test("agy-stop with an empty inbox marks idle, with messages stays busy", () => {
+  const { relay } = tmpRelay();
+  const a = relay.register({ kind: "pi", pid: 100, cwd: "/a", id: "aaaa1" });
+  const g = relay.register({ kind: "agy", pid: 300, cwd: "/c", id: "cccc3", agent: { busy: true, lastInput: "x" } });
+  relay.link(a.id, g.id);
+  relay.send(a.id, g.id, "hello", 10);
+  runHook("agy-stop", "{}", relay, 300, {});
+  assert.equal(relay.get(g.id)!.agent?.busy, true);
+  assert.equal(runHook("agy-stop", "{}", relay, 300, {}), "{}");
+  assert.equal(relay.get(g.id)!.agent?.busy, false);
+  assert.equal(relay.get(g.id)!.agent?.lastInput, "x");
+});

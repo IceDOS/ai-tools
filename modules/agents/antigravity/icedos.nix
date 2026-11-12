@@ -15,6 +15,7 @@
         desktopEntry
         enableMcpIntegration
         extra-mcp-servers
+        launchWrapper
         rules
         skills
         statusLine
@@ -32,6 +33,10 @@
 
       # Additional MCP servers registered exclusively for Antigravity.
       extra-mcp-servers = mkAttrsOfOption { default = extra-mcp-servers; } lib.types.anything;
+
+      # Command prepended to agy in agent-launch and the desktop entry,
+      # such as agent-relay's PTY proxy.
+      launchWrapper = mkStrListOption { default = launchWrapper; };
 
       # Global rules, written to ~/.gemini/config/rules/<name>.md (agy reads that folder's top level only).
       rules = mkAttrsOfOption { default = rules; } lib.types.lines;
@@ -78,6 +83,7 @@
             desktopEntry
             enableMcpIntegration
             extra-mcp-servers
+            launchWrapper
             statusLine
             statusLineStackWithDefault
             terminal-title
@@ -144,11 +150,14 @@
               }/bin/agy"
             else
               "${pkgs.antigravity-cli}/bin/agy";
+
+          # A launch wrapper such as agent-relay's PTY proxy takes the agy path as its last argument.
+          agyCommand = launchWrapper ++ [ agyBin ];
         in
         {
           icedos.ai-tools.agent-launch.agents.antigravity = {
             # agy is not on PATH; this module only wires its config.
-            command = lib.mkDefault [ agyBin ];
+            command = lib.mkDefault agyCommand;
             resumeArgs = lib.mkDefault [
               "--conversation"
               "{id}"
@@ -257,7 +266,7 @@
                     name = "Antigravity CLI";
                     comment = "AI coding assistant (terminal UI)";
                     icon = "utilities-terminal";
-                    exec = agyBin;
+                    exec = lib.escapeShellArgs agyCommand;
                     terminal = true;
                     categories = [
                       "Development"
