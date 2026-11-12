@@ -240,7 +240,7 @@ def test_allowlist_filtering_all_countries_is_logged(tmp_path):
     calls = []
     run = fake_run({"status": (0, CONNECTED), "countries": (0, COUNTRIES)}, calls)
     assert main(tmp_path, Clock(), run, PI_VPN_ROTATE_COUNTRIES="XX") == 1
-    assert "no countries match allowlist" in (tmp_path / "pi-vpn-rotate.log").read_text()
+    assert "no countries left after the allowlist and blocklist" in (tmp_path / "pi-vpn-rotate.log").read_text()
 
 
 def test_countries_allowlist_filters_candidates(tmp_path):
@@ -249,6 +249,22 @@ def test_countries_allowlist_filters_candidates(tmp_path):
     run = fake_run({"countries": (0, COUNTRIES), "status": (0, status), "connect": (0, CONNECT_OK)}, calls)
     assert main(tmp_path, Clock(), run, PI_VPN_ROTATE_COUNTRIES="AL") == 0
     assert ["connect", "--country", "AL", "--random"] in calls
+
+
+def test_excluded_countries_skip_candidates(tmp_path):
+    calls = []
+    status = "Status: Connected\nServer: AL#3 in Tirana\n"
+    run = fake_run({"countries": (0, COUNTRIES), "status": (0, status), "connect": (0, CONNECT_OK)}, calls)
+    assert main(tmp_path, Clock(), run, PI_VPN_ROTATE_EXCLUDED_COUNTRIES="at") == 0
+    assert ["connect", "--country", "BE", "--random"] in calls
+    assert not any("AT" in c for c in calls)
+
+
+def test_excluded_countries_win_over_the_allowlist(tmp_path):
+    calls = []
+    run = fake_run({"status": (0, CONNECTED), "countries": (0, COUNTRIES)}, calls)
+    assert main(tmp_path, Clock(), run, PI_VPN_ROTATE_COUNTRIES="AL", PI_VPN_ROTATE_EXCLUDED_COUNTRIES="AL") == 1
+    assert "no countries left after the allowlist and blocklist" in (tmp_path / "pi-vpn-rotate.log").read_text()
 
 
 def test_server_with_region_suffix_extracts_base_country(tmp_path):

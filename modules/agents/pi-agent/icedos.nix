@@ -89,6 +89,7 @@
             enable = mkBoolOption { default = e.vpn-rotate.enable; };
             providers = mkStrListOption { default = e.vpn-rotate.providers; };
             countries = mkStrListOption { default = e.vpn-rotate.countries; };
+            excludedCountries = mkStrListOption { default = e.vpn-rotate.excludedCountries; };
 
             cooldownSeconds = mkIntBetweenOption {
               path = "icedos.ai-tools.pi-agent.extensions.vpn-rotate.cooldownSeconds";
@@ -346,6 +347,7 @@
               --set PI_VPN_ROTATE_MAX_PER_HOUR ${toString vpn.maxPerHour} \
               --set PI_VPN_ROTATE_MAX_RETRIES 3 \
               --set PI_VPN_ROTATE_COUNTRIES ${lib.escapeShellArg (lib.concatStringsSep "," vpn.countries)} \
+              --set PI_VPN_ROTATE_EXCLUDED_COUNTRIES ${lib.escapeShellArg (lib.concatStringsSep "," vpn.excludedCountries)} \
               --set PI_VPN_ROTATE_BUN ${pkgs.bun}/bin/bun
           '';
 

@@ -287,7 +287,7 @@ def restore_on_signal(pending, lock_file, log):
     return {signum: signal.signal(signum, handler) for signum in (signal.SIGTERM, signal.SIGINT)}
 
 
-def rotate(state, record, run, now, protonvpn, log, countries_allowlist=None, has_iface=os.path.exists, get_ip=fetch_egress_ip, probe=None, max_attempts=MAX_CANDIDATES, *, sleep, deadline, pending, flag_current=False):
+def rotate(state, record, run, now, protonvpn, log, countries_allowlist=None, has_iface=os.path.exists, get_ip=fetch_egress_ip, probe=None, max_attempts=MAX_CANDIDATES, *, sleep, deadline, pending, flag_current=False, countries_blocklist=None):
     code, text = run([protonvpn, "status"], PROTON_TIMEOUT_S)
     if code != 0:
         log(f"status check failed: {text.strip()}")
@@ -312,8 +312,11 @@ def rotate(state, record, run, now, protonvpn, log, countries_allowlist=None, ha
     if countries_allowlist:
         allow = set(countries_allowlist)
         countries = [c for c in countries if c in allow]
+    if countries_blocklist:
+        block = set(countries_blocklist)
+        countries = [c for c in countries if c not in block]
     if not countries:
-        log("no countries match allowlist")
+        log("no countries left after the allowlist and blocklist")
         return False
     pool = [c for c in countries if c != current] if current else countries
     if not pool:
@@ -452,6 +455,8 @@ def main(argv=None, env=os.environ, stdin=sys.stdin, run=run, now=time.time, sle
         max_retries = 3
     countries_env = env.get("PI_VPN_ROTATE_COUNTRIES", "")
     countries_allowlist = [c.strip().upper() for c in countries_env.split(",") if c.strip()]
+    excluded_env = env.get("PI_VPN_ROTATE_EXCLUDED_COUNTRIES", "")
+    countries_blocklist = [c.strip().upper() for c in excluded_env.split(",") if c.strip()]
     what = f"{payload.get('provider', '?')} {payload.get('errorKind', '?')}"
     failed_at = now()
     lock_file = acquire(lock, now, sleep)
@@ -487,7 +492,7 @@ def main(argv=None, env=os.environ, stdin=sys.stdin, run=run, now=time.time, sle
         except (ValueError, TypeError):
             max_candidates = MAX_CANDIDATES
         flag_current = payload.get("errorKind") in ("rate_limit", "usage_limit")
-        rotated = rotate(state, record, run, now, protonvpn, log, countries_allowlist, has_iface, get_ip=get_ip, probe=probe_fn, max_attempts=max_candidates, sleep=sleep, deadline=failed_at + ROTATE_BUDGET_S, pending=pending, flag_current=flag_current)
+        rotated = rotate(state, record, run, now, protonvpn, log, countries_allowlist, has_iface, get_ip=get_ip, probe=probe_fn, max_attempts=max_candidates, sleep=sleep, deadline=failed_at + ROTATE_BUDGET_S, pending=pending, flag_current=flag_current, countries_blocklist=countries_blocklist)
         log(f"{what}: {'rotated' if rotated else 'rotation failed'}")
         return 0 if rotated else 1
     finally:

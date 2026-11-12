@@ -72,6 +72,8 @@ enable = false
 providers = ["opencode-free"]
 # Country codes to rotate through; empty uses every country.
 countries = []
+# Country codes never to rotate to; applied after countries.
+excludedCountries = []
 # No rotation within this many seconds of the last one, from any session.
 cooldownSeconds = 600
 # At most this many rotations in any hour.
