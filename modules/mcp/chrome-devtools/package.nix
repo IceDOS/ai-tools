@@ -17,17 +17,21 @@ pkgs.stdenvNoCC.mkDerivation (finalAttrs: {
     inherit (source) hash;
   };
 
-  nativeBuildInputs = [ pkgs.makeWrapper ];
+  nativeBuildInputs = [
+    pkgs.jq
+    pkgs.makeWrapper
+  ];
 
   installPhase = ''
     runHook preInstall
 
     mkdir -p $out/lib/chrome-devtools-mcp
-    cp -r build package.json LICENSE $out/lib/chrome-devtools-mcp/
+    cp -r . $out/lib/chrome-devtools-mcp/
 
-    for bin in chrome-devtools-mcp chrome-devtools; do
+    # Bin paths come from package.json because upstream moves the build output between releases.
+    jq -r '.bin | to_entries[] | "\(.key) \(.value)"' package.json | while read -r bin path; do
       makeWrapper ${lib.getExe nodejs} $out/bin/$bin \
-        --add-flags $out/lib/chrome-devtools-mcp/build/src/bin/$bin.js \
+        --add-flags $out/lib/chrome-devtools-mcp/$path \
         --set-default CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS 1
     done
 
