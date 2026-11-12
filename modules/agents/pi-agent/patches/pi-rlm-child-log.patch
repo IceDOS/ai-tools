@@ -1,0 +1,76 @@
+--- package/src/child.ts
++++ package/src/child.ts
+@@ -21,6 +21,17 @@
+ 	cwd: string;
+ 	env?: NodeJS.ProcessEnv;
+ 	signal?: AbortSignal;
++	/** icedos pi-rlm-child-log.patch v1: appends every JSONL record of the child here. */
++	logFile?: string;
++}
++
++let childLogSeq = 0;
++
++function appendChildLog(file: string | undefined, record: unknown): void {
++	if (!file) return;
++	try {
++		fs.appendFileSync(file, `${typeof record === "string" ? record : JSON.stringify(record)}\n`);
++	} catch {}
+ }
+ 
+ export interface PiJsonRunResult {
+@@ -146,6 +157,7 @@
+ 
+ 		const processLine = (line: string) => {
+ 			if (!line.trim()) return;
++			appendChildLog(opts.logFile, line);
+ 			let event: { type?: string; message?: Record<string, never> };
+ 			try {
+ 				event = JSON.parse(line);
+@@ -259,13 +271,46 @@
+ 	if (opts.model) args.push("--model", opts.model);
+ 	args.push(opts.prompt);
+ 
++	// The viewer extension sets the dir per session; nested children inherit it and record their parent.
++	const logDir = process.env.PI_RLM_CHILD_LOG_DIR;
++	const childId = `${Date.now()}-${process.pid}-${++childLogSeq}`;
++	let logFile: string | undefined;
++	if (logDir) {
++		try {
++			fs.mkdirSync(logDir, { recursive: true });
++			logFile = path.join(logDir, `${childId}.jsonl`);
++		} catch {}
++	}
++	appendChildLog(logFile, {
++		type: "rlm_child_start",
++		id: childId,
++		parent: process.env.PI_RLM_CHILD_ID || null,
++		depth: opts.depth,
++		model: opts.model ?? null,
++		prompt: opts.prompt,
++		cwd: opts.cwd,
++		pid: process.pid,
++		startedAt: Date.now(),
++	});
++
+ 	const env = {
+ 		...process.env,
+ 		PI_RLM_DEPTH: String(opts.depth),
+ 		PI_RLM_MAX_DEPTH: String(opts.maxDepth),
++		...(logFile ? { PI_RLM_CHILD_ID: childId } : {}),
+ 	};
+ 
+-	const result = await runPiJson(args, { cwd: opts.cwd, env, signal: opts.signal });
++	const result = await runPiJson(args, { cwd: opts.cwd, env, signal: opts.signal, logFile });
++	appendChildLog(logFile, {
++		type: "rlm_child_end",
++		ok: result.ok,
++		error: result.error ?? null,
++		usage: result.usage,
++		turns: result.turns,
++		model: result.model ?? null,
++		aborted: opts.signal?.aborted ?? false,
++		endedAt: Date.now(),
++	});
+ 	if (result.output.length > MAX_OUTPUT_CHARS) {
+ 		result.output = `${result.output.slice(0, MAX_OUTPUT_CHARS)}\n... [rlm output truncated at ${MAX_OUTPUT_CHARS} chars]`;
+ 	}

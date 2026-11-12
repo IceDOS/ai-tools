@@ -114,6 +114,26 @@
             version = mkStrOption { default = e.session-name.version; };
           };
 
+          ask-user-question = {
+            enable = mkBoolOption { default = e.ask-user-question.enable; };
+            version = mkStrOption { default = e.ask-user-question.version; };
+          };
+
+          todo = {
+            enable = mkBoolOption { default = e.todo.enable; };
+            version = mkStrOption { default = e.todo.version; };
+          };
+
+          markdown-preview = {
+            enable = mkBoolOption { default = e.markdown-preview.enable; };
+            version = mkStrOption { default = e.markdown-preview.version; };
+          };
+
+          web-access = {
+            enable = mkBoolOption { default = e.web-access.enable; };
+            version = mkStrOption { default = e.web-access.version; };
+          };
+
           context-language-models = {
             enable = mkBoolOption { default = c.enable; };
             version = mkStrOption { default = c.version; };
@@ -134,6 +154,7 @@
             enable = mkBoolOption { default = e.recursive-language-models.enable; };
             version = mkStrOption { default = e.recursive-language-models.version; };
             autoload = mkBoolOption { default = e.recursive-language-models.autoload; };
+            childViewer = mkBoolOption { default = e.recursive-language-models.childViewer; };
 
             maxDepth = mkIntBetweenOption {
               path = "icedos.ai-tools.pi-agent.extensions.recursive-language-models.maxDepth";
@@ -236,9 +257,11 @@
 
           # pathExists on the package forces it at eval time, as 0.9.8 did.
           examplesDir = "${pkgs.pi-coding-agent}/lib/node_modules/pi-monorepo/examples/extensions";
+          # rpiv-todo replaces pi's example todo; both register a todo tool.
+          builtinNames = lib.subtractLists (lib.optional ext.todo.enable "todo") ext.builtin;
           missingBuiltins = extLib.missingBuiltins {
             inherit examplesDir;
-            names = ext.builtin;
+            names = builtinNames;
             exists = builtins.pathExists;
           };
           builtinPaths = lib.optionals (missingBuiltins == [ ]) (
@@ -248,7 +271,7 @@
                 inherit examplesDir name;
                 exists = builtins.pathExists;
               }
-            ) ext.builtin
+            ) builtinNames
           );
 
           invalidInline = extLib.invalidInlineNames (lib.attrNames ext.inline);
@@ -312,6 +335,22 @@
             {
               key = "session-name";
               npm = "pi-session-name";
+            }
+            {
+              key = "ask-user-question";
+              npm = "@juicesharp/rpiv-ask-user-question";
+            }
+            {
+              key = "todo";
+              npm = "@juicesharp/rpiv-todo";
+            }
+            {
+              key = "markdown-preview";
+              npm = "pi-markdown-preview";
+            }
+            {
+              key = "web-access";
+              npm = "pi-web-access";
             }
             {
               key = "context-language-models";
@@ -412,8 +451,9 @@
                 bunBin = "${pkgs.bun}/bin/bun";
               }
             )
-            ++ lib.optional vpn.enable (
-              pkgs.writeText "vpn-row.ts" (builtins.readFile ./extensions/vpn-row.ts)
+            ++ lib.optional vpn.enable (pkgs.writeText "vpn-row.ts" (builtins.readFile ./extensions/vpn-row.ts))
+            ++ lib.optional (rlm.enable && rlm.childViewer) (
+              pkgs.writeText "rlm-children.ts" (builtins.readFile ./extensions/rlm-children.ts)
             );
 
           # Invalid names are asserted below; filtering keeps writeText from failing first.
@@ -480,12 +520,18 @@
                 echo "warning: failed to apply pi-rlm-child-extensions.patch to $dir" >&2
               fi
             fi
-            if [ -d "$dir" ] && ! ${pkgs.gnugrep}/bin/grep -q "pi-rlm-mode.patch v3" "$dir/src/index.ts" 2>/dev/null; then
+            if [ -d "$dir" ] && ! ${pkgs.gnugrep}/bin/grep -q "pi-rlm-mode.patch v4" "$dir/src/index.ts" 2>/dev/null; then
               # An older version cannot be patched over; pi reinstalls the package and the npm shim patches it.
               if ${pkgs.gnugrep}/bin/grep -q "clmSection" "$dir/src/index.ts" 2>/dev/null; then
                 rm -rf "$dir"
               elif ! ${pkgs.patch}/bin/patch -p1 -d "$dir" --forward --no-backup-if-mismatch -r - < ${./patches/pi-rlm-mode.patch}; then
                 echo "warning: failed to apply pi-rlm-mode.patch to $dir" >&2
+              fi
+            fi
+            # Applies on top of pi-rlm-child-extensions.patch; logs only when PI_RLM_CHILD_LOG_DIR is set.
+            if [ -d "$dir" ] && ! ${pkgs.gnugrep}/bin/grep -q "pi-rlm-child-log.patch v1" "$dir/src/child.ts" 2>/dev/null; then
+              if ! ${pkgs.patch}/bin/patch -p1 -d "$dir" --forward --no-backup-if-mismatch -r - < ${./patches/pi-rlm-child-log.patch}; then
+                echo "warning: failed to apply pi-rlm-child-log.patch to $dir" >&2
               fi
             fi
           '';
@@ -577,6 +623,7 @@
 
             gc_by_age ${toString cfg.sessionRetentionDays} "$D/sessions" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl'
             gc_by_age ${toString cfg.sessionRetentionDays} "$D/pi-rlm/snapshots" -maxdepth 1 -type f -name '*.pickle'
+            gc_by_age ${toString cfg.sessionRetentionDays} "$D/pi-rlm/children" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl'
 
             gc_commit
 

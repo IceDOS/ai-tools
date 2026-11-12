@@ -91,6 +91,30 @@ enable = true
 # Exact npm version to pin, e.g. "0.1.7"; "" installs the newest release once.
 version = ""
 
+[icedos.ai-tools.pi-agent.extensions.ask-user-question]
+# rpiv-ask-user-question: lets the agent ask you multiple-choice or freeform questions.
+enable = true
+# Exact npm version to pin, e.g. "2.15.0"; "" installs the newest release once.
+version = ""
+
+[icedos.ai-tools.pi-agent.extensions.todo]
+# rpiv-todo: live todo overlay that survives /reload and compaction; skips the "todo" builtin.
+enable = true
+# Exact npm version to pin, e.g. "2.15.0"; "" installs the newest release once.
+version = ""
+
+[icedos.ai-tools.pi-agent.extensions.markdown-preview]
+# pi-markdown-preview: renders markdown and LaTeX replies in the terminal, a browser tab or a PDF.
+enable = true
+# Exact npm version to pin, e.g. "0.26.4"; "" installs the newest release once.
+version = ""
+
+[icedos.ai-tools.pi-agent.extensions.web-access]
+# pi-web-access: web search, URL fetch, GitHub repo clone, and PDF and YouTube reading.
+enable = true
+# Exact npm version to pin, e.g. "0.47.0"; "" installs the newest release once.
+version = ""
+
 [icedos.ai-tools.pi-agent.extensions.context-language-models]
 # pi-clm: the model curates its own context. pi installs it as a package. Empty strings keep pi-clm's defaults.
 enable = false
@@ -116,6 +140,8 @@ enable = false
 version = ""
 # Start every session in RLM mode (ipython-only tools, RLM system prompt); /rlm still toggles it per session.
 autoload = false
+# Logs every rlm() child to pi-rlm/children/<session>/ and shows them live below the editor; /rlm-children opens their transcripts.
+childViewer = true
 # rlm() recursion limit, exported as PI_RLM_MAX_DEPTH; 0 turns recursion off.
 maxDepth = 2
 

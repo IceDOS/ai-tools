@@ -115,14 +115,20 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   `PI_CLM_*` env goes into the wrapper as `--set-default`. Check sources with `tests/typecheck.sh`.
   `packages` entries go into settings.json `packages` and pi installs them, with `npmCommand` set to
   a store npm; activation keeps `pi install` entries and drops only those listed in
-  `<dataDir>/.icedos-packages.json`. pi-ghost-text-x (`extensions.ghost-text`) and pi-session-name
-  (`extensions.session-name`), both on by default, pi-clm (`extensions.context-language-models`) and
+  `<dataDir>/.icedos-packages.json`. pi-ghost-text-x (`extensions.ghost-text`), pi-session-name
+  (`extensions.session-name`), rpiv-ask-user-question (`extensions.ask-user-question`), rpiv-todo
+  (`extensions.todo`, which drops `todo` from `extensions.builtin`) pi-markdown-preview
+  (`extensions.markdown-preview`) and pi-web-access (`extensions.web-access`), all on by default, pi-clm (`extensions.context-language-models`) and
   pi-rlm (`extensions.recursive-language-models`) are such packages, appended after `packages` and unpinned unless their
   `version` is set. New default packages get an `enable` and `version` option and an `optionPackages` entry. pi loads package extensions before the `extensions` list. With `steering = ""`
   the wrapper points `PI_CLM_STEERING` at the brief inside pi's npm dir, and pi-rlm gets
   `PI_RLM_PYTHON` and `PI_RLM_MAX_DEPTH`. The wrapper and its npm shim patch the installed pi-rlm:
   `patches/pi-rlm-child-extensions.patch` loads `PI_RLM_EXTENSIONS` into `rlm()` children, and
-  `patches/pi-rlm-mode.patch` reads `--rlm` at session start, starts in RLM mode when `PI_RLM_AUTOLOAD=1` (`recursive-language-models.autoload`), and in RLM mode swaps only pi's built-in coding tools for ipython, keeping extension and MCP tools, their guidelines and pi-clm's guidance.
+  `patches/pi-rlm-mode.patch` reads `--rlm` at session start, starts in RLM mode when `PI_RLM_AUTOLOAD=1` (`recursive-language-models.autoload`), and in RLM mode swaps only pi's built-in coding tools for ipython, keeping extension and MCP tools, their guidelines, pi-clm's guidance and pi's skills list (pi drops it when read and bash are inactive).
+  `patches/pi-rlm-child-log.patch` (after the child-extensions one) appends each `rlm()` child's JSONL stream, framed by
+  `rlm_child_start`/`rlm_child_end` records, to `$PI_RLM_CHILD_LOG_DIR/<id>.jsonl`; nested children inherit the dir and record
+  their parent through `PI_RLM_CHILD_ID`. The shipped `rlm-children.ts` (`recursive-language-models.childViewer`) sets that dir
+  to `<dataDir>/pi-rlm/children/<session id>`, shows running children below the editor and opens transcripts with `/rlm-children`.
   Bump its `v<N>` marker on every change; the wrapper removes an older patched copy so pi reinstalls it. Prefer an upstream pi package in `packages` over a new
   shipped extension; ship code here only when no package does the job.
   `hooks.rateLimit` entries run their `command` when a listed provider's error has one of their

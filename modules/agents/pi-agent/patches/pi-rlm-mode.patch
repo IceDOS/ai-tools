@@ -1,6 +1,15 @@
 --- package/src/index.ts
 +++ package/src/index.ts
-@@ -65,6 +65,25 @@
+@@ -23,7 +23,7 @@
+ import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
+ import { dirname, join } from "node:path";
+ import { fileURLToPath } from "node:url";
+-import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
++import { type ExtensionAPI, type ExtensionContext, formatSkillsForPrompt, getAgentDir } from "@earendil-works/pi-coding-agent";
+ import { addUsage, emptyUsage, runChildRlm } from "./child.ts";
+ import { registerIpythonTool, type NestedUsage } from "./ipython-tool.ts";
+ import { KernelProcess, type RlmReply, type RlmRequest } from "./kernel.ts";
+@@ -65,6 +65,32 @@
  	}
  }
  
@@ -12,7 +21,7 @@
 +	return `\n\n${prompt.slice(at)}\n\nIn RLM mode, edit the context mirror with Python file I/O in ipython.`;
 +}
 +
-+// icedos pi-rlm-mode.patch v3. RLM mode swaps only these for ipython; other tools stay.
++// icedos pi-rlm-mode.patch v4. RLM mode swaps only these for ipython; other tools stay.
 +const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
 +
 +// The RLM prompt replaces pi's, which carried the kept tools' guidelines.
@@ -23,10 +32,17 @@
 +	return `\n\n# Other tools\nBesides ipython you can call: ${others.join(", ")}.${rules.length ? `\n${rules.join("\n")}` : ""}`;
 +}
 +
++// pi lists skills only while read or bash is active, so RLM mode lost them.
++function skillsSection(skills: Parameters<typeof formatSkillsForPrompt>[0] | undefined): string {
++	const list = formatSkillsForPrompt(skills ?? [], "indirect").trim();
++	if (!list) return "";
++	return `\n\n${list}\n\nIn RLM mode, load a skill by printing its file with Python open() in ipython.`;
++}
++
  export default function (pi: ExtensionAPI) {
  	// Our own depth in the rlm() recursion (0 = root interactive agent).
  	const depth = Number.parseInt(process.env.PI_RLM_DEPTH ?? "", 10) || 0;
-@@ -182,7 +201,7 @@
+@@ -182,7 +208,7 @@
  		if (!defaultTools) {
  			defaultTools = active.includes("ipython") ? active : [...active, "ipython"];
  		}
@@ -35,7 +51,7 @@
  	};
  
  	const restoreTools = () => {
-@@ -268,7 +287,11 @@
+@@ -268,7 +294,11 @@
  			snapshotPath = null;
  		}
  
@@ -47,12 +63,12 @@
  			// restore a mode persisted by /rlm in a previous run of this session
  			for (const entry of ctx.sessionManager.getEntries()) {
  				if (entry.type === "custom" && entry.customType === MODE_ENTRY_TYPE) {
-@@ -296,7 +319,7 @@
+@@ -296,7 +326,7 @@
  		const info = { cwd: ctx.cwd, depth, maxDepth: getMaxDepth() };
  		const harness = buildHarnessSection(loadGlobalHarness(globalHarnessPath), loadLocalHarness(ctx));
  		const base = rlmMode
 -			? buildRlmSystemPrompt(info)
-+			? `${buildRlmSystemPrompt(info)}${otherToolsSection(pi.getActiveTools(), event.systemPromptOptions?.toolGuidelines)}${clmSection(event.systemPrompt)}`
++			? `${buildRlmSystemPrompt(info)}${otherToolsSection(pi.getActiveTools(), event.systemPromptOptions?.toolGuidelines)}${skillsSection(event.systemPromptOptions?.skills)}${clmSection(event.systemPrompt)}`
  			: `${event.systemPrompt}\n\n${buildRlmAddendum(info)}`;
  		return { systemPrompt: harness ? `${base}\n\n${harness}` : base };
  	});
