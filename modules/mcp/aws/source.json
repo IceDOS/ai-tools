@@ -5,8 +5,8 @@
     "hash": "sha256-kB13sqkZQ7m5jZvkozABSXqXkDbChOT/MJc3UOHy9fk="
   },
   "toolkit": {
-    "version": "0-unstable-2026-11-11",
-    "rev": "6709eda94d80f9f9ba63505ad026c7b94e4353c6",
-    "hash": "sha256-KNxPAuCzWsQYBMY8HI08Sv81h2GkAh/p/RUlUSv0prI="
+    "version": "0-unstable-2026-11-12",
+    "rev": "b93737686478a37ca411e37147f83169a453e065",
+    "hash": "sha256-417KC+4zXryzeECpfhzi/uBRWruYsdL0et+U5zwFO0E="
   }
 }
