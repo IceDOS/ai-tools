@@ -2,6 +2,7 @@
 import argparse
 import getpass
 import json
+import math
 import os
 import subprocess
 import sys
@@ -205,6 +206,14 @@ def list_rows(cfg) -> dict:
     return out
 
 
+def _pct(v) -> str:
+    if v is None:
+        return "—"
+    t = math.floor(v * 10 + 1e-9) / 10
+    formatted = f"{t:.0f}" if t == int(t) else f"{t:.1f}"
+    return f"{formatted}%"
+
+
 def cmd_list(args) -> int:
     rows = list_rows(config.load())
     if args.agent:
@@ -216,7 +225,7 @@ def cmd_list(args) -> int:
         print(agent)
         for r in accts:
             mark = ("★" if r["sticky"] else "") + ("→" if r["next"] else "")
-            util = "—" if r["maxUtil"] is None else f"{r['maxUtil']:.0f}%"
+            util = _pct(r["maxUtil"])
             login = "logged in" if r["loggedIn"] else "needs login"
             print(f"  {r['label']:<12} {mark:<2} {util:>5}  {login}")
     return 0

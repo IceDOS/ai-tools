@@ -107,10 +107,23 @@ def _base_label(window: str) -> str:
     return window
 
 
+def base_label(window: str) -> str:
+    return _base_label(split_account(window)[0])
+
+
 def label(window: str) -> str:
     base, tag = split_account(window)
     text = _base_label(base)
     return text if tag == "default" else f"{text} · {tag}"
+
+
+def base_short_label(window: str) -> str:
+    base = split_account(window)[0]
+    if provider_of(base) == "antigravity":
+        _, family, part = _provider_parts(base)
+        name = PROVIDER_WINDOWS[part][1] if part in PROVIDER_WINDOWS else part[:3]
+        return " ".join(p for p in (family and family[1], name) if p)
+    return _base_short_label(base)
 
 
 def _base_short_label(window: str) -> str:

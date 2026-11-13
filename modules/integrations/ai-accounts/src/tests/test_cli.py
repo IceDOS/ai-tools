@@ -196,3 +196,15 @@ class CliTest(unittest.TestCase):
         self.assertEqual(rows["work"]["windows"], {"5h": 3.0, "wk": 5.0})
         self.assertEqual(rows["default"]["windows"], {})
         self.assertTrue(rows["work"]["loggedIn"])
+
+    def test_list_text_one_decimal(self):
+        self.login("claude", "work", ".credentials.json")
+        with mock.patch.object(cli, "_headroom", return_value={"pick": None, "accounts": [
+            {"account": "default", "max_util": 4.2, "reset_ts": None},
+            {"account": "work", "max_util": 82.0, "reset_ts": None}]}):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cli.main(["list", "--agent", "claude"])
+        out = buf.getvalue()
+        self.assertIn(" 4.2%", out)
+        self.assertIn("  82%", out)

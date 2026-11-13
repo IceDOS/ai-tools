@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import os
 import secrets
 import subprocess
@@ -53,25 +54,72 @@ def fzf_account(lines: list) -> str | None:
         return None
     proc = subprocess.run(["fzf", "--height=40%", "--layout=reverse", "--border", "--prompt=account> "],
                           input="\n".join(lines), text=True, stdout=subprocess.PIPE, check=False)
-    return proc.stdout.strip() if proc.returncode == 0 else None
+    return proc.stdout.rstrip("\r\n") if proc.returncode == 0 else None
 
 
-def _pct(value) -> str:
-    return "\u2014" if value is None else f"{value:.0f}%"
+def _pct(value, decimals: bool = False) -> str:
+    if value is None:
+        return "\u2014"
+    t = math.floor(value * 10 + 1e-9) / 10
+    if decimals:
+        return f"{t:.1f}%"
+    formatted = f"{t:.0f}" if t == int(t) else f"{t:.1f}"
+    return f"{formatted}%"
 
 
-def _account_line(r: dict) -> str:
+def _account_columns(rows: list) -> tuple[list[str], dict[str, tuple[int, bool]]]:
+    all_keys = []
+    for r in rows:
+        for k in (r.get("windows") or {}):
+            if k not in all_keys:
+                all_keys.append(k)
+    columns = [
+        k for k in all_keys
+        if any((v := (r.get("windows") or {}).get(k)) is not None and v > 0 for r in rows)
+    ]
+    pct_specs = {}
+    for k in columns:
+        vals = [(v := (r.get("windows") or {}).get(k)) for r in rows if (v := (r.get("windows") or {}).get(k)) is not None and v > 0]
+        has_decimals = any((math.floor(v * 10 + 1e-9) / 10) != int(math.floor(v * 10 + 1e-9) / 10) for v in vals)
+        pw = max(len(_pct(v, decimals=has_decimals)) for v in vals) if vals else 0
+        pct_specs[k] = (pw, has_decimals)
+    return columns, pct_specs
+
+
+def _account_line(r: dict, width: int = 12, columns: list[str] | None = None,
+                  pct_widths: dict | None = None) -> str:
     tail = " (auto)" if r.get("next") else " (sticky)" if r.get("sticky") else ""
     login = "" if r.get("loggedIn") else "  needs login"
-    windows = "  ".join(f"{k} {_pct(v):>4}" for k, v in (r.get("windows") or {}).items())
-    return f"{r['label']:<12} {windows or _pct(r.get('maxUtil')):>4}{tail}{login}"
+    if columns is None:
+        columns, pct_widths = _account_columns([r])
+    if columns:
+        cells = []
+        for k in columns:
+            spec = (pct_widths or {}).get(k, 0)
+            pw, dec = spec if isinstance(spec, tuple) else (spec, False)
+            val = (r.get("windows") or {}).get(k)
+            if val is not None and val > 0:
+                cells.append(f"{k} {_pct(val, decimals=dec):>{pw}}")
+            else:
+                cells.append(f"{k} {'-':>{pw}}")
+        body = "  ".join(cells)
+    else:
+        body = _pct(r.get("maxUtil"))
+    return f"{r['label']:<{width}} {body}{tail}{login}".rstrip()
+
+
+def _account_lines(rows: list) -> list[str]:
+    width = max((len(r.get("label", "")) for r in rows), default=12)
+    width = max(12, width)
+    columns, pct_widths = _account_columns(rows)
+    return [_account_line(r, width=width, columns=columns, pct_widths=pct_widths) for r in rows]
 
 
 def pick_account(name: str, lister=None, picker=None) -> str | None:
     rows = (lister or list_accounts)(name)
     if len(rows) < 2:
         return None
-    lines = [_account_line(r) for r in rows]
+    lines = _account_lines(rows)
     chosen = (picker or fzf_account)(lines)
     return rows[lines.index(chosen)]["account"] if chosen in lines else None
 

@@ -288,7 +288,7 @@ def _width(s: str) -> int:
     return len(_ANSI.sub("", s))
 
 
-def _table(rows, color: bool | None = None) -> str:
+def _table(rows, color: bool | None = None, title: str | None = None) -> str:
     """Bordered table with a rule between rows; a cell is a str, or (str, span) covering `span` columns.
 
     Columns widen so a spanning cell fits, extra width shared evenly."""
@@ -310,10 +310,19 @@ def _table(rows, color: bool | None = None) -> str:
                 widths[col + k] += max(0, need // span + (k < need % span))
             col += span
 
-    def rule(left, right, above, below):
+    if title:
+        interior = sum(widths) + 3 * ncols - 1
+        need = _width(title) + 4 - interior
+        if need > 0:
+            widths[-1] += need
+
+    def _raw_rule(left, right, above, below):
         segs = [RULE * (w + 2) for w in widths]
-        return _c("2", left + "".join(seg + JOINTS[(k in above, k in below)]
-                                       for k, seg in enumerate(segs, 1))[:-1] + right, color)
+        return left + "".join(seg + JOINTS[(k in above, k in below)]
+                              for k, seg in enumerate(segs, 1))[:-1] + right
+
+    def rule(left, right, above, below):
+        return _c("2", _raw_rule(left, right, above, below), color)
 
     lines, prev = [], set()
     for row in rows:
@@ -324,7 +333,16 @@ def _table(rows, color: bool | None = None) -> str:
             col += span
             joints.add(col)
         joints.discard(ncols)
-        lines.append(rule("\u250c", "\u2510", prev, joints) if not lines else rule("\u251c", "\u2524", prev, joints))
+        if not lines:
+            if title:
+                raw = _raw_rule("\u250c", "\u2510", prev, joints)
+                start_col = _width(title) + 4
+                remainder = raw[start_col:]
+                lines.append(_c("2", "\u250c\u2500 ", color) + _c("1", title, color) + _c("2", " " + remainder, color))
+            else:
+                lines.append(rule("\u250c", "\u2510", prev, joints))
+        else:
+            lines.append(rule("\u251c", "\u2524", prev, joints))
         bar = _c("2", "\u2502", color)
         lines.append(bar + bar.join(cells) + bar)
         prev = joints
@@ -332,17 +350,22 @@ def _table(rows, color: bool | None = None) -> str:
     return "\n".join(lines)
 
 
-def _bar_label(window: str, single: bool) -> str:
+def _bar_label(window: str, single: bool, strip_tag: bool = False) -> str:
     """short_label, minus the provider prefix on a bar showing one provider only."""
-    label = config.short_label(window)
+    if strip_tag:
+        label = config._base_short_label(config.split_account(window)[0])
+    else:
+        label = config.short_label(window)
     if single and config.provider_of(window) != "claude":
         return label.partition(" ")[2] or label
     return label
 
 
-def _statusline_segment(r, color, label_width: int = 0, single: bool = False, now_ms: int | None = None) -> str:
+def _statusline_segment(r, color, label_width: int = 0, single: bool = False, now_ms: int | None = None,
+                        strip_tag: bool = False) -> str:
     # a runway already marks a window that caps before reset, so no separate alert
-    seg = [_bar_label(r.window, single).rjust(label_width), _c(f"{_util_code(r.util)};1", f"{fmt_num(r.util)}%", color)]
+    seg = [_bar_label(r.window, single, strip_tag=strip_tag).rjust(label_width),
+           _c(f"{_util_code(r.util)};1", f"{fmt_num(r.util)}%", color)]
     if r.per_hour >= 0.1:
         seg.append(_c("2", f"{fmt_num(r.per_hour)}/h", color))
     if (ms := runway_ms(r)) is not None:
@@ -449,19 +472,28 @@ def _short_path(cwd: str, project: str | None) -> str:
     return path if len(parts) <= 3 else "/".join([parts[0], "\u2026", *parts[-2:]])
 
 
-def render_bar(rlist, now_ms: int) -> str:
+def render_bar(rlist, now_ms: int, color: bool | None = True) -> str:
     """Bordered table with one cell per usage window, then the resets, one per group sharing one."""
     active = shown(rlist)
+    tags = {config.split_account(r.window)[1] for r in active}
+    title = None
+    if len(tags) == 1:
+        tag = next(iter(tags))
+        if tag != "default":
+            agent, dot, name = tag.partition(".")
+            title = name if dot and agent in config.MULTI_PROVIDER_AGENTS else tag
+    strip_tag = title is not None
     single = len({config.provider_of(r.window) for r in active}) == 1
-    label_width = max((len(_bar_label(r.window, single)) for r in active), default=0)
+    label_width = max((len(_bar_label(r.window, single, strip_tag=strip_tag)) for r in active), default=0)
     usage, resets = [], []
+    c_on = True if color is None else color
     for reset_ts, rates in group_by_reset(active):
-        usage += [_statusline_segment(r, True, label_width, single, now_ms=now_ms) for r in rates]
-        resets.append((_c("2", RESET_GLYPH + fmt_dur(reset_ts - now_ms), True) if reset_ts else "", len(rates)))
+        usage += [_statusline_segment(r, c_on, label_width, single, now_ms=now_ms, strip_tag=strip_tag) for r in rates]
+        resets.append((_c("2", RESET_GLYPH + fmt_dur(reset_ts - now_ms), c_on) if reset_ts else "", len(rates)))
     rows = [usage or ["alimit: no usage"]]
     if any(text for text, _ in resets):
         rows.append(resets)
-    return _table(rows, color=True)
+    return _table(rows, color=color, title=title)
 
 
 def render_prompt(payload, rlist, now_ms: int, agent: str = "claude") -> str:

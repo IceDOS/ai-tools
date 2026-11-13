@@ -248,6 +248,57 @@ class TestRenderStatusline(unittest.TestCase):
             "└──────┴─────┘",
         ])
 
+    def test_table_title_shorter_than_first_cell(self):
+        self.assertEqual(cli._table([["abcdefghij", "foo"]], color=False, title="hi").split("\n"), [
+            "┌─ hi ───────┬─────┐",
+            "│ abcdefghij │ foo │",
+            "└────────────┴─────┘",
+        ])
+
+    def test_table_title_crossing_a_joint(self):
+        self.assertEqual(cli._table([["a", "bbbbbb", "cccc"]], color=False, title="short").split("\n"), [
+            "┌─ short ────┬──────┐",
+            "│ a │ bbbbbb │ cccc │",
+            "└───┴────────┴──────┘",
+        ])
+
+    def test_table_title_wider_than_table(self):
+        self.assertEqual(cli._table([["hi"]], color=False, title="mparmpamanos").split("\n"), [
+            "┌─ mparmpamanos ─┐",
+            "│ hi             │",
+            "└────────────────┘",
+        ])
+
+    def test_render_bar_single_account_shows_title(self):
+        r1 = self._rate(window="antigravity@mparmpamanos/gemini-5h", util=13.3)
+        r2 = self._rate(window="antigravity@mparmpamanos/gemini-weekly", util=8.5)
+        out = cli.render_bar([r1, r2], 0, color=False)
+        self.assertEqual(out.count("mparmpamanos"), 1)
+        first_line = out.split("\n")[0]
+        self.assertIn("mparmpamanos", first_line)
+        self.assertIn("gem 5h", out)
+        self.assertIn("gem wk", out)
+
+    def test_render_bar_mixed_tags_keeps_labels_and_no_title(self):
+        r1 = self._rate(window="antigravity@mparmpamanos/gemini-5h", util=13.3)
+        r2 = self._rate(window="antigravity@jim3692/gemini-weekly", util=8.5)
+        out = cli.render_bar([r1, r2], 0, color=False)
+        first_line = out.split("\n")[0]
+        self.assertNotIn("mparmpamanos", first_line)
+        self.assertNotIn("jim3692", first_line)
+        self.assertIn("mparmpamanos", out)
+        self.assertIn("jim3692", out)
+
+    def test_render_bar_default_tag_has_no_title(self):
+        r1 = self._rate(window="antigravity/gemini-5h", util=10.0)
+        r2 = self._rate(window="antigravity/gemini-weekly", util=20.0)
+        out = cli.render_bar([r1, r2], 0, color=False)
+        self.assertNotIn("default", out)
+        first_line = out.split("\n")[0]
+        self.assertNotIn("antigravity", first_line)
+        self.assertTrue(first_line.startswith("┌─"))
+        self.assertIn("┬", first_line)
+
     def test_label_width_pads_short_labels(self):
         r = self._rate(per_hour=0.0, runway_min=None, will_exhaust_before_reset=False)
         self.assertEqual(cli._statusline_segment(r, False, 3), " 5h 40%")

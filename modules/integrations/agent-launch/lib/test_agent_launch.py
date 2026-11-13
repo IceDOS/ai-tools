@@ -106,9 +106,101 @@ class AccountStepTest(unittest.TestCase):
             return lines[1]
 
         self.assertEqual(al.pick_account("claude", lister=lambda n: ROWS, picker=picker), "work")
-        self.assertIn("5h  30%  wk  80%  mo   5%", seen["lines"][0])
-        self.assertIn("5h    \u2014  wk  10%  mo    \u2014", seen["lines"][1])
+        self.assertIn("5h 30%  wk 80%  mo 5%", seen["lines"][0])
+        self.assertIn("5h   -", seen["lines"][1])
+        self.assertIn("wk 10%", seen["lines"][1])
+        self.assertIn("mo  -", seen["lines"][1])
         self.assertIn("(auto)", seen["lines"][1])
+
+    def test_pct_formatting(self):
+        self.assertEqual(al._pct(4.2), "4.2%")
+        self.assertEqual(al._pct(4.0), "4%")
+        self.assertEqual(al._pct(99.96), "99.9%")
+        self.assertEqual(al._pct(0.0), "0%")
+        self.assertEqual(al._pct(None), "\u2014")
+
+    def test_zero_and_none_windows_hidden(self):
+        r = {"label": "test", "loggedIn": True, "maxUtil": 5.0, "windows": {"5h": 0.0, "wk": 5.0, "mo": None}}
+        line = al._account_line(r)
+        self.assertIn("wk 5%", line)
+        self.assertNotIn("5h", line)
+        self.assertNotIn("mo", line)
+
+    def test_all_zero_row_falls_back_to_zero_pct(self):
+        r = {"label": "test", "loggedIn": True, "maxUtil": 0.0, "windows": {"5h": 0.0, "wk": 0.0}}
+        line = al._account_line(r)
+        self.assertEqual(line, "test         0%")
+
+    def test_two_weekly_sources_both_shown_with_names(self):
+        r = {"label": "jim", "loggedIn": True, "maxUtil": 82.0, "windows": {"gem 5h": None, "3p 5h": 0.0, "gem wk": 4.2, "3p wk": 82.0}}
+        line = al._account_line(r)
+        self.assertIn("gem wk 4.2%  3p wk 82%", line)
+        self.assertNotIn("5h", line)
+
+    def test_column_alignment_across_rows(self):
+        rows = [
+            {"account": "jim3692", "label": "jim3692", "loggedIn": True, "maxUtil": 81.68,
+             "windows": {"gem 5h": 0.0, "3p 5h": 0.0, "gem wk": 81.68, "3p wk": 54.7}, "sticky": False, "next": False},
+            {"account": "joanna", "label": "joanna", "loggedIn": True, "maxUtil": 100.0,
+             "windows": {"gem 5h": 13.7, "3p 5h": 0.0, "gem wk": 100.0, "3p wk": 0.0}, "sticky": False, "next": False},
+            {"account": "mparmpamanos", "label": "mparmpamanos", "loggedIn": True, "maxUtil": 8.6,
+             "windows": {"gem 5h": 8.6, "3p 5h": 0.0, "gem wk": 6.5, "3p wk": 0.0}, "sticky": False, "next": True},
+        ]
+        lines = al._account_lines(rows)
+        gem_wk_indices = [line.index("gem wk") for line in lines]
+        self.assertEqual(len(set(gem_wk_indices)), 1)
+        self.assertIn("gem 5h     -", lines[0])
+        self.assertIn("3p wk     -", lines[1])
+        self.assertIn("3p wk     -", lines[2])
+        self.assertIn("(auto)", lines[2])
+
+    def test_claude_column_alignment_and_right_align(self):
+        rows = [
+            {"account": "default", "label": "default", "loggedIn": True, "maxUtil": 100.0,
+             "windows": {"5h": 30.0, "wk": 100.0}, "sticky": False, "next": False},
+            {"account": "work", "label": "work", "loggedIn": True, "maxUtil": 6.7,
+             "windows": {"5h": 0.0, "wk": 6.7}, "sticky": False, "next": True},
+            {"account": "home", "label": "home", "loggedIn": True, "maxUtil": 4.0,
+             "windows": {"5h": 0.0, "wk": 4.0}, "sticky": False, "next": False},
+        ]
+        lines = al._account_lines(rows)
+        wk_indices = [line.index("wk") for line in lines]
+        self.assertEqual(len(set(wk_indices)), 1)
+        idx = wk_indices[0]
+        self.assertIn("5h   -", lines[1])
+        self.assertIn("5h   -", lines[2])
+        self.assertIn("wk 100.0%", lines[0])
+        self.assertIn("wk   6.7%", lines[1])
+        self.assertIn("wk   4.0%", lines[2])
+        dot_indices = [line.index(".", idx) for line in lines]
+        self.assertEqual(len(set(dot_indices)), 1)
+
+    def test_mixed_decimal_and_whole_aligns_decimal_points(self):
+        rows = [
+            {"account": "a", "label": "a", "loggedIn": True, "maxUtil": 81.68,
+             "windows": {"wk": 81.68}},
+            {"account": "b", "label": "b", "loggedIn": True, "maxUtil": 100.0,
+             "windows": {"wk": 100.0}},
+        ]
+        lines = al._account_lines(rows)
+        self.assertIn("wk  81.6%", lines[0])
+        self.assertIn("wk 100.0%", lines[1])
+        dot0 = lines[0].index(".")
+        dot1 = lines[1].index(".")
+        self.assertEqual(dot0, dot1)
+
+    def test_all_whole_column_stays_whole(self):
+        rows = [
+            {"account": "a", "label": "a", "loggedIn": True, "maxUtil": 80.0,
+             "windows": {"wk": 80.0}},
+            {"account": "b", "label": "b", "loggedIn": True, "maxUtil": 100.0,
+             "windows": {"wk": 100.0}},
+        ]
+        lines = al._account_lines(rows)
+        self.assertIn("wk  80%", lines[0])
+        self.assertIn("wk 100%", lines[1])
+        self.assertNotIn(".", lines[0])
+        self.assertNotIn(".", lines[1])
 
     def test_print_includes_account_env(self):
         cfg = {"defaultAgent": "claude", "agents": AGENTS}

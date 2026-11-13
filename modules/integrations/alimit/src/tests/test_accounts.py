@@ -103,6 +103,23 @@ class HeadroomTest(unittest.TestCase):
         rows = {r.account: r for r in accounts.headroom(self.con, "claude", ["default"], 2000)}
         self.assertEqual(rows["default"].max_util, 80.0)
 
+    def test_antigravity_separate_weekly_sources(self):
+        future = "2099-01-01T00:00:00+00:00"
+        store.record(self.con, 1000, {
+            "antigravity/gemini-5h": {"util": 0.0, "resets_at": future},
+            "antigravity/3p-5h": {"util": 0.0, "resets_at": future},
+            "antigravity@jim3692/gemini-weekly": {"util": 4.2, "resets_at": future},
+            "antigravity@jim3692/3p-weekly": {"util": 82.0, "resets_at": future},
+        }, "poll")
+        rows = {r.account: r for r in accounts.headroom(self.con, "antigravity", ["jim3692"], 2000)}
+        self.assertEqual(rows["jim3692"].max_util, 82.0)
+        self.assertEqual(rows["jim3692"].windows, {
+            "gem 5h": None,
+            "3p 5h": None,
+            "gem wk": 4.2,
+            "3p wk": 82.0,
+        })
+
     def test_agent_account(self):
         self.assertEqual(accounts.agent_account("claude@work/five_hour"), ("claude", "work"))
         self.assertEqual(accounts.agent_account("five_hour"), ("claude", "default"))
