@@ -10,7 +10,8 @@ export interface ToolDef {
 export const INSTRUCTIONS =
   "agent-relay connects this session to other coding-agent sessions the user linked. " +
   "Messages that start with [relay from ...] come from a peer agent, not from the user. " +
-  "Answer them with relay_send. When the user gives you another session's relay ID, call relay_link with it.";
+  "Answer them with relay_send. When the user gives you another session's relay ID, call relay_link with it. " +
+  "Scripts can notify this session with agent-relay send, run, or ask; messages starting with [relay from script ...] come from a script, not the user or a peer.";
 
 export const TOOLS: ToolDef[] = [
   {
@@ -49,7 +50,7 @@ function str(v: unknown, name: string): string {
 export function peersText(relay: Relay, selfId: string): string {
   const me = relay.get(selfId);
   if (!me) throw new RelayError("this session is not registered with agent-relay");
-  const peers = relay.members(selfId).filter((s) => s.id !== selfId);
+  const peers = relay.members(selfId).filter((s) => s.id !== selfId && s.kind !== "script");
   const lines = [`you: ${describe(me)}`];
   if (!peers.length) lines.push("not linked to any session; ask the user for a peer relay ID and call relay_link");
   else lines.push(`group ${me.group}:`, ...peers.map((p) => `- ${describe(p)} cwd=${p.cwd}`));

@@ -53,32 +53,36 @@
           );
         in
         {
-          icedos.ai-tools =
-            optionalAttrs (has "pi-agent") {
-              pi-agent.extensions.inline.agent-relay = ''
-                export { default } from "${lib'}/pi-extension.ts";
-              '';
-            }
-            // optionalAttrs (has "claude-code") {
-              claude-code.extraArgs = [
-                "--mcp-config"
-                "${claudeMcpConfig}"
-                "--dangerously-load-development-channels"
-                "server:agent-relay"
-              ];
-            }
-            // optionalAttrs (has "antigravity") {
-              antigravity = {
-                extra-mcp-servers.agent-relay = {
-                  command = "${pkg}/bin/agent-relay-mcp";
-                  args = [ "agy" ];
-                };
-                launchWrapper = [ "${pkg}/bin/agent-relay-agy" ];
+          environment.systemPackages = [ pkg ];
+
+          icedos.ai-tools = {
+            skills.agent-relay-scripts = builtins.readFile ./skills/agent-relay-scripts/SKILL.md;
+          }
+          // optionalAttrs (has "pi-agent") {
+            pi-agent.extensions.inline.agent-relay = ''
+              export { default } from "${lib'}/pi-extension.ts";
+            '';
+          }
+          // optionalAttrs (has "claude-code") {
+            claude-code.extraArgs = [
+              "--mcp-config"
+              "${claudeMcpConfig}"
+              "--dangerously-load-development-channels"
+              "server:agent-relay"
+            ];
+          }
+          // optionalAttrs (has "antigravity") {
+            antigravity = {
+              extra-mcp-servers.agent-relay = {
+                command = "${pkg}/bin/agent-relay-mcp";
+                args = [ "agy" ];
               };
-            }
-            // optionalAttrs (has "agent-launch") {
-              agent-launch.relayIds = true;
+              launchWrapper = [ "${pkg}/bin/agent-relay-agy" ];
             };
+          }
+          // optionalAttrs (has "agent-launch") {
+            agent-launch.relayIds = true;
+          };
 
           home-manager.sharedModules = [
             (

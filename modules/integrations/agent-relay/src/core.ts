@@ -2,7 +2,7 @@ const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
 const path = process.getBuiltinModule("node:path") as typeof import("node:path");
 const crypto = process.getBuiltinModule("node:crypto") as typeof import("node:crypto");
 
-export type Kind = "pi" | "claude" | "opencode" | "agy";
+export type Kind = "pi" | "claude" | "opencode" | "agy" | "script";
 
 export interface SessionRecord {
   id: string;
@@ -92,10 +92,11 @@ export interface Message {
   id: string;
   from: { id: string; kind: Kind; name?: string };
   to: string;
-  group: string;
+  group?: string;
   hop: number;
   ts: string;
   text: string;
+  reply?: boolean;
 }
 
 export interface Watcher {
@@ -104,8 +105,23 @@ export interface Watcher {
 }
 
 export const RELAY_PREFIX = "[relay from ";
+export const MAX_TEXT_BYTES = 64 * 1024;
+
+export function capText(text: string, maxBytes = MAX_TEXT_BYTES): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+  const cut = buf.subarray(0, end).toString("utf8");
+  return `${cut}\n[truncated ${buf.length - Buffer.byteLength(cut, "utf8")} bytes]`;
+}
 
 export function formatMessage(m: Message): string {
+  if (m.from.kind === "script") {
+    const who = m.from.name ? `"${m.from.name}"` : m.from.id;
+    const reply = m.reply ? `\n(reply with relay_send to="${m.from.id}")` : "";
+    return `${RELAY_PREFIX}script ${who}]\n${m.text}${reply}`;
+  }
   const name = m.from.name ? ` "${m.from.name}"` : "";
   return `${RELAY_PREFIX}${m.from.kind} ${m.from.id}${name}, hop ${m.hop}]\n${m.text}\n(reply with relay_send to="${m.from.id}")`;
 }
@@ -181,10 +197,15 @@ export class Relay {
     return r;
   }
 
-  findByPid(pids: number[]): SessionRecord | undefined {
+  findByPid(pids: number[], filter?: ((s: SessionRecord) => boolean) | Kind[]): SessionRecord | undefined {
+    const match = typeof filter === "function"
+      ? filter
+      : Array.isArray(filter)
+        ? (s: SessionRecord) => filter.includes(s.kind)
+        : undefined;
     const all = this.sessions();
     for (const pid of pids) {
-      const r = all.find((s) => s.pid === pid);
+      const r = all.find((s) => s.pid === pid && (!match || match(s)));
       if (r) return r;
     }
     return undefined;
@@ -223,6 +244,11 @@ export class Relay {
     const next = { ...cur, ...patch, id: cur.id };
     this.write(this.p("sessions", `${id}.json`), next);
     return next;
+  }
+
+  unregister(id: string): void {
+    const r = this.read<SessionRecord>(this.p("sessions", `${id}.json`));
+    if (r) this.drop(r);
   }
 
   protected drop(r: SessionRecord): void {
@@ -283,7 +309,7 @@ export class Relay {
   link(selfId: string, peer: string): Group {
     const all = this.sessions();
     const me = this.self(selfId);
-    const other = this.one(peer, all.filter((s) => s.id !== selfId));
+    const other = this.one(peer, all.filter((s) => s.id !== selfId && s.kind !== "script"));
     const ga = me.group ? this.group(me.group) : undefined;
     const gb = other.group ? this.group(other.group) : undefined;
     if (ga && gb && ga.id === gb.id) return ga;
@@ -317,6 +343,7 @@ export class Relay {
   }
 
   markInjected(id: string, hop: number): void {
+    if (hop <= 0) return;
     this.update(id, { hop, hopAt: this.iso() });
   }
 
@@ -332,35 +359,73 @@ export class Relay {
     const hop = nextHop(me);
     if (hop > hopLimit) throw new RelayError("hop limit reached, ask the user before continuing");
     const group = me.group ? all.filter((s) => s.group === me.group && s.id !== me.id) : [];
-    if (!group.length) throw new RelayError("not linked to any session, use relay_link first");
     let targets: SessionRecord[];
     if (to.trim().toLowerCase() === "all") {
+      if (!group.length) throw new RelayError("not linked to any session, use relay_link first");
       targets = group;
     } else {
       targets = this.match(to, group);
       if (targets.length === 0) {
-        const outside = this.match(to, all.filter((s) => s.id !== me.id));
-        throw new RelayError(outside.length ? `"${to}" is not in your group, use relay_link first` : `no session matches "${to}"`);
+        const awaiting = all.filter((s) => s.id !== me.id && s.kind === "script" && s.agent?.awaiting === me.id);
+        const scriptTargets = this.match(to, awaiting);
+        if (scriptTargets.length === 1) {
+          targets = scriptTargets;
+        } else if (scriptTargets.length > 1) {
+          throw new RelayError(`"${to}" is ambiguous: ${scriptTargets.map(describe).join(", ")}`);
+        } else {
+          if (!group.length) throw new RelayError("not linked to any session, use relay_link first");
+          const outside = this.match(to, all.filter((s) => s.id !== me.id));
+          throw new RelayError(outside.length ? `"${to}" is not in your group, use relay_link first` : `no session matches "${to}"`);
+        }
+      } else if (targets.length > 1) {
+        throw new RelayError(`"${to}" is ambiguous: ${targets.map(describe).join(", ")}`);
       }
-      if (targets.length > 1) throw new RelayError(`"${to}" is ambiguous: ${targets.map(describe).join(", ")}`);
     }
     const ts = this.iso();
+    const capped = capText(text);
     for (const t of targets) {
       const msg: Message = {
         v: 1,
         id: messageId(this.now()),
         from: { id: me.id, kind: me.kind, ...(me.name ? { name: me.name } : {}) },
         to: t.id,
-        group: me.group as string,
+        ...(me.group ? { group: me.group } : {}),
         hop,
         ts,
-        text,
+        text: capped,
       };
       const dir = this.p("inbox", t.id);
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       this.write(path.join(dir, `${msg.id}.json`), msg);
     }
     return targets.map((t) => t.id);
+  }
+
+  sendScript(to: string, text: string, opts?: { fromId?: string; name?: string; reply?: boolean }): Message {
+    const all = this.sessions();
+    const liveAgents = all.filter((s) => s.kind !== "script");
+    const matched = this.match(to, liveAgents);
+    if (matched.length === 0) throw new RelayError(`no session matches "${to}"`);
+    if (matched.length > 1) throw new RelayError(`"${to}" is ambiguous: ${matched.map(describe).join(", ")}`);
+    const target = matched[0];
+    const msg: Message = {
+      v: 1,
+      id: messageId(this.now()),
+      from: {
+        id: opts?.fromId ?? hex(5),
+        kind: "script",
+        ...(opts?.name ? { name: opts.name } : {}),
+      },
+      to: target.id,
+      hop: 0,
+      ts: this.iso(),
+      text: capText(text),
+      ...(opts?.reply ? { reply: true } : {}),
+    };
+    const dir = this.p("inbox", target.id);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    this.write(path.join(dir, `${msg.id}.json`), msg);
+    return msg;
   }
 
   // deliver returns false to keep the message and stop until the next event or poll.

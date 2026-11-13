@@ -29,6 +29,7 @@ stdenvNoCC.mkDerivation {
     runHook preInstall
     mkdir -p $out/lib/agent-relay $out/bin
     cp *.ts *.py $out/lib/agent-relay/
+    makeWrapper ${lib.getExe nodejs_24} $out/bin/agent-relay --add-flags $out/lib/agent-relay/cli.ts
     makeWrapper ${lib.getExe nodejs_24} $out/bin/agent-relay-mcp --add-flags $out/lib/agent-relay/mcp-server.ts
     makeWrapper ${lib.getExe nodejs_24} $out/bin/agent-relay-hook --add-flags $out/lib/agent-relay/hook.ts
     makeWrapper ${lib.getExe nodejs_24} $out/bin/agent-relay-agy-watch --add-flags $out/lib/agent-relay/agy-watch.ts
