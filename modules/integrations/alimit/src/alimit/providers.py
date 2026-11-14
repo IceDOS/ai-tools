@@ -210,12 +210,18 @@ def parse_antigravity(payload, now_ms: int) -> dict:
         if not isinstance(q, dict) or not isinstance(q.get("remaining_fraction"), (int, float)):
             continue
         reset = q.get("reset_in_seconds")
-        resets_at = (
+        raw_reset = q.get("reset_time") or q.get("resets_at")
+        if isinstance(raw_reset, str):
+            try:
+                dt = datetime.fromisoformat(raw_reset.replace("Z", "+00:00"))
+                resets_at = datetime.fromtimestamp(round(dt.timestamp() / 60) * 60, tz=timezone.utc).isoformat()
+            except (TypeError, ValueError):
+                resets_at = None
+        elif isinstance(reset, (int, float)) and not isinstance(reset, bool):
             # reset_in_seconds jitters every redraw; whole minutes keep repeat rows out of the DB
-            datetime.fromtimestamp(round((now_ms / 1000 + reset) / 60) * 60, tz=timezone.utc).isoformat()
-            if isinstance(reset, (int, float)) and not isinstance(reset, bool)
-            else None
-        )
+            resets_at = datetime.fromtimestamp(round((now_ms / 1000 + reset) / 60) * 60, tz=timezone.utc).isoformat()
+        else:
+            resets_at = None
         out[_window("antigravity", key)] = {
             "util": _pct((1 - q["remaining_fraction"]) * 100),
             "resets_at": resets_at,

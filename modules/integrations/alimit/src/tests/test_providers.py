@@ -55,6 +55,21 @@ class TestParsers(unittest.TestCase):
         reset = datetime.fromisoformat(out["antigravity/gemini-5h"]["resets_at"])
         self.assertEqual(reset.timestamp() % 60, 0)
 
+    def test_antigravity_payload_with_reset_time(self):
+        now_ms = 1_800_000_000_000
+        payload = {
+            "quota": {
+                "gemini-5h": {
+                    "remaining_fraction": 0.25,
+                    "reset_time": "2026-10-09T16:00:25Z",
+                    "reset_in_seconds": 3625,
+                }
+            }
+        }
+        out = providers.parse_antigravity(payload, now_ms)
+        self.assertEqual(out["antigravity/gemini-5h"]["util"], 75.0)
+        self.assertEqual(out["antigravity/gemini-5h"]["resets_at"], "2026-10-09T16:00:00+00:00")
+
 
 class TestLabels(unittest.TestCase):
     def test_provider_labels(self):
