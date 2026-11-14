@@ -157,7 +157,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   per-account env. Agent modules wrap their package through `lib/wrap.nix` only when
   `lib/has-accounts.nix` finds declared accounts; `opencode` also counts as declaring when
   `ollama` does, because it passes its key in.
-  - State lives in `~/.local/state/ai-accounts/<agent>/<account>/`. Shared mode links the real dir
+  - State lives in `~/.local/state/icedos/ai-accounts/<agent>/<account>/`. Shared mode links the real dir
     except `adapters.*_PRIVATE` (never linked) and `adapters.*_SEED` (copied once, then owned by the
     account, because agents rewrite those files by renaming over the target).
   - A logged-out account fails with exit 3 when stdin is not a tty. On a tty the launch signs in

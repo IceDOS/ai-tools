@@ -20,7 +20,7 @@ def config_path() -> Path:
 
 def state_dir() -> Path:
     override = os.environ.get("AI_ACCOUNTS_STATE")
-    return Path(override) if override else _xdg("XDG_STATE_HOME", ".local/state") / "ai-accounts"
+    return Path(override) if override else _xdg("XDG_STATE_HOME", ".local/state") / "icedos" / "ai-accounts"
 
 
 def read_json(path: Path) -> dict:
