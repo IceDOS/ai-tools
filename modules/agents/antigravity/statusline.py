@@ -11,7 +11,6 @@ import sys
 import time
 from pathlib import Path
 
-SETTINGS = Path.home() / ".gemini/antigravity-cli/settings.json"
 ALIMIT = os.environ.get("ANTIGRAVITY_ALIMIT", "alimit")
 CACHE_DIR = Path.home() / ".gemini/antigravity-cli/cache"
 QUOTA_CACHE = CACHE_DIR / "quota_cache.json"
@@ -139,47 +138,10 @@ def read_payload():
     return data if isinstance(data, dict) else {}
 
 
-def setup(action, command, stack):
-    """Merge/remove the statusLine block in agy's own settings file (it writes that file)."""
-    data = None
-    if SETTINGS.exists():
-        try:
-            data = json.loads(SETTINGS.read_text())
-        except (OSError, ValueError):
-            print(f"antigravity statusline: {SETTINGS} is not valid JSON; left untouched", file=sys.stderr)
-            return 0
-        if not isinstance(data, dict):
-            data = None
-    if action == "off":
-        if data is None or "statusLine" not in data:
-            return 0
-        del data["statusLine"]
-    else:
-        desired = {"type": "command", "command": command}
-        if stack:
-            desired["stack_with_default"] = True
-        # agy owns this file; skip the rewrite when only the mtime would change.
-        if data is not None and data.get("statusLine") == desired:
-            return 0
-        data = {} if data is None else data
-        data["statusLine"] = desired
-    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    tmp = SETTINGS.with_name(SETTINGS.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    os.replace(tmp, SETTINGS)
-    return 0
-
-
 def main(argv):
     if argv and argv[0] == "--fetch-quota":
         agy = argv[argv.index("--agy") + 1] if "--agy" in argv and len(argv) > argv.index("--agy") + 1 else None
         return fetch_quota(agy)
-    if argv and argv[0] == "--setup":
-        stack = "--stack" in argv
-        args = [a for a in argv[1:] if a != "--stack"]
-        action = args[0] if args else "on"
-        command = args[1] if len(args) > 1 else str(SETTINGS.parent / "statusline.sh")
-        return setup(action, command, stack)
     payload = read_payload()
     maybe_refresh_quota(payload)
     if "--title" in argv:

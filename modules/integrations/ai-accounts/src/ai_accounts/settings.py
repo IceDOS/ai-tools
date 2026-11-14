@@ -97,3 +97,18 @@ def _read_or_empty(path: Path) -> dict:
         return _read(path, {})
     except ValueError:
         return {}
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) != 4:
+        print(f"usage: {sys.argv[0]} <target> <desired.json> <ledger>", file=sys.stderr)
+        sys.exit(2)
+    target = Path(sys.argv[1])
+    try:
+        desired = json.loads(Path(sys.argv[2]).read_text())
+    except (FileNotFoundError, ValueError):
+        desired = {}
+    ledger = Path(sys.argv[3])
+    apply(target, desired, ledger)

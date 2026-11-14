@@ -56,6 +56,11 @@ class Launch:
     keep_fds: tuple = ()
 
 
+def agy_data(cfg: Config) -> Path:
+    """agy's real .gemini; its launcher keeps it outside the home it mirrors."""
+    return Path(cfg.data_dirs.get("antigravity") or Path(cfg.real_dirs["antigravity"]) / ".gemini")
+
+
 def _mirrored(acct: Account, real: str, private, seed=frozenset()) -> None:
     if acct.mode == "isolated":
         acct.dir.mkdir(parents=True, exist_ok=True)
@@ -90,7 +95,7 @@ def _antigravity(acct, cfg):
     with mirror.locked(f"antigravity-{acct.name}"):
         mirror.sync(real_home, home, skip={".gemini"})
         if acct.mode == "shared":
-            mirror.sync(real_home / ".gemini", home / ".gemini", AGY_PRIVATE, seed=AGY_SEED)
+            mirror.sync(agy_data(cfg), home / ".gemini", AGY_PRIVATE, seed=AGY_SEED)
         else:
             (home / ".gemini").mkdir(parents=True, exist_ok=True)
     if acct.mode == "shared":
@@ -117,10 +122,9 @@ PREPARE = {
 
 
 def _sync_antigravity_settings(acct: Account, cfg: Config) -> None:
-    real_dir = cfg.real_dirs.get("antigravity")
-    if not real_dir:
+    if not cfg.real_dirs.get("antigravity"):
         return
-    real = Path(real_dir) / ".gemini" / "antigravity-cli" / "settings.json"
+    real = agy_data(cfg) / "antigravity-cli" / "settings.json"
     state = config.state_dir() / "antigravity"
     copies = list(state.glob("*/home/.gemini/antigravity-cli/settings.json"))
     dst = real if acct.is_default else (acct.dir / "home" / ".gemini" / "antigravity-cli" / "settings.json")

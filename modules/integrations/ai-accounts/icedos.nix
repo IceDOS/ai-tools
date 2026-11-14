@@ -105,6 +105,8 @@
                   antigravity = home;
                   ollama = "";
                 };
+                # agy's .gemini lives here; the antigravity launcher keeps it out of ~.
+                dataDirs.antigravity = "${config.xdg.dataHome}/gemini";
                 bins = {
                   claude = lib.getExe pkgs.claude-code;
                   pi-agent = lib.getExe pkgs.pi-agent;
@@ -134,6 +136,7 @@
                   alimit = lib.getExe alimitPkg;
                   agents = lib.mapAttrs (name: a: {
                     realDir = realDirs.${name} or "";
+                    dataDir = dataDirs.${name} or "";
                     bin = bins.${name} or "";
                     settings = config.icedos.managed-settings.${name} or { };
                     accounts = lib.mapAttrs (_: acc: { inherit (acc) mode label settings; }) a.accounts;

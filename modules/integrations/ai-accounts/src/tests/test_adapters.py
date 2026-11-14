@@ -134,6 +134,17 @@ class AdapterTest(unittest.TestCase):
             self.assertFalse((home_gem / rel).exists())
         self.assertTrue((home_gem / "settings.json").is_symlink())
 
+    def test_antigravity_data_dir_outside_home(self):
+        data = self.real.parent / "share-gemini"
+        (data / "antigravity-cli").mkdir(parents=True)
+        (data / "antigravity-cli" / "settings.json").write_text('{"from": "data"}')
+        self.cfg.data_dirs = {"antigravity": str(data)}
+        acct = Account("antigravity", "work")
+        with mock.patch.object(adapters.dbusproxy, "start", return_value=7):
+            adapters.prepare(acct, self.cfg)
+        own = acct.dir / "home" / ".gemini" / "antigravity-cli" / "settings.json"
+        self.assertEqual(json.loads(own.read_text()), {"from": "data"})
+
     def test_login_plans(self):
         argv, env, hint = adapters.login_plan(Account("opencode", "work"), self.cfg)
         self.assertEqual(argv, ["/x/opencode", "auth", "login"])

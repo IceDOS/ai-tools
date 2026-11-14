@@ -252,7 +252,7 @@ def cmd_doctor(args) -> int:
             elif agent == "antigravity":
                 home = a.dir / "home"
                 problems += mirror.check(config.Path(real), home, skip={".gemini"})
-                problems += mirror.check(config.Path(real) / ".gemini", home / ".gemini", adapters.AGY_PRIVATE,
+                problems += mirror.check(adapters.agy_data(cfg), home / ".gemini", adapters.AGY_PRIVATE,
                                          seed=adapters.AGY_SEED)
         for a in accounts.values():
             if agent == "opencode" and a.mode == "shared" and adapters.opencode_oauth(a):

@@ -38,10 +38,10 @@ aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pages
 ## Shared options (`icedos.ai-tools.*`)
 - `icedos.ai-tools.rules` — name = markdown. pi-agent writes them all to
   `<dataDir>/APPEND_SYSTEM.md`, which pi appends to every system prompt,
-  antigravity writes `~/.gemini/config/rules/<name>.md`, opencode
+  antigravity writes `~/.config/gemini/rules/<name>.md`, opencode
   writes `~/.config/opencode/rules/<name>.md` and lists it in `instructions`, and `claude-code`
   sets `programs.claude-code.rules` (mkDefault per entry).
-- `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: antigravity `~/.gemini/antigravity-cli/skills/`, opencode
+- `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: antigravity `~/.local/share/gemini/antigravity-cli/skills/`, opencode
   `programs.opencode.skills`, Claude Code `programs.claude-code.skills`.
   pi-agent builds them into a store dir that its settings.json lists under skills.
 - Per-agent options of the same name win over the shared entry
@@ -138,7 +138,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   footer. `includeInIcedosGc` prunes `sessions/*/*.jsonl` and pi-rlm snapshots older than `sessionRetentionDays`.
   With kde's `vigor` module, unset `meters.power` values come from vigor's tariff, `gpuIdleWatts` and `windows`.
   `agent-launch` registers locator `pi-agent`, which zed's bridge resolves from pi's per-cwd session dirs.
-- `antigravity`: owns `icedos.ai-tools.antigravity.users.<name>`. The `rlm` plugin (`modules/agents/antigravity/plugins/rlm/`, enabled via `extensions.recursive-language-models.enable`) ports pi-rlm to agy. It packages the unmodified `rlm_kernel.py` pinned from `@florianguyonnet/pi-rlm` alongside the `rlm_mcp` server and links `~/.gemini/config/plugins/rlm`. When `extensions.recursive-language-models.autoload` is true, the `agy` wrapper appends `--agent rlm`. Child agents run headless via `agy -p --agent rlm --output-format stream-json`, logged to `<dataDir>/children/<session>/<id>.jsonl`. The CLI and server exchange metadata through `sessions/<pid>.json`. Kernel data variables are pickled after each cell and restored when a conversation resumes; the postGc hook prunes old snapshots, child logs and harness notes. The `/refine` harness records persistent prompt and memory notes injected during session start. Unlike pi-agent, agy lacks a live child viewer UI and mid-session mode toggling.
+- `antigravity`: owns `icedos.ai-tools.antigravity.users.<name>`. agy hardcodes `$HOME/.gemini`, so its package's `agy` runs `agy_home.py`, which sets `HOME` to a symlink farm of `~` (`~/.local/state/icedos/antigravity/home`, built by ai-accounts' `mirror.sync` on each launch) whose `.gemini` links to `~/.local/share/gemini`; a home that already has `.gemini` (an ai-accounts account, a nested agy) is left alone. Every process agy starts inherits that `HOME`, and a new top-level entry one of them creates lands in the farm, not `~`. Code outside agy reads `~/.local/share/gemini` directly, and ai-accounts gets it as `dataDir`. The `rlm` plugin (`modules/agents/antigravity/plugins/rlm/`, enabled via `extensions.recursive-language-models.enable`) ports pi-rlm to agy. It packages the unmodified `rlm_kernel.py` pinned from `@florianguyonnet/pi-rlm` alongside the `rlm_mcp` server and links `~/.config/gemini/plugins/rlm`. When `extensions.recursive-language-models.autoload` is true, the `agy` wrapper appends `--agent rlm`. Child agents run headless via `agy -p --agent rlm --output-format stream-json`, logged to `<dataDir>/children/<session>/<id>.jsonl`. The CLI and server exchange metadata through `sessions/<pid>.json`. Kernel data variables are pickled after each cell and restored when a conversation resumes; the postGc hook prunes old snapshots, child logs and harness notes. The `/refine` harness records persistent prompt and memory notes injected during session start. Unlike pi-agent, agy lacks a live child viewer UI and mid-session mode toggling.
 - `claude-code` — owns `icedos.ai-tools.claude-code.users.<name>` (`mkSubmoduleAttrsOption`,
   filled per normal user via `genDefaults`) and enables `programs.claude-code` for every hm user
   (`enable = lib.mkDefault true`, `enableMcpIntegration = true`). It feeds the shared

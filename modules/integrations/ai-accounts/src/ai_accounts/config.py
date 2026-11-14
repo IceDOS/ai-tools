@@ -57,6 +57,7 @@ class Config:
     bus_talk: list = field(default_factory=list)
     alimit: str = ""
     real_dirs: dict = field(default_factory=dict)
+    data_dirs: dict = field(default_factory=dict)
     bins: dict = field(default_factory=dict)
     accounts: dict = field(default_factory=dict)
     managed: dict = field(default_factory=dict)
@@ -76,6 +77,7 @@ def load(path: Path | None = None) -> Config:
     for agent, spec in (raw.get("agents") or {}).items():
         cfg.managed[agent] = spec.get("settings") or {}
         cfg.real_dirs[agent] = spec.get("realDir") or ""
+        cfg.data_dirs[agent] = spec.get("dataDir") or ""
         cfg.bins[agent] = spec.get("bin") or ""
         declared = spec.get("accounts") or {}
         accounts = {"default": Account(agent, "default")} if declared else {}
