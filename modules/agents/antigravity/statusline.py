@@ -49,15 +49,22 @@ def fetch_quota(agy_bin=None):
             reset_time = b.get("reset_time")
             if bid and isinstance(rem, (int, float)):
                 reset_sec = None
+                reset_ts = None
                 if isinstance(reset_time, str):
                     try:
                         from datetime import datetime
 
                         dt = datetime.fromisoformat(reset_time.replace("Z", "+00:00"))
-                        reset_sec = max(0.0, dt.timestamp() - now)
+                        reset_ts = dt.timestamp()
+                        reset_sec = max(0.0, reset_ts - now)
                     except Exception:
                         pass
-                quota[bid] = {"remaining_fraction": rem, "reset_in_seconds": reset_sec}
+                quota[bid] = {
+                    "remaining_fraction": rem,
+                    "reset_in_seconds": reset_sec,
+                    "reset_time": reset_time,
+                    "reset_ts": reset_ts,
+                }
     if not quota:
         return 1
 
@@ -88,7 +95,13 @@ def maybe_refresh_quota(payload):
             pass
     if cached and isinstance(cached.get("quota"), dict):
         payload.setdefault("quota", {})
-        payload["quota"].update(cached["quota"])
+        for bid, q in cached["quota"].items():
+            if not isinstance(q, dict):
+                continue
+            item = dict(q)
+            if isinstance(q.get("reset_ts"), (int, float)):
+                item["reset_in_seconds"] = max(0.0, q["reset_ts"] - now)
+            payload["quota"][bid] = item
 
     last_fetch = 0.0
     if QUOTA_LOCK.exists():

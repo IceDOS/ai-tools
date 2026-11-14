@@ -45,6 +45,16 @@ def _is_poll(row):
     return len(row) < 4 or row[3] == "poll"
 
 
+def _is_spike_from_unexpired(rows, i: int, reset: int) -> bool:
+    # A spike if reset was hours in the future and subsequent rows return to it.
+    if reset <= rows[i][0] + RESET_SHIFT_MS:
+        return False
+    return any(
+        (r := to_ms(rows[j][2])) is not None and abs(r - reset) <= RESET_SHIFT_MS
+        for j in range(i + 1, min(i + 5, len(rows)))
+    )
+
+
 def _window_rows(rows):
     """Rows of the current window, minus late reports from the previous one.
 
@@ -61,10 +71,21 @@ def _window_rows(rows):
         poll = _is_poll(rows[i])
         r = to_ms(resets_at)
         if r is not None and reset is not None:
-            if r < reset - RESET_SHIFT_MS:
-                stale.add(i)  # a late report from the previous window (an idle session's redraw)
-                continue
-            new_window = r > reset + RESET_SHIFT_MS
+            if abs(r - reset) > RESET_SHIFT_MS:
+                if _is_spike_from_unexpired(rows, i, reset):
+                    stale.add(i)
+                    continue
+                if r < reset - RESET_SHIFT_MS:
+                    sustained = any(
+                        (r_next := to_ms(rows[j][2])) is not None and abs(r_next - r) <= RESET_SHIFT_MS
+                        for j in range(i + 1, min(i + 5, len(rows)))
+                    )
+                    if not sustained:
+                        stale.add(i)
+                        continue
+                new_window = True
+            else:
+                new_window = False
         else:
             new_window = util < peak - RESET_DROP
         if new_window:

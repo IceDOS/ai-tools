@@ -131,6 +131,36 @@ class TestRates(unittest.TestCase):
         self.assertIsNone(r.reset_ts)
         self.assertFalse(r.will_exhaust_before_reset)
 
+    def test_outlier_future_reset_spike_is_ignored(self):
+        # A single rogue sample with future resets_at does not break the ongoing window.
+        reset = iso(500 * MIN)
+        spike = iso(700 * MIN)
+        rows = [
+            (0, 20.0, reset),
+            (10 * MIN, 22.0, reset),
+            (20 * MIN, 18.0, spike),
+            (21 * MIN, 25.0, reset),
+            (30 * MIN, 30.0, reset),
+        ]
+        r = compute_ok("five_hour", rows, 30 * MIN, lookback_min=60)
+        self.assertEqual(r.util, 30.0)
+        self.assertEqual(r.resets_at, reset)
+        self.assertAlmostEqual(r.per_hour, 20.0, places=3)
+
+    def test_sustained_earlier_reset_starts_new_window(self):
+        # When an earlier reset is sustained across samples, it starts a new window.
+        old_reset = iso(500 * MIN)
+        new_reset = iso(200 * MIN)
+        rows = [
+            (0, 50.0, old_reset),
+            (10 * MIN, 1.0, new_reset),
+            (11 * MIN, 2.0, new_reset),
+            (20 * MIN, 5.0, new_reset),
+        ]
+        r = compute_ok("five_hour", rows, 20 * MIN, lookback_min=60)
+        self.assertEqual(r.util, 5.0)
+        self.assertEqual(r.resets_at, new_reset)
+
 
 class TestExchange(unittest.TestCase):
     @staticmethod
