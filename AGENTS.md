@@ -38,10 +38,10 @@ aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pages
 ## Shared options (`icedos.ai-tools.*`)
 - `icedos.ai-tools.rules` — name = markdown. pi-agent writes them all to
   `<dataDir>/APPEND_SYSTEM.md`, which pi appends to every system prompt,
-  antigravity writes `~/.gemini/config/rules/<name>.md`, opencode
+  antigravity writes `~/.config/gemini/rules/<name>.md` (agy reads them through the `~/.gemini` symlink), opencode
   writes `~/.config/opencode/rules/<name>.md` and lists it in `instructions`, and `claude-code`
   sets `programs.claude-code.rules` (mkDefault per entry).
-- `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: antigravity `~/.gemini/antigravity-cli/skills/`, opencode
+- `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: antigravity `~/.local/share/gemini/antigravity-cli/skills/` (agy reads them through the `~/.gemini` symlink), opencode
   `programs.opencode.skills`, Claude Code `programs.claude-code.skills`.
   pi-agent builds them into a store dir that its settings.json lists under skills.
 - Per-agent options of the same name win over the shared entry

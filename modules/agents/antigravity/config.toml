@@ -1,11 +1,14 @@
 [icedos.ai-tools.antigravity.extra-mcp-servers]
 
-# Global rules, name = markdown, written to ~/.gemini/config/rules/<name>.md.
+# Global rules, name = markdown, written to ~/.config/gemini/rules/<name>.md (agy reads them through the ~/.gemini symlink).
 # Text without frontmatter gets `trigger: always_on`. agy truncates a file past 24,000 bytes.
 [icedos.ai-tools.antigravity.rules]
 
-# Global skills, name = full SKILL.md content, written to ~/.gemini/antigravity-cli/skills/<name>/SKILL.md.
+# Global skills, name = full SKILL.md content, written to ~/.local/share/gemini/antigravity-cli/skills/<name>/SKILL.md (agy reads them through the ~/.gemini symlink).
 [icedos.ai-tools.antigravity.skills]
+
+# Keys of agy's settings.json; Home Manager sets them on activation and launch (null removes).
+[icedos.ai-tools.antigravity.settings]
 
 [icedos.ai-tools.antigravity]
 # Whether the launcher shows a desktop entry that opens in the default terminal.
@@ -15,7 +18,7 @@ desktopEntry = false
 launchWrapper = []
 
 # Whether to wire Home Manager's shared programs.mcp.servers registry
-# into ~/.gemini/config/mcp_config.json for Antigravity.
+# into ~/.config/gemini/mcp_config.json for Antigravity (agy reads it through the ~/.gemini symlink).
 enableMcpIntegration = true
 
 # Antigravity CLI bottom status bar (/statusline), rendered by alimit like the other agents' bars;

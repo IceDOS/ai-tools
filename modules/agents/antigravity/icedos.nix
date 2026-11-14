@@ -19,6 +19,7 @@
         extra-mcp-servers
         launchWrapper
         rules
+        settings
         skills
         statusLine
         statusLineStackWithDefault
@@ -30,7 +31,7 @@
       desktopEntry = mkBoolOption { default = desktopEntry; };
 
       # Whether to wire Home Manager's shared programs.mcp.servers registry
-      # into ~/.gemini/config/mcp_config.json for Antigravity.
+      # into ~/.config/gemini/mcp_config.json for Antigravity (agy reads it through the ~/.gemini symlink).
       enableMcpIntegration = mkBoolOption { default = enableMcpIntegration; };
 
       # Additional MCP servers registered exclusively for Antigravity.
@@ -40,10 +41,13 @@
       # such as agent-relay's PTY proxy.
       launchWrapper = mkStrListOption { default = launchWrapper; };
 
-      # Global rules, written to ~/.gemini/config/rules/<name>.md (agy reads that folder's top level only).
+      # Global rules, written to ~/.config/gemini/rules/<name>.md (agy reads that folder's top level only).
       rules = mkAttrsOfOption { default = rules; } lib.types.lines;
 
-      # Global skills (name = SKILL.md), written to ~/.gemini/antigravity-cli/skills/<name>/SKILL.md.
+      # agy settings.json keys merged on activation and launch (null removes).
+      settings = mkAttrsOfOption { default = settings; } lib.types.anything;
+
+      # Global skills (name = SKILL.md), written to ~/.local/share/gemini/antigravity-cli/skills/<name>/SKILL.md.
       skills = mkAttrsOfOption { default = skills; } lib.types.lines;
 
       # Bottom status bar (/statusline), alimit's shared agent bar; set in agy's own settings.json.
@@ -112,6 +116,7 @@
             enableMcpIntegration
             extra-mcp-servers
             launchWrapper
+            settings
             statusLine
             statusLineStackWithDefault
             terminal-title
@@ -186,7 +191,7 @@
             cfg = rlmCfg;
             agy = "${pkgs.antigravity-cli}/bin/agy";
           };
-          rlmDataDir = "$HOME/.gemini/antigravity-cli/plugin_data/rlm";
+          rlmDataDir = "$HOME/.local/share/gemini/antigravity-cli/plugin_data/rlm";
 
           # A launch wrapper such as agent-relay's PTY proxy takes the agy path as its last argument.
           agyCommand =
@@ -274,38 +279,43 @@
 
               in
               {
-                # The same block `statusline.py --setup` writes; null clears agy's key.
+                # The managed block for agy's settings.json; null clears a key.
                 options.icedos.managed-settings.antigravity = icedosLib.mkAttrsOption {
                   default =
-                    if statusLine || terminal-title.enable then
-                      {
-                        statusLine = {
-                          type = "command";
-                          command = statusLineCommand;
-                        }
-                        // lib.optionalAttrs (statusLineStackWithDefault || !statusLine) {
-                          stack_with_default = true;
-                        };
-                      }
-                    else
-                      { statusLine = null; };
+                    let
+                      statusBlock =
+                        if statusLine || terminal-title.enable then
+                          {
+                            statusLine = {
+                              type = "command";
+                              command = statusLineCommand;
+                            }
+                            // lib.optionalAttrs (statusLineStackWithDefault || !statusLine) {
+                              stack_with_default = true;
+                            };
+                          }
+                        else
+                          { statusLine = null; };
+                    in
+                    lib.recursiveUpdate statusBlock settings;
                 };
 
                 config = {
-                  home.file = {
-                    ".gemini/config/mcp_config.json" = mkIf (enabledServers != { }) {
+                  xdg.configFile = {
+                    "gemini/mcp_config.json" = mkIf (enabledServers != { }) {
                       source = jsonFormat.generate "antigravity-mcp-config.json" mcpConfig;
                     };
                   }
                   // mapAttrs' (
-                    name: text: nameValuePair ".gemini/config/rules/${name}.md" { text = withTrigger text; }
+                    name: text: nameValuePair "gemini/rules/${name}.md" { text = withTrigger text; }
                   ) rules
-                  // mapAttrs' (
-                    name: text: nameValuePair ".gemini/antigravity-cli/skills/${name}/SKILL.md" { inherit text; }
-                  ) skills
                   // lib.optionalAttrs rlmCfg.enable {
-                    ".gemini/config/plugins/rlm".source = rlm.plugin;
+                    "gemini/plugins/rlm".source = rlm.plugin;
                   };
+
+                  xdg.dataFile = mapAttrs' (
+                    name: text: nameValuePair "gemini/antigravity-cli/skills/${name}/SKILL.md" { inherit text; }
+                  ) skills;
 
                   # Terminal=true: the desktop environment launches the user's default terminal.
                   xdg.desktopEntries.antigravity-cli = mkIf desktopEntry {
@@ -320,14 +330,90 @@
                     ];
                   };
 
-                  # agy owns ~/.gemini/antigravity-cli/settings.json (it writes on settings
-                  # changes), so Home Manager only merges/removes its statusLine key.
-                  home.activation.icedosAntigravityStatusLine = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-                    run ${statusLinePkg}/bin/antigravity-statusline --setup ${
-                      if statusLine || terminal-title.enable then "on" else "off"
-                    } ${lib.escapeShellArg statusLineCommand}${
-                      lib.optionalString (statusLineStackWithDefault || !statusLine) " --stack"
-                    }
+                  home.activation.icedosAntigravityLayout = lib.hm.dag.entryBefore [ "checkLinkTargets" ] ''
+                    set -eu
+                    GEMINI="${config.home.homeDirectory}/.gemini"
+                    SHARE_GEMINI="${config.home.homeDirectory}/.local/share/gemini"
+                    CONFIG_GEMINI="${config.home.homeDirectory}/.config/gemini"
+
+                    # 1. Move ~/.gemini to ~/.local/share/gemini and symlink ~/.gemini -> ~/.local/share/gemini
+                    if [ -d "$GEMINI" ] && [ ! -L "$GEMINI" ]; then
+                      if [ ! -e "$SHARE_GEMINI" ]; then
+                        run mkdir -p "${config.home.homeDirectory}/.local/share"
+                        run mv "$GEMINI" "$SHARE_GEMINI"
+                        run ln -s "$SHARE_GEMINI" "$GEMINI"
+                      else
+                        echo "antigravity layout: both $GEMINI and $SHARE_GEMINI exist; skipping migration" >&2
+                      fi
+                    elif [ ! -e "$SHARE_GEMINI" ]; then
+                      run mkdir -p "$SHARE_GEMINI"
+                    fi
+                    if [ ! -e "$GEMINI" ] && [ ! -L "$GEMINI" ]; then
+                      run ln -s "$SHARE_GEMINI" "$GEMINI"
+                    fi
+
+                    # 2. Move ~/.local/share/gemini/config to ~/.config/gemini and symlink ~/.local/share/gemini/config -> ~/.config/gemini
+                    if [ -d "$SHARE_GEMINI/config" ] && [ ! -L "$SHARE_GEMINI/config" ]; then
+                      if [ ! -e "$CONFIG_GEMINI" ]; then
+                        run mkdir -p "${config.home.homeDirectory}/.config"
+                        run mv "$SHARE_GEMINI/config" "$CONFIG_GEMINI"
+                        run ln -s "$CONFIG_GEMINI" "$SHARE_GEMINI/config"
+                      else
+                        echo "antigravity layout: both $SHARE_GEMINI/config and $CONFIG_GEMINI exist; skipping migration" >&2
+                      fi
+                    elif [ ! -e "$CONFIG_GEMINI" ]; then
+                      run mkdir -p "$CONFIG_GEMINI"
+                    fi
+                    if [ ! -e "$SHARE_GEMINI/config" ] && [ ! -L "$SHARE_GEMINI/config" ]; then
+                      run ln -s "$CONFIG_GEMINI" "$SHARE_GEMINI/config"
+                    fi
+
+                    # Remove old HM store links inside moved config and skills dirs before HM checkLinkTargets
+                    for d in "$CONFIG_GEMINI" "$SHARE_GEMINI/antigravity-cli/skills"; do
+                      if [ -d "$d" ]; then
+                        find "$d" -type l -print0 | while IFS= read -r -d "" link; do
+                          target=$(readlink "$link" || true)
+                          case "$target" in
+                            /nix/store/*-home-manager-files/*)
+                              run rm "$link"
+                              ;;
+                          esac
+                        done
+                      fi
+                    done
+
+                    # 3. Move ai-accounts state to ~/.local/state/icedos/ai-accounts
+                    OLD_STATE="${config.home.homeDirectory}/.local/state/ai-accounts"
+                    NEW_STATE="${config.home.homeDirectory}/.local/state/icedos/ai-accounts"
+                    if [ -d "$OLD_STATE" ] && [ ! -L "$OLD_STATE" ]; then
+                      if [ ! -e "$NEW_STATE" ]; then
+                        run mkdir -p "${config.home.homeDirectory}/.local/state/icedos"
+                        run mv "$OLD_STATE" "$NEW_STATE"
+                        if ${pkgs.procps}/bin/pgrep -x agy >/dev/null 2>&1 || ${pkgs.procps}/bin/pgrep -f antigravity-cli >/dev/null 2>&1; then
+                          run ln -s "icedos/ai-accounts" "$OLD_STATE"
+                          echo "antigravity layout: created compat symlink $OLD_STATE -> icedos/ai-accounts for running sessions; will remove on a later activation without running agy"
+                        fi
+                      else
+                        echo "antigravity layout: both $OLD_STATE and $NEW_STATE exist; skipping migration" >&2
+                      fi
+                    elif [ -L "$OLD_STATE" ]; then
+                      if ! ${pkgs.procps}/bin/pgrep -x agy >/dev/null 2>&1 && ! ${pkgs.procps}/bin/pgrep -f antigravity-cli >/dev/null 2>&1; then
+                        run rm "$OLD_STATE"
+                        echo "antigravity layout: removed compat symlink $OLD_STATE"
+                      fi
+                    fi
+
+                    # 4. Remove orphan cache ~/.local/state/antigravity-statusline
+                    if [ -e "${config.home.homeDirectory}/.local/state/antigravity-statusline" ] || [ -L "${config.home.homeDirectory}/.local/state/antigravity-statusline" ]; then
+                      run rm -rf "${config.home.homeDirectory}/.local/state/antigravity-statusline"
+                    fi
+                  '';
+
+                  home.activation.icedosAntigravitySettings = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+                    run ${pkgs.python3}/bin/python3 ${../../integrations/ai-accounts/src/ai_accounts/settings.py} \
+                      "${config.home.homeDirectory}/.gemini/antigravity-cli/settings.json" \
+                      ${jsonFormat.generate "antigravity-managed-settings.json" config.icedos.managed-settings.antigravity} \
+                      "''${XDG_STATE_HOME:-${config.home.homeDirectory}/.local/state}/icedos/antigravity/settings-ledger.json"
                   '';
                 };
               }

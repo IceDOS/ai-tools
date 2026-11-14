@@ -112,8 +112,8 @@
                   text = opencodeServer;
                 };
 
-                home.file = mkIf (has "antigravity") {
-                  ".gemini/config/hooks.json".text = builtins.toJSON {
+                xdg.configFile."gemini/hooks.json" = mkIf (has "antigravity") {
+                  text = builtins.toJSON {
                     agent-relay = {
                       enabled = true;
                       SessionStart = [
