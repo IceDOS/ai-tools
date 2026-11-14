@@ -153,6 +153,7 @@
             name = "antigravity-statusline";
             text = ''
               export ANTIGRAVITY_ALIMIT=${lib.getExe alimitPkg}
+              export ANTIGRAVITY_BIN=${agyBin}
               export ANTIGRAVITY_TITLE_IDLE_GLYPH=${lib.escapeShellArg terminal-title.idleGlyph}
               export ANTIGRAVITY_TITLE_WORKING_GLYPHS=${lib.escapeShellArg (lib.concatStringsSep " " terminal-title.workingGlyphs)}
               exec ${pkgs.python3}/bin/python3 ${statusLineScripts}/statusline.py "$@"
