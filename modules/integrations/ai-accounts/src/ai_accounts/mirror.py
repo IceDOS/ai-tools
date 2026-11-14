@@ -128,3 +128,26 @@ def locked(key: str):
             yield
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _copy_atomic(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f"{dst.name}.ai-account-{os.getpid()}.tmp")
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
+
+
+def share_newest(real: Path, copies: list[Path], dst: Path) -> None:
+    """Copy the newest existing candidate over real and dst if they are older."""
+    existing = [p for p in [real, *copies] if p.is_file()]
+    if not existing:
+        return
+    newest = max(existing, key=lambda p: p.stat().st_mtime_ns)
+    for target in (real, dst):
+        if not target.is_file() or target.stat().st_mtime_ns < newest.stat().st_mtime_ns:
+            try:
+                if target.exists() and target.samefile(newest):
+                    continue
+            except OSError:
+                pass
+            _copy_atomic(newest, target)

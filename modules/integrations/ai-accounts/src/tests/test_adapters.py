@@ -211,3 +211,63 @@ class AdapterTest(unittest.TestCase):
         launch = adapters.prepare(acct, self.cfg)
         self.assertNotIn("OPENCODE_CONFIG", launch.env)
         self.assertFalse((acct.dir / adapters.LEDGER).exists())
+
+    def test_antigravity_settings_shared_newest_wins(self):
+        cli = self.real / ".gemini" / "antigravity-cli"
+        cli.mkdir(parents=True)
+        real_s = cli / "settings.json"
+        real_s.write_text('{"from": "real"}')
+        os.utime(real_s, (1000, 1000))
+
+        acct_a = Account("antigravity", "a")
+        with mock.patch.object(adapters.dbusproxy, "start", return_value=7):
+            adapters.prepare(acct_a, self.cfg)
+        a_s = acct_a.dir / "home" / ".gemini" / "antigravity-cli" / "settings.json"
+        a_s.write_text('{"from": "a"}')
+        os.utime(a_s, (3000, 3000))
+        os.utime(real_s, (1000, 1000))
+
+        acct_b = Account("antigravity", "b")
+        with mock.patch.object(adapters.dbusproxy, "start", return_value=7):
+            adapters.prepare(acct_b, self.cfg)
+        b_s = acct_b.dir / "home" / ".gemini" / "antigravity-cli" / "settings.json"
+        self.assertEqual(json.loads(b_s.read_text()), {"from": "a"})
+        self.assertEqual(json.loads(real_s.read_text()), {"from": "a"})
+
+    def test_antigravity_default_pulls_newest_account(self):
+        cli = self.real / ".gemini" / "antigravity-cli"
+        cli.mkdir(parents=True)
+        real_s = cli / "settings.json"
+        real_s.write_text('{"from": "real"}')
+        os.utime(real_s, (1000, 1000))
+
+        acct_a = Account("antigravity", "a")
+        with mock.patch.object(adapters.dbusproxy, "start", return_value=7):
+            adapters.prepare(acct_a, self.cfg)
+        a_s = acct_a.dir / "home" / ".gemini" / "antigravity-cli" / "settings.json"
+        a_s.write_text('{"from": "a"}')
+        os.utime(a_s, (3000, 3000))
+
+        adapters.prepare(Account("antigravity", "default"), self.cfg)
+        self.assertEqual(json.loads(real_s.read_text()), {"from": "a"})
+
+    def test_antigravity_managed_keys_applied_after_copy(self):
+        cli = self.real / ".gemini" / "antigravity-cli"
+        cli.mkdir(parents=True)
+        real_s = cli / "settings.json"
+        real_s.write_text('{"from": "real", "model": "old"}')
+        os.utime(real_s, (1000, 1000))
+
+        acct_a = Account("antigravity", "a")
+        with mock.patch.object(adapters.dbusproxy, "start", return_value=7):
+            adapters.prepare(acct_a, self.cfg)
+        a_s = acct_a.dir / "home" / ".gemini" / "antigravity-cli" / "settings.json"
+        a_s.write_text('{"from": "a", "model": "a_model"}')
+        os.utime(a_s, (3000, 3000))
+
+        self.cfg.managed = {"antigravity": {"model": "managed_model"}}
+        acct_b = Account("antigravity", "b")
+        with mock.patch.object(adapters.dbusproxy, "start", return_value=7):
+            adapters.prepare(acct_b, self.cfg)
+        b_s = acct_b.dir / "home" / ".gemini" / "antigravity-cli" / "settings.json"
+        self.assertEqual(json.loads(b_s.read_text()), {"from": "a", "model": "managed_model"})

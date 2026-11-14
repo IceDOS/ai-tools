@@ -93,6 +93,8 @@ def _antigravity(acct, cfg):
             mirror.sync(real_home / ".gemini", home / ".gemini", AGY_PRIVATE, seed=AGY_SEED)
         else:
             (home / ".gemini").mkdir(parents=True, exist_ok=True)
+    if acct.mode == "shared":
+        _sync_antigravity_settings(acct, cfg)
     sock = config.runtime_dir() / f"antigravity-{acct.name}.bus"
     fd = dbusproxy.start(os.environ["DBUS_SESSION_BUS_ADDRESS"], sock, cfg.bus_talk)
     return Launch({"HOME": str(home), "DBUS_SESSION_BUS_ADDRESS": f"unix:path={sock}"}, [], (fd,))
@@ -114,8 +116,22 @@ PREPARE = {
 }
 
 
+def _sync_antigravity_settings(acct: Account, cfg: Config) -> None:
+    real_dir = cfg.real_dirs.get("antigravity")
+    if not real_dir:
+        return
+    real = Path(real_dir) / ".gemini" / "antigravity-cli" / "settings.json"
+    state = config.state_dir() / "antigravity"
+    copies = list(state.glob("*/home/.gemini/antigravity-cli/settings.json"))
+    dst = real if acct.is_default else (acct.dir / "home" / ".gemini" / "antigravity-cli" / "settings.json")
+    with mirror.locked("antigravity-settings"):
+        mirror.share_newest(real, copies, dst)
+
+
 def prepare(acct: Account, cfg: Config) -> Launch:
     if acct.is_default:
+        if acct.agent == "antigravity":
+            _sync_antigravity_settings(acct, cfg)
         return Launch({}, [])
     launch = PREPARE[acct.agent](acct, cfg)
     _apply_settings(acct, cfg, launch)

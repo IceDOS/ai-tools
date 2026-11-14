@@ -169,6 +169,8 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   - Per-account `settings` merge over the agent module's `icedos.managed-settings.<agent>` into the
     account's own settings file on each launch, recorded in `.ai-account-settings.json` so removing
     an override restores the value it replaced.
+  - Antigravity shares one `settings.json` across accounts (the newest copy wins at launch), so a
+    per-account `settings` override can reach other accounts until their next launch re-applies theirs.
   - Antigravity accounts run behind `xdg-dbus-proxy`, which hides `org.freedesktop.secrets` so agy
     stores its token in the account's `~/.gemini`. `antigravity.busTalk` lists the reachable names.
 - `alimit` — **standalone** module that owns `icedos.ai-tools.alimit.users.<name>`

@@ -142,3 +142,16 @@ class MirrorTest(unittest.TestCase):
         problems = mirror.check(self.real, self.acct, seed={"settings.json"})
         self.assertEqual(len(problems), 1)
         self.assertIn("own copy", problems[0])
+
+    def test_sync_with_symlinked_real(self):
+        real_share = self.real.parent / "share_gemini"
+        real_share.mkdir()
+        (real_share / "file.txt").write_text("hello")
+        (real_share / "secret.txt").write_text("secret")
+        symlink_gemini = self.real / ".gemini"
+        symlink_gemini.symlink_to(real_share)
+        acct_gemini = self.acct / ".gemini"
+        mirror.sync(symlink_gemini, acct_gemini, private={"secret.txt"})
+        self.assertEqual(os.readlink(acct_gemini / "file.txt"), str(symlink_gemini / "file.txt"))
+        self.assertFalse((acct_gemini / "secret.txt").exists())
+        self.assertEqual(mirror.check(symlink_gemini, acct_gemini, private={"secret.txt"}), [])
