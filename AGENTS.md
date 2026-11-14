@@ -106,7 +106,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   (`settings.dataDir`) and to refuse `pi update`. Nix owns `mcp.json` (from `programs.mcp.servers`,
   `timeout = settings.mcpCallTimeout`) and `APPEND_SYSTEM.md`, so `pi mcp add` cannot write there;
   add servers to `icedos.ai-tools.mcp-servers` instead. Activation (`lib/seed.sh`) merges the managed
-  keys into pi's `settings.json` and replaces each `settings.providers` entry in `models.json`, keeping
+  keys (including `settings.httpProxy` when non-empty) into pi's `settings.json` and replaces each `settings.providers` entry in `models.json`, keeping
   everything else pi wrote. `auth.json` is never written; sign in with `/login`.
   Extensions are store paths listed in the managed `settings.json` `extensions` key, in order:
   `extensions.builtin` (pi's examples, by name), the shipped cost-footer (behind `meters.cost`), context-cap

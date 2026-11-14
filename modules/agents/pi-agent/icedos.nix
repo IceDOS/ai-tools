@@ -49,6 +49,7 @@
 
       settings = {
         dataDir = mkStrOption { default = defaults.settings.dataDir; };
+        httpProxy = mkStrOption { default = defaults.settings.httpProxy; };
 
         mcpCallTimeout = mkIntBetweenOption {
           path = "icedos.ai-tools.pi-agent.settings.mcpCallTimeout";
@@ -600,6 +601,7 @@
               skills = [ "${skillsDir}" ] ++ cfg.skills.dirs;
               extensions = extensionPaths;
             }
+            // lib.optionalAttrs (cfg.settings.httpProxy != "") { inherit (cfg.settings) httpProxy; }
             // lib.optionalAttrs (cfg.default.provider != "") { defaultProvider = cfg.default.provider; }
             // lib.optionalAttrs (cfg.default.model != "") { defaultModel = cfg.default.model; }
             # pi runs `npm` from PATH by default, and the system has none there.

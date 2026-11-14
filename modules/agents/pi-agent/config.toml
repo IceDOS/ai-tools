@@ -34,6 +34,9 @@ extra-builtin = {}
 # "" means $XDG_CONFIG_HOME/pi-agent; $XDG_CONFIG_HOME, $XDG_DATA_HOME, $HOME and ~ expand per user.
 dataDir = ""
 
+# Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for Pi-managed HTTP clients.
+httpProxy = ""
+
 # Per-request MCP timeout in seconds for every mcp.json server; pi's own default is 60.
 mcpCallTimeout = 900
 

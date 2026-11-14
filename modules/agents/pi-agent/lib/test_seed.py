@@ -77,6 +77,11 @@ class SeedTest(unittest.TestCase):
     def write_settings_seed(self, data):
         self.settings_seed.write_text(json.dumps(data))
 
+    def test_http_proxy_seeded(self):
+        self.write_settings_seed({**SETTINGS, "httpProxy": "http://127.0.0.1:7890"})
+        self.run_seed()
+        self.assertEqual(self.read("settings.json")["httpProxy"], "http://127.0.0.1:7890")
+
     def test_packages_seeded_and_recorded(self):
         self.write_settings_seed({**SETTINGS, "packages": ["npm:a@1"]})
         self.run_seed()
