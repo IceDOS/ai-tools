@@ -1,0 +1,18 @@
+name: Update antigravity-rlm
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "20 3 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: antigravity-rlm
+      paths: modules/agents/antigravity/plugins/rlm
+      command: nix-shell modules/agents/antigravity/plugins/rlm/update.sh
+      version-file: modules/agents/antigravity/plugins/rlm/rlm-kernel.json
+    secrets: inherit

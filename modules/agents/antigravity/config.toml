@@ -32,3 +32,20 @@ statusLineStackWithDefault = false
 enable = true
 idleGlyph = "◉"
 workingGlyphs = ["◐", "◓", "◑", "◒"]
+
+[icedos.ai-tools.antigravity.extensions.recursive-language-models]
+# rlm plugin: ipython MCP tool whose rlm(prompt, context) runs a child agy; adds /rlm and /refine skills.
+enable = false
+# Launch agy with --agent rlm (RLM mode) from agent-launch and the desktop entry.
+autoload = false
+# rlm() recursion limit; 0 turns recursion off.
+maxDepth = 2
+# Log every child's stream-json under the plugin data dir's children/<conversation>/.
+childLog = true
+# Per-child agy --print-timeout; "0s" means no limit.
+childTimeout = "15m"
+# Pickle namespace data per conversation and restore it on resume.
+snapshots = true
+# Whether icedos gc prunes snapshots, child logs and local harness files older than retentionDays.
+includeInIcedosGc = true
+retentionDays = 30

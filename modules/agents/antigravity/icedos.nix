@@ -7,6 +7,7 @@
       inherit (icedosLib)
         mkAttrsOfOption
         mkBoolOption
+        mkIntBetweenOption
         mkStrListOption
         mkStrOption
         ;
@@ -14,6 +15,7 @@
       inherit ((importTOML ./config.toml).icedos.ai-tools.antigravity)
         desktopEntry
         enableMcpIntegration
+        extensions
         extra-mcp-servers
         launchWrapper
         rules
@@ -57,6 +59,32 @@
         idleGlyph = mkStrOption { default = terminal-title.idleGlyph; };
         workingGlyphs = mkStrListOption { default = terminal-title.workingGlyphs; };
       };
+
+      extensions.recursive-language-models =
+        let
+          e = extensions.recursive-language-models;
+          path = "icedos.ai-tools.antigravity.extensions.recursive-language-models";
+        in
+        {
+          # rlm plugin: ipython MCP tool whose rlm() runs child agy agents; adds /rlm and /refine.
+          enable = mkBoolOption { default = e.enable; };
+          # Launch agy with --agent rlm from agent-launch and the desktop entry.
+          autoload = mkBoolOption { default = e.autoload; };
+          maxDepth = mkIntBetweenOption {
+            path = "${path}.maxDepth";
+            source = ./config.toml;
+            default = e.maxDepth;
+          } 0 10;
+          childLog = mkBoolOption { default = e.childLog; };
+          childTimeout = mkStrOption { default = e.childTimeout; };
+          snapshots = mkBoolOption { default = e.snapshots; };
+          includeInIcedosGc = mkBoolOption { default = e.includeInIcedosGc; };
+          retentionDays = mkIntBetweenOption {
+            path = "${path}.retentionDays";
+            source = ./config.toml;
+            default = e.retentionDays;
+          } 1 3650;
+        };
     };
 
   outputs.nixosModules =
@@ -151,8 +179,22 @@
             else
               "${pkgs.antigravity-cli}/bin/agy";
 
+          rlmCfg = config.icedos.ai-tools.antigravity.extensions.recursive-language-models;
+          rlm = import ./plugins/rlm/package.nix {
+            inherit pkgs lib;
+            cfg = rlmCfg;
+            agy = "${pkgs.antigravity-cli}/bin/agy";
+          };
+          rlmDataDir = "$HOME/.gemini/antigravity-cli/plugin_data/rlm";
+
           # A launch wrapper such as agent-relay's PTY proxy takes the agy path as its last argument.
-          agyCommand = launchWrapper ++ [ agyBin ];
+          agyCommand =
+            launchWrapper
+            ++ [ agyBin ]
+            ++ lib.optionals (rlmCfg.enable && rlmCfg.autoload) [
+              "--agent"
+              "rlm"
+            ];
         in
         {
           icedos.ai-tools.agent-launch.agents.antigravity = {
@@ -259,7 +301,10 @@
                   ) rules
                   // mapAttrs' (
                     name: text: nameValuePair ".gemini/antigravity-cli/skills/${name}/SKILL.md" { inherit text; }
-                  ) skills;
+                  ) skills
+                  // lib.optionalAttrs rlmCfg.enable {
+                    ".gemini/config/plugins/rlm".source = rlm.plugin;
+                  };
 
                   # Terminal=true: the desktop environment launches the user's default terminal.
                   xdg.desktopEntries.antigravity-cli = mkIf desktopEntry {
@@ -290,6 +335,22 @@
 
           icedos.system.tips.list = [
             "Antigravity automatically discovers MCP servers declared in programs.mcp.servers."
+          ];
+
+          icedos.system.gc.hooks.postGc = lib.mkIf (rlmCfg.enable && rlmCfg.includeInIcedosGc) [
+            ''
+              D="${rlmDataDir}"
+              D=''${D//\$HOME/$HOME}
+              [ -d "$D" ] || D="$HOME/.local/share/icedos-rlm"
+              [ -d "$D" ] || exit 0
+              gc_section "$D" "path"
+              gc_note "Keeping paths newer than ''${DIM_GREEN}${toString rlmCfg.retentionDays}''${NC}d"
+              gc_by_age ${toString rlmCfg.retentionDays} "$D/snapshots" -maxdepth 1 -type f -name '*.pickle'
+              gc_by_age ${toString rlmCfg.retentionDays} "$D/children" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl'
+              gc_by_age ${toString rlmCfg.retentionDays} "$D/harness" -maxdepth 1 -type f -name '*.jsonl'
+              gc_by_age ${toString rlmCfg.retentionDays} "$D/sessions" -maxdepth 1 -type f -name '*.json'
+              gc_commit
+            ''
           ];
         }
       )
