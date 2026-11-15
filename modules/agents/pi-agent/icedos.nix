@@ -1,9 +1,28 @@
-{ icedosLib, lib, ... }:
-
 {
+  config ? { },
+  icedosLib,
+  lib,
+  ...
+}:
+
+let
+  defaults = (lib.importTOML ./config.toml).icedos.ai-tools.pi-agent;
+
+  cfg = config.ai-tools.pi-agent or { };
+  opencodeFree = defaults.extensions.opencodeFree // (cfg.extensions.opencodeFree or { });
+  hasOpencodeFreeProxy = opencodeFree.enable && (opencodeFree.proxyChain != [ ]);
+in
+{
+  inputs = lib.optionalAttrs hasOpencodeFreeProxy {
+    rng-proxy = {
+      url = "github:jim3692/rng-proxy";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
   options.icedos.ai-tools.pi-agent =
     let
-      inherit (lib) importTOML types;
+      inherit (lib) types;
 
       inherit (icedosLib)
         mkAttrsOfOption
@@ -16,8 +35,6 @@
         mkSubmoduleAttrsOption
         mkSubmoduleListOption
         ;
-
-      defaults = (importTOML ./config.toml).icedos.ai-tools.pi-agent;
     in
     {
       desktopEntry = mkBoolOption { default = defaults.desktopEntry; };
@@ -83,7 +100,10 @@
             } 1 100;
           };
 
-          opencodeFree = mkBoolOption { default = e.opencodeFree; };
+          opencodeFree = {
+            enable = mkBoolOption { default = e.opencodeFree.enable; };
+            proxyChain = mkStrListOption { default = e.opencodeFree.proxyChain; };
+          };
 
           vpn-rotate = {
             enable = mkBoolOption { default = e.vpn-rotate.enable; };
@@ -195,8 +215,15 @@
     };
 
   outputs.nixosModules =
-    { repoUrl, ... }:
-    [
+    {
+      inputs ? { },
+      repoUrl,
+      ...
+    }:
+    lib.optionals hasOpencodeFreeProxy [
+      inputs.rng-proxy.nixosModules.default
+    ]
+    ++ [
       (
         { config, pkgs, ... }:
 
@@ -446,7 +473,7 @@
                 maxRetries = "3";
               }
             )
-            ++ lib.optional ext.opencodeFree (
+            ++ lib.optional ext.opencodeFree.enable (
               substituteTs "opencode-free.ts" ./extensions/opencode-free.ts {
                 bunBin = "${pkgs.bun}/bin/bun";
               }
@@ -589,7 +616,11 @@
                 v
               ])
               (
-                lib.optionalAttrs ext.opencodeFree { PI_OPENCODE_FREE_API_KEY = "public"; }
+                lib.optionalAttrs ext.opencodeFree.enable { PI_OPENCODE_FREE_API_KEY = "public"; }
+                // lib.optionalAttrs hasOpencodeFreeProxy {
+                  HTTP_PROXY = "http://127.0.80.80:8080";
+                  HTTPS_PROXY = "http://127.0.80.80:8080";
+                }
                 // cfg.environmentVariables
               )
           );
@@ -847,6 +878,15 @@
             ++ lib.optionals cfg.includeInIcedosGc [
               "icedos gc also clears out old pi sessions."
             ];
+        }
+        // lib.optionalAttrs hasOpencodeFreeProxy {
+          services.gost = {
+            inherit (ext.opencodeFree) proxyChain;
+
+            enable = true;
+            listen = "127.0.80.80:8080";
+            whitelist = [ "opencode.ai" ];
+          };
         }
       )
     ];

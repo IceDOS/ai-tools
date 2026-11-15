@@ -52,11 +52,14 @@ rateLimit = []
 [icedos.ai-tools.pi-agent.extensions]
 # pi example extensions to load, by name under pi's examples/extensions/.
 builtin = ["todo", "git-checkpoint", "confirm-destructive", "status-line"]
-# Registers the opencode-free provider: OpenCode Zen's free models through a Bun transport.
-opencodeFree = false
-
 # name = TypeScript source, loaded after the shipped extensions. Modules add theirs here.
 inline = {}
+
+[icedos.ai-tools.pi-agent.extensions.opencodeFree]
+# Registers the opencode-free provider: OpenCode Zen's free models through a Bun transport.
+enable = false
+# Upstream SOCKS5 proxies to forward opencode.ai to via gost on 127.0.80.80:8080.
+proxyChain = []
 
 [icedos.ai-tools.pi-agent.extensions.context-window-cap]
 # Cap every model's contextWindow at this percent of its native context.
