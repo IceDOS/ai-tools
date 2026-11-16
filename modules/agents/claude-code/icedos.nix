@@ -28,18 +28,15 @@ let
       "owner"
       "repo"
       "rev"
-      "hash"
     ];
     fetchFromGitLab = [
       "owner"
       "repo"
       "rev"
-      "hash"
     ];
     fetchgit = [
       "url"
       "rev"
-      "hash"
     ];
     path = [ "path" ];
   };
