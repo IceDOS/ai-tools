@@ -134,6 +134,12 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   `hooks.rateLimit` entries run their `command` when a listed provider's error has one of their
   `errorKinds` (`usage_limit` covers pi's non-retryable account limits). At most one hook runs per
   prompt, and on exit 0 `rate-limit-hook.ts` rewrites the error so pi's own retry fires.
+  When `vpn-rotate.enable` is true, rotation is managed by a systemd user daemon (`pi-vpn-rotate-service`)
+  over a Unix socket, persisting rate-limited servers and countries across reboots in
+  `$XDG_STATE_HOME/pi-vpn-rotate/state.json`. `pi-vpn-rotate` acts as the socket client, exposing
+  `pi-vpn-rotate status` to view live connection state and rate limits, and `pi-vpn-rotate clear`
+  to reset rate-limit tracking. `vpn-rotate.maxRetries` sets the retries per prompt for rate-limit hooks.
+  `cooldownSeconds`, `maxPerHour` and `maxRetries` treat 0 as no limit, and `maxRetries` defaults to 0.
   `skills.codeReview` ships `skills/code-review` when pi-rlm is on. `meters.speed` adds the tok/s readout to the cost
   footer. `includeInIcedosGc` prunes `sessions/*/*.jsonl` and pi-rlm snapshots older than `sessionRetentionDays`.
   With kde's `vigor` module, unset `meters.power` values come from vigor's tariff, `gpuIdleWatts` and `windows`.

@@ -17,10 +17,14 @@ type Run = (entry: Entry, body: string, signal?: AbortSignal) => Promise<boolean
 // JSON of icedos.ai-tools.pi-agent.hooks.rateLimit, substituted at build time.
 const RAW = "@rateLimitHooks@";
 const HOOKS: Entry[] = RAW.startsWith("@") ? [] : JSON.parse(RAW);
-const RAW_MAX_RETRIES = "@maxRetries@";
+// 0 means no retry limit.
+const RAW_MAX_RETRIES = "@maxRetries@" as string;
 const PARSED_MAX_RETRIES = parseInt(RAW_MAX_RETRIES, 10);
-const MAX_RETRIES =
-  RAW_MAX_RETRIES.startsWith("@") || Number.isNaN(PARSED_MAX_RETRIES) ? 1 : Math.max(0, PARSED_MAX_RETRIES);
+const MAX_RETRIES = RAW_MAX_RETRIES.startsWith("@")
+  ? 1
+  : Number.isNaN(PARSED_MAX_RETRIES)
+  ? 3
+  : Math.max(0, PARSED_MAX_RETRIES);
 
 // pi's non-retryable account limits (pi-ai utils/retry); checked first so a 429 inside them stays usage_limit.
 const USAGE_LIMIT =
@@ -143,7 +147,7 @@ function createHandlers(hooks: Entry[], run: Run = runHook, maxRetries = MAX_RET
       if (process.env.PI_RLM_DEPTH) return undefined;
       const message = event.message;
       const kind = classify(message, state);
-      if (!kind || state.retries >= maxRetries) return undefined;
+      if (!kind || (maxRetries > 0 && state.retries >= maxRetries)) return undefined;
       const provider = message.provider ?? "";
       const entries = entriesFor(hooks, provider, kind);
       if (entries.length === 0) return undefined;
