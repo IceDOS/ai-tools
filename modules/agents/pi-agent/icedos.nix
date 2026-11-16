@@ -101,7 +101,13 @@
               path = "icedos.ai-tools.pi-agent.extensions.vpn-rotate.maxPerHour";
               source = ./config.toml;
               default = e.vpn-rotate.maxPerHour;
-            } 1 60;
+            } 0 60;
+
+            maxRetries = mkIntBetweenOption {
+              path = "icedos.ai-tools.pi-agent.extensions.vpn-rotate.maxRetries";
+              source = ./config.toml;
+              default = e.vpn-rotate.maxRetries;
+            } 0 100;
           };
 
           ghost-text = {
@@ -375,20 +381,25 @@
 
           vpn = ext.vpn-rotate;
 
-          vpnRotateScript = pkgs.writers.writePython3Bin "pi-vpn-rotate-unwrapped" {
+          vpnServiceScript = pkgs.writers.writePython3Bin "pi-vpn-rotate-service-unwrapped" {
+            flakeIgnore = [ "E501" ];
+          } (builtins.readFile ./lib/pi_vpn_service.py);
+
+          vpnService =
+            pkgs.runCommand "pi-vpn-rotate-service" { nativeBuildInputs = [ pkgs.makeWrapper ]; }
+              ''
+                makeWrapper ${vpnServiceScript}/bin/pi-vpn-rotate-service-unwrapped $out/bin/pi-vpn-rotate-service \
+                  --set PI_VPN_ROTATE_PROTONVPN ${pkgs.proton-vpn-cli}/bin/protonvpn \
+                  --set PI_VPN_ROTATE_COOLDOWN_S ${toString vpn.cooldownSeconds} \
+                  --set PI_VPN_ROTATE_MAX_PER_HOUR ${toString vpn.maxPerHour} \
+                  --set PI_VPN_ROTATE_COUNTRIES ${lib.escapeShellArg (lib.concatStringsSep "," vpn.countries)} \
+                  --set PI_VPN_ROTATE_EXCLUDED_COUNTRIES ${lib.escapeShellArg (lib.concatStringsSep "," vpn.excludedCountries)} \
+                  --set PI_VPN_ROTATE_BUN ${pkgs.bun}/bin/bun
+              '';
+
+          vpnRotate = pkgs.writers.writePython3Bin "pi-vpn-rotate" {
             flakeIgnore = [ "E501" ];
           } (builtins.readFile ./lib/pi_vpn_rotate.py);
-
-          vpnRotate = pkgs.runCommand "pi-vpn-rotate" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
-            makeWrapper ${vpnRotateScript}/bin/pi-vpn-rotate-unwrapped $out/bin/pi-vpn-rotate \
-              --set PI_VPN_ROTATE_PROTONVPN ${pkgs.proton-vpn-cli}/bin/protonvpn \
-              --set PI_VPN_ROTATE_COOLDOWN_S ${toString vpn.cooldownSeconds} \
-              --set PI_VPN_ROTATE_MAX_PER_HOUR ${toString vpn.maxPerHour} \
-              --set PI_VPN_ROTATE_MAX_RETRIES 3 \
-              --set PI_VPN_ROTATE_COUNTRIES ${lib.escapeShellArg (lib.concatStringsSep "," vpn.countries)} \
-              --set PI_VPN_ROTATE_EXCLUDED_COUNTRIES ${lib.escapeShellArg (lib.concatStringsSep "," vpn.excludedCountries)} \
-              --set PI_VPN_ROTATE_BUN ${pkgs.bun}/bin/bun
-          '';
 
           vpnRotateHook = {
             command = [ "${vpnRotate}/bin/pi-vpn-rotate" ];
@@ -443,7 +454,7 @@
             ++ lib.optional (rateLimitHooks != [ ]) (
               substituteTs "rate-limit-hook.ts" ./extensions/rate-limit-hook.ts {
                 rateLimitHooks = builtins.toJSON rateLimitHooks;
-                maxRetries = "3";
+                maxRetries = if vpn.enable then toString vpn.maxRetries else "3";
               }
             )
             ++ lib.optional ext.opencodeFree (
@@ -736,7 +747,11 @@
                 pkgs.pi-agent
             )
           ]
-          ++ lib.optional vpn.enable pkgs.proton-vpn-cli;
+          ++ lib.optionals vpn.enable [
+            pkgs.proton-vpn-cli
+            vpnService
+            vpnRotate
+          ];
 
           icedos.ai-tools.pi-agent.users = icedosLib.users.genDefaults {
             inherit (config.icedos) users;
@@ -823,6 +838,20 @@
                       "${relDataDir}/APPEND_SYSTEM.md".text = rulesText;
                     })
                   ];
+
+                  systemd.user.services.pi-vpn-rotate = lib.mkIf vpn.enable {
+                    Unit = {
+                      Description = "Pi VPN rotation daemon";
+                    };
+                    Service = {
+                      ExecStart = "${vpnService}/bin/pi-vpn-rotate-service";
+                      Restart = "always";
+                      RestartSec = "5s";
+                    };
+                    Install = {
+                      WantedBy = [ "default.target" ];
+                    };
+                  };
 
                   home.activation.seed-pi-agent = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
                     PATH=${

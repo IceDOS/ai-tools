@@ -211,14 +211,18 @@ test("allows multiple retries up to maxRetries", async () => {
   assert.equal(runs, 3);
 });
 
-test("maxRetries 0 disables retries", async () => {
+test("maxRetries 0 retries until the hook fails", async () => {
   let runs = 0;
   const handlers = lib.createHandlers([entry()], async () => {
     runs += 1;
-    return true;
+    return runs < 5;
   }, 0);
+  assert.ok(await handlers.messageEnd({ message: failed("429") }, ctx));
+  assert.ok(await handlers.messageEnd({ message: failed("429") }, ctx));
+  assert.ok(await handlers.messageEnd({ message: failed("429") }, ctx));
+  assert.ok(await handlers.messageEnd({ message: failed("429") }, ctx));
   assert.equal(await handlers.messageEnd({ message: failed("429") }, ctx), undefined);
-  assert.equal(runs, 0);
+  assert.equal(runs, 5);
 });
 
 test("failed hooks leave the message alone and every matching entry is tried", async () => {

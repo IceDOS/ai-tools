@@ -49,6 +49,9 @@ function rowText(): string | undefined {
   if (s?.at && s.at > lastServerCheck) {
     lastServerCheck = 0;
   }
+  if (s?.allRateLimited) {
+    return `vpn all rate-limited${s.refreshIn ? ` (refresh in ${s.refreshIn}s)` : ""}`;
+  }
   const active = currentTunnelServer();
   const stateServer = s?.server || s?.country;
   if (active && stateServer && active !== stateServer) {

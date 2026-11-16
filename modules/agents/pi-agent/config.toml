@@ -74,10 +74,12 @@ providers = ["opencode-free"]
 countries = []
 # Country codes never to rotate to; applied after countries.
 excludedCountries = []
-# No rotation within this many seconds of the last one, from any session.
-cooldownSeconds = 600
-# At most this many rotations in any hour.
-maxPerHour = 3
+# No new rotation within this many seconds of the last one, from any session; 0 disables.
+cooldownSeconds = 0
+# At most this many rotations in any hour; 0 disables the cap.
+maxPerHour = 0
+# Retries per prompt for rate-limit hooks while vpn-rotate is on; 0 means no limit.
+maxRetries = 0
 
 [icedos.ai-tools.pi-agent.extensions.ghost-text]
 # pi-ghost-text-x: inline prompt suggestions; adds /suggest and /suggest-model.
