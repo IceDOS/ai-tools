@@ -15,6 +15,17 @@ let
     configHome = "/home/u/.config";
     dataHome = "/home/u/.local/share";
   };
+  bundleEntries = [
+    {
+      name = "free-models.ts";
+      path = "/nix/store/aaa-free-models.ts";
+      load = false;
+    }
+    {
+      name = "cost-footer";
+      path = "/nix/store/bbb-pi-agent-cost-footer";
+    }
+  ];
   render =
     servers:
     (mcp.render {
@@ -168,6 +179,16 @@ lib.runTests {
       "/ia"
       "/iz"
     ];
+  };
+  testBundleScript = {
+    expr = ext.bundleScript "/out" bundleEntries;
+    expected = ''
+      cp -r /nix/store/aaa-free-models.ts /out/free-models.ts
+      cp -r /nix/store/bbb-pi-agent-cost-footer /out/cost-footer'';
+  };
+  testBundlePaths = {
+    expr = ext.bundlePaths "/out" bundleEntries;
+    expected = [ "/out/cost-footer" ];
   };
   testInlineNames = {
     expr = ext.invalidInlineNames [

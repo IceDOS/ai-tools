@@ -424,9 +424,11 @@
             "timeout"
           ];
 
+          # Ordered { name, path, load ? true }; name is the basename inside the bundle.
           shipped =
-            lib.optional ext.meters.cost (
-              substituteTs "pi-agent-cost-footer" ./extensions/cost-footer {
+            lib.optional ext.meters.cost {
+              name = "cost-footer";
+              path = substituteTs "pi-agent-cost-footer" ./extensions/cost-footer {
                 speed = lib.boolToString ext.meters.speed;
                 powerCard = power.card;
                 powerRate = builtins.toJSON power.rateKwh;
@@ -444,28 +446,41 @@
                     power.windows
                 );
                 powerProviders = lib.concatStringsSep "," (lib.optionals power.enable power.providers);
-              }
-            )
-            ++ lib.optional ext.context-window-cap.enable (
-              substituteTs "context-cap.ts" ./extensions/context-cap.ts {
+              };
+            }
+            ++ lib.optional ext.context-window-cap.enable {
+              name = "context-cap.ts";
+              path = substituteTs "context-cap.ts" ./extensions/context-cap.ts {
                 contextWindowPercent = toString ext.context-window-cap.percent;
-              }
-            )
-            ++ lib.optional (rateLimitHooks != [ ]) (
-              substituteTs "rate-limit-hook.ts" ./extensions/rate-limit-hook.ts {
+              };
+            }
+            ++ lib.optional (rateLimitHooks != [ ]) {
+              name = "rate-limit-hook.ts";
+              path = substituteTs "rate-limit-hook.ts" ./extensions/rate-limit-hook.ts {
                 rateLimitHooks = builtins.toJSON rateLimitHooks;
                 maxRetries = if vpn.enable then toString vpn.maxRetries else "3";
-              }
-            )
-            ++ lib.optional ext.opencodeFree (
-              substituteTs "opencode-free.ts" ./extensions/opencode-free.ts {
+              };
+            }
+            ++ lib.optional ext.opencodeFree {
+              name = "opencode-free.ts";
+              path = substituteTs "opencode-free.ts" ./extensions/opencode-free.ts {
                 bunBin = "${pkgs.bun}/bin/bun";
-              }
-            )
-            ++ lib.optional vpn.enable (pkgs.writeText "vpn-row.ts" (builtins.readFile ./extensions/vpn-row.ts))
-            ++ lib.optional (rlm.enable && rlm.childViewer) (
-              pkgs.writeText "rlm-children.ts" (builtins.readFile ./extensions/rlm-children.ts)
-            );
+              };
+            }
+            ++ lib.optional vpn.enable {
+              name = "vpn-row.ts";
+              path = ./extensions/vpn-row.ts;
+            }
+            ++ lib.optional (rlm.enable && rlm.childViewer) {
+              name = "rlm-children.ts";
+              path = ./extensions/rlm-children.ts;
+            };
+
+          # One store dir for all shipped extensions so their relative imports resolve.
+          extensionBundle = pkgs.runCommand "pi-agent-extensions" { } ''
+            mkdir -p $out
+            ${extLib.bundleScript "$out" shipped}
+          '';
 
           # Invalid names are asserted below; filtering keeps writeText from failing first.
           inlinePaths = lib.mapAttrs (name: text: pkgs.writeText "${name}.ts" text) (
@@ -475,7 +490,7 @@
           extensionPaths = map toString (
             extLib.order {
               builtin = builtinPaths;
-              inherit shipped;
+              shipped = if shipped == [ ] then [ ] else extLib.bundlePaths "${extensionBundle}" shipped;
               inline = inlinePaths;
             }
           );
