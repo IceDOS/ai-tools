@@ -114,7 +114,22 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   The shipped ones are copied into one `pi-agent-extensions` store directory and those inner paths are what
   `settings.json` lists: they import each other by relative path, so a per-file store path would break them.
   `lib/extensions.nix` holds the `bundleScript`/`bundlePaths` helpers that build and address the directory; an
-  entry with `load = false` is copied but left out of `settings.json`. llamacpp
+  entry with `load = false` is copied but left out of `settings.json`. `extensions/free-models.ts`, which
+  the others import, is such an entry.
+  `extensions/free-models.ts` is the single manifest for opencode Zen's free models: the provider
+  table, the cost-footer's rate-limit pools, and the parser/cache the runtime resolves through, so the
+  provider list and the pools cannot drift apart. Nothing is compiled in: there is no seed table, so at
+  launch opencode-free registers only what the last successful fetch cached in
+  `<dataDir>/opencode-free/models.json`, and registers nothing at all when that cache is missing or
+  unreadable. It then resolves `https://opencode.ai/inference/openai/v1/models` (the public catalog,
+  filtered by `parseServedModels`; a nix build cannot fetch it) and publishes the result, announcing a
+  changed table with a warning. A failed resolve is never silent: the error goes to stderr and to a
+  `notify(..., "error")` queued for the first session, the cached table stays if there was one, and if
+  there was not, the picker simply has no free models until a later session retries and succeeds.
+  `PI_OPENCODE_FREE_CATALOG=off` disables the catalog entirely, `PI_OPENCODE_FREE_CATALOG_TTL_MS`
+  (12h) bounds when a launch resolves again, and `PI_OPENCODE_FREE_MODELS_URL` points the resolve at
+  another endpoint. `stalePools()` warns when a pooled model is no longer served, so a retired model
+  cannot sit in a bucket nothing burns. llamacpp
   adds `inline.llamacpp-lifecycle` and alimit adds `inline.alimit` with `mkDefault`. pi-clm's other
   `PI_CLM_*` env goes into the wrapper as `--set-default`. Check sources with `tests/typecheck.sh`.
   `packages` entries go into settings.json `packages` and pi installs them, with `npmCommand` set to
