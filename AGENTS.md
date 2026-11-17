@@ -110,7 +110,11 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   everything else pi wrote. `auth.json` is never written; sign in with `/login`.
   Extensions are store paths listed in the managed `settings.json` `extensions` key, in order:
   `extensions.builtin` (pi's examples, by name), the shipped cost-footer (behind `meters.cost`), context-cap
-  (behind `context-window-cap.enable`), rate-limit-hook (when `hooks.rateLimit` or `vpn-rotate` is set), opencode-free (behind `extensions.opencodeFree`) and vpn-row (behind `vpn-rotate.enable`, which also adds a `hooks.rateLimit` entry and installs `proton-vpn-cli`), then `extensions.inline` by name. llamacpp
+  (behind `context-window-cap.enable`), rate-limit-hook (when `hooks.rateLimit` or `vpn-rotate` is set), opencode-free (behind `extensions.opencodeFree`) and vpn-row (behind `vpn-rotate.enable`, which also adds a `hooks.rateLimit` entry and installs `proton-vpn-cli`), then `extensions.inline` by name.
+  The shipped ones are copied into one `pi-agent-extensions` store directory and those inner paths are what
+  `settings.json` lists: they import each other by relative path, so a per-file store path would break them.
+  `lib/extensions.nix` holds the `bundleScript`/`bundlePaths` helpers that build and address the directory; an
+  entry with `load = false` is copied but left out of `settings.json`. llamacpp
   adds `inline.llamacpp-lifecycle` and alimit adds `inline.alimit` with `mkDefault`. pi-clm's other
   `PI_CLM_*` env goes into the wrapper as `--set-default`. Check sources with `tests/typecheck.sh`.
   `packages` entries go into settings.json `packages` and pi installs them, with `npmCommand` set to
