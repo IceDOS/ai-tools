@@ -505,6 +505,10 @@
               ]) clmEnv
             )
             # pi installs packages under <agentDir>/npm/node_modules; the wrapper sets PI_CODING_AGENT_DIR first.
+            ++ [
+              "--run"
+              ''${patchPiClmScript} "''${PI_CODING_AGENT_DIR:-$HOME/.config/pi-agent}/npm/node_modules/@lolipopshock/pi-clm"''
+            ]
             ++ lib.optionals (clm.steering == "") [
               "--run"
               "export PI_CLM_STEERING=\"\${PI_CLM_STEERING:-$PI_CODING_AGENT_DIR/npm/node_modules/@lolipopshock/pi-clm/steering/house-brief.md}\""
@@ -523,6 +527,15 @@
               "llamacpp-lifecycle"
             ]
           ) extensionPaths;
+
+          patchPiClmScript = pkgs.writeShellScript "pi-clm-patch" ''
+            dir="$1"
+            if [ -d "$dir" ] && ! ${pkgs.gnugrep}/bin/grep -q "pi-clm-native-compaction.patch v1" "$dir/src/index.ts" 2>/dev/null; then
+              if ! ${pkgs.patch}/bin/patch -p1 -d "$dir" --forward --no-backup-if-mismatch -r - < ${./patches/pi-clm-native-compaction-overflow.patch}; then
+                echo "warning: failed to apply pi-clm-native-compaction-overflow.patch to $dir" >&2
+              fi
+            fi
+          '';
 
           patchPiRlmScript = pkgs.writeShellScript "pi-rlm-patch" ''
             dir="$1"
@@ -568,8 +581,10 @@
               done
               if [ -n "$prefix" ]; then
                 ${patchPiRlmScript} "$prefix/node_modules/@florianguyonnet/pi-rlm"
+                ${patchPiClmScript} "$prefix/node_modules/@lolipopshock/pi-clm"
               fi
               ${patchPiRlmScript} "''${PI_CODING_AGENT_DIR:-$HOME/.config/pi-agent}/npm/node_modules/@florianguyonnet/pi-rlm"
+              ${patchPiClmScript} "''${PI_CODING_AGENT_DIR:-$HOME/.config/pi-agent}/npm/node_modules/@lolipopshock/pi-clm"
             fi
             exit $ec
           '';

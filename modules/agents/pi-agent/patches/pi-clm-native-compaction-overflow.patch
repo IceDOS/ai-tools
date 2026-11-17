@@ -1,0 +1,46 @@
+--- package/src/index.ts
++++ package/src/index.ts
+@@ -1359,6 +1359,19 @@
+ 					effectiveMessages = guarded.messages;
+ 					pendingOverflowNotice = overflowNoticeText(guarded, limit);
+ 				}
++				if (guarded.estimated + fixedTokens > limit && state.checkpoint) {
++					const fullGuarded = applyOverflowGuard(guarded.messages, {
++						limit,
++						fixedTokens,
++						estimate: (messages) => calibrator.apply(estimateLiveContextTokens(messages)),
++						saveDirectory: store ? join(store.directory, "withheld") : undefined,
++						protectBefore: 0,
++					});
++					if (fullGuarded.withheld.length > 0) {
++						effectiveMessages = fullGuarded.messages;
++						pendingOverflowNotice = overflowNoticeText({ ...fullGuarded, withheld: [...guarded.withheld, ...fullGuarded.withheld] }, limit);
++					}
++				}
+ 			}
+ 		}
+ 		const visibleSuffixMessages = selectContextVisibleMessages(suffixMessages);
+@@ -1459,11 +1472,22 @@
+ 		if (event.reason !== "threshold") return undefined;
+ 		const resolved = resolveBudget(budgetPolicy, ctx.model?.contextWindow);
+ 		if (!resolved || overflowGuard.mode === "off") return undefined;
++		const limit = overflowGuardLimit(resolved.budget, resolved.reserve, ctx.model?.contextWindow);
+ 		const effective = currentContextView
+ 			? calibrator.apply(estimateTextTokens(ctx.getSystemPrompt?.() ?? "") + currentContextView.effectiveTokens)
+ 			: undefined;
++		const rawTokens = event.preparation?.tokensBefore;
++		const effectiveTokens = effective ?? rawTokens;
++		// pi-clm-native-compaction.patch v1: allow native compaction when context reaches or exceeds limit
++		if ((effectiveTokens !== undefined && effectiveTokens >= limit) || (rawTokens !== undefined && rawTokens >= (ctx.model?.contextWindow ?? limit))) {
++			ctx.ui.notify(
++				`pi-clm: running Pi's threshold compaction; context (~${(effectiveTokens ?? rawTokens)?.toLocaleString("en-US")} tokens) reaches limit (${limit.toLocaleString("en-US")}).`,
++				"warning",
++			);
++			return undefined;
++		}
+ 		ctx.ui.notify(
+-			`pi-clm: cancelled Pi's threshold compaction (raw-history based); the effective context is ~${effective?.toLocaleString("en-US") ?? "?"} tokens and the overflow guard enforces ${overflowGuardLimit(resolved.budget, resolved.reserve, ctx.model?.contextWindow).toLocaleString("en-US")}.`,
++			`pi-clm: cancelled Pi's threshold compaction (raw-history based); the effective context is ~${effective?.toLocaleString("en-US") ?? "?"} tokens and the overflow guard enforces ${limit.toLocaleString("en-US")}.`,
+ 			"info",
+ 		);
+ 		return { cancel: true };
