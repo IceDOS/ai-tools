@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-DEBOUNCE_S = 10
+DEBOUNCE_S = int(os.environ.get("PI_VPN_ROTATE_DEBOUNCE_S", "60"))
 PROTON_TIMEOUT_S = 30
 CONNECT_TIMEOUT_S = 50
 PROBE_TIMEOUT_S = 6
@@ -209,6 +209,7 @@ class VpnState:
         self.all_rate_limited = False
         self.min_refresh_in = 0
         self.failed_target = None
+        self.is_rotating = False
         self.load()
 
     def clean_expired(self):
@@ -294,6 +295,8 @@ class VpnState:
                 "refreshIn": self.min_refresh_in,
                 "rateLimitedCountries": r_countries,
                 "rateLimitedCountriesCount": len(r_countries),
+                "rotating": self.is_rotating,
+                "rotatedAt": self.last_rotation_time,
             }
             try:
                 self.runtime_file.parent.mkdir(parents=True, exist_ok=True)
@@ -699,7 +702,6 @@ class VpnService:
             self.sock_path = Path(runtime_dir) / "pi-vpn-rotate.sock"
         self.rotate_lock = asyncio.Lock()
         self.server = None
-        self.is_rotating = False
 
     def _try_debounce(self, session_id):
         now = self.rotator.now()
@@ -727,7 +729,8 @@ class VpnService:
             cached = self._try_debounce(session_id)
             if cached:
                 return cached
-            self.is_rotating = True
+            self.rotator.state.is_rotating = True
+            self.rotator.state.save()
             try:
                 res = await asyncio.to_thread(self.rotator.rotate, req)
                 if res.get("ok"):
@@ -735,7 +738,8 @@ class VpnService:
                     self.rotator.state.save()
                 return res
             finally:
-                self.is_rotating = False
+                self.rotator.state.is_rotating = False
+                self.rotator.state.save()
 
     async def handle_status(self):
         s = self.rotator.state
@@ -750,7 +754,7 @@ class VpnService:
             "allRateLimited": s.all_rate_limited,
             "refreshIn": s.min_refresh_in,
             "rateLimitedCountries": s.get_rate_limited_countries_list(),
-            "rotating": self.is_rotating,
+            "rotating": s.is_rotating,
         }
 
     async def handle_clear(self):

@@ -417,6 +417,9 @@ export function bunFetch(
         }
         try {
           if (responseStatus !== 200) {
+            if (responseStatus === 429) {
+              rotateZenSessions();
+            }
             const raw = Buffer.concat(nonStreamChunks);
             const response = new Response(raw, {
               status: responseStatus,
@@ -447,6 +450,9 @@ export function bunFetch(
           meta = JSON.parse(metaRaw.trim());
         } catch {
           return;
+        }
+        if (meta.status === 429) {
+          rotateZenSessions();
         }
         if (!meta.status || meta.status < 200 || meta.status > 599 || meta.error) {
           fail(new TypeError(meta.error || `fetch failed (status ${meta.status})`));
@@ -552,10 +558,54 @@ function descendingId(timestamp = Date.now()): string {
   return "ses_" + time + Array.from(bytes, (byte) => ID_CHARS[byte % 62]).join("");
 }
 
+const STATE = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/pi-vpn-rotate.json`;
+let lastKnownRotationEpoch = 0;
+
+function checkGlobalRotationEpoch(): boolean {
+  try {
+    if (fs.existsSync(STATE)) {
+      const s = JSON.parse(fs.readFileSync(STATE, "utf8"));
+      // rotatedAt only moves when a rotation finishes; `at` moves on every save (debounce, flags).
+      if (s?.rotatedAt > lastKnownRotationEpoch) {
+        lastKnownRotationEpoch = s.rotatedAt;
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
+export function rotateZenSessions(): void {
+  sessionMap.clear();
+  processFallbackSessionId = null;
+}
+
+async function waitForRotation(signal?: AbortSignal): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < 20000) {
+    if (signal?.aborted) return;
+    try {
+      if (fs.existsSync(STATE)) {
+        const s = JSON.parse(fs.readFileSync(STATE, "utf8"));
+        // Stale flag: a service killed mid-rotation leaves rotating:true (tmpfs) until logout.
+        if (!s?.rotating || Date.now() - s.at > 120000) break;
+      } else {
+        break;
+      }
+    } catch {
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
 const sessionMap = new Map<string, string>();
 let processFallbackSessionId: string | null = null;
 
 function getZenSessionId(key?: string): string {
+  if (checkGlobalRotationEpoch()) {
+    rotateZenSessions();
+  }
   if (!key) {
     if (!processFallbackSessionId) {
       processFallbackSessionId = descendingId();
@@ -707,9 +757,6 @@ export function ensureShaped(
   headers.set("user-agent", ZEN_USER_AGENT);
   headers.set("x-opencode-client", "cli");
 
-  const projectHash = crypto.createHash("sha1").update(`directory:${cwd}`).digest("hex");
-  headers.set("x-opencode-project", projectHash);
-
   let sesId = headers.get("x-opencode-session-id") ?? headers.get("x-opencode-session");
   if (!sesId || !sesId.startsWith("ses_")) {
     sesId = getZenSessionId(sesId ?? undefined);
@@ -718,6 +765,9 @@ export function ensureShaped(
   headers.set("x-opencode-session", sesId);
   headers.set("x-session-affinity", sesId);
   headers.set("x-session-id", sesId);
+
+  const projectHash = crypto.createHash("sha1").update(`directory:${cwd}:${sesId}`).digest("hex");
+  headers.set("x-opencode-project", projectHash);
   headers.delete("x-opencode-request");
   headers.delete("traceparent");
   headers.delete("b3");
@@ -771,6 +821,7 @@ function installBunTransport(): void {
     }
     const shaped = ensureShaped(url, reqInit);
     if (shaped.shaped) {
+      await waitForRotation(reqInit.signal ?? undefined);
       const method = (shaped.init.method as string) || "POST";
       const headers: Record<string, string> = {};
       const h = shaped.init.headers as unknown;

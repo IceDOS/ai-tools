@@ -502,6 +502,51 @@ def test_service_debouncing_concurrent_clients(tmp_path):
     asyncio.run(run_test())
 
 
+def test_handle_rotate_rotating_flag(tmp_path):
+    async def run_test():
+        clock = FakeClock(1000.0)
+        rotator, state, calls, clock = make_test_rotator(tmp_path, clock=clock, cooldown_s=0)
+        srv = service.VpnService(rotator, sock_path=tmp_path / "test.sock")
+        seen = []
+
+        def observe(req):
+            seen.append(json.loads(state.runtime_file.read_text())["rotating"])
+            return rotate(req)
+
+        rotate, rotator.rotate = rotator.rotate, observe
+        res = await srv.handle_rotate({"session": "ses_A"})
+        assert res["ok"] is True
+        assert seen == [True], "runtime file must say rotating while rotate() runs"
+        assert json.loads(state.runtime_file.read_text())["rotating"] is False
+        assert (await srv.handle_status())["rotating"] is False
+
+        # only a finished rotation moves rotatedAt; every other save moves at
+        rotated_at = json.loads(state.runtime_file.read_text())["rotatedAt"]
+        assert rotated_at == state.last_rotation_time
+        clock.sleep(5)
+        state.save()
+        runtime = json.loads(state.runtime_file.read_text())
+        assert runtime["rotatedAt"] == rotated_at and runtime["at"] > rotated_at * 1000
+
+        clock.sleep(service.DEBOUNCE_S + 1)  # past the debounce window so rotate() runs again
+
+        def boom(req):
+            seen.append(json.loads(state.runtime_file.read_text())["rotating"])
+            raise RuntimeError("service killed mid-rotation")
+
+        rotator.rotate = boom
+        try:
+            await srv.handle_rotate({"session": "ses_B"})
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("rotate() errors must propagate")
+        assert seen == [True, True]
+        assert json.loads(state.runtime_file.read_text())["rotating"] is False
+
+    asyncio.run(run_test())
+
+
 # 5. Client CLI tests
 
 def test_client_main_status_does_not_read_stdin(monkeypatch):
