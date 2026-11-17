@@ -164,7 +164,8 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   for the URL, user-agent and, when the request names no free model, the first model in the cached catalog; it skips
   the probe when neither is there. `vpn-rotate.maxRetries` sets the retries per prompt for rate-limit hooks.
   `cooldownSeconds`, `maxPerHour` and `maxRetries` treat 0 as no limit, and `maxRetries` defaults to 0.
-  `skills.codeReview` ships `skills/code-review` when pi-rlm is on. `meters.speed` adds the tok/s readout to the cost
+  `skills.codeReview` ships `skills/code-review` when pi-rlm is on, and `skills.opencodeFreeReview` adds
+  `skills/opencode-free-review` when code-review and opencode-free are on too. `meters.speed` adds the tok/s readout to the cost
   footer. `includeInIcedosGc` prunes `sessions/*/*.jsonl` and pi-rlm snapshots older than `sessionRetentionDays`.
   With kde's `vigor` module, unset `meters.power` values come from vigor's tariff, `gpuIdleWatts` and `windows`.
   `agent-launch` registers locator `pi-agent`, which zed's bridge resolves from pi's per-cwd session dirs.

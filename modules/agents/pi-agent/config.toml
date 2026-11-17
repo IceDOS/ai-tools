@@ -24,6 +24,9 @@ provider = ""
 # Ship the code-review skill: reviewer children per dimension, then an adversarial verify pass.
 # Needs extensions.recursive-language-models, with maxDepth at least 2.
 codeReview = false
+# Ship opencode-free-review: the code-review loop on opencode-free children only.
+# Needs codeReview and extensions.opencodeFree.
+opencodeFreeReview = false
 # Extra skill directories listed in settings.json `skills`.
 dirs = []
 
