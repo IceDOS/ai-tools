@@ -236,6 +236,8 @@
           );
 
           dataDirLib = import ./lib/data-dir.nix { inherit lib; };
+          # The wrapper exports PI_CODING_AGENT_DIR; the fallback covers scripts run outside it.
+          agentDirSh = "\${PI_CODING_AGENT_DIR:-${dataDirLib.shell cfg.settings.dataDir}}";
           mcpJson = import ./lib/mcp-json.nix { inherit lib; };
 
           hasAccounts = import ../../integrations/ai-accounts/lib/has-accounts.nix { inherit lib; } config;
@@ -533,7 +535,7 @@
             # pi installs packages under <agentDir>/npm/node_modules; the wrapper sets PI_CODING_AGENT_DIR first.
             ++ [
               "--run"
-              ''${patchPiClmScript} "''${PI_CODING_AGENT_DIR:-$HOME/.config/pi-agent}/npm/node_modules/@lolipopshock/pi-clm"''
+              ''${patchPiClmScript} "${agentDirSh}/npm/node_modules/@lolipopshock/pi-clm"''
             ]
             ++ lib.optionals (clm.steering == "") [
               "--run"
@@ -614,15 +616,15 @@
                 ${patchPiRlmScript} "$prefix/node_modules/@florianguyonnet/pi-rlm"
                 ${patchPiClmScript} "$prefix/node_modules/@lolipopshock/pi-clm"
               fi
-              ${patchPiRlmScript} "''${PI_CODING_AGENT_DIR:-$HOME/.config/pi-agent}/npm/node_modules/@florianguyonnet/pi-rlm"
-              ${patchPiClmScript} "''${PI_CODING_AGENT_DIR:-$HOME/.config/pi-agent}/npm/node_modules/@lolipopshock/pi-clm"
+              ${patchPiRlmScript} "${agentDirSh}/npm/node_modules/@florianguyonnet/pi-rlm"
+              ${patchPiClmScript} "${agentDirSh}/npm/node_modules/@lolipopshock/pi-clm"
             fi
             exit $ec
           '';
 
           rlmWrapperArgs = lib.optionals rlm.enable [
             "--run"
-            ''${patchPiRlmScript} "''${PI_CODING_AGENT_DIR:-$HOME/.config/pi-agent}/npm/node_modules/@florianguyonnet/pi-rlm"''
+            ''${patchPiRlmScript} "${agentDirSh}/npm/node_modules/@florianguyonnet/pi-rlm"''
             "--set-default"
             "PI_RLM_PYTHON"
             "${pkgs.python3}/bin/python3"
@@ -667,12 +669,7 @@
 
           # Runs per user under a minimal env that only has HOME.
           gcHook = ''
-            D=${lib.escapeShellArg cfg.settings.dataDir}
-            [ -z "$D" ] && D="$HOME/.config/pi-agent"
-            D=''${D/\$XDG_CONFIG_HOME/$HOME/.config}
-            D=''${D/\$XDG_DATA_HOME/$HOME/.local/share}
-            D=''${D/#\~/$HOME}
-            D=''${D//\$HOME/$HOME}
+            D="${dataDirLib.shell cfg.settings.dataDir}"
             [ -d "$D" ] || { log_warn "pi-agent gc: data dir $D not found; skipping"; exit 0; }
 
             gc_section "$D" "path"
