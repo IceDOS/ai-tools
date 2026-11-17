@@ -23,7 +23,6 @@ ROTATE_BUDGET_S = 290
 CANDIDATE_COST_S = CONNECT_TIMEOUT_S + SETTLE_S + PROBE_TIMEOUT_S
 MAX_ATTEMPTS_PER_COUNTRY = 3
 LOG_LINES = 200
-DEFAULT_PROBE_MODEL = "big-pickle"
 FREE_PLAN_TEXT = "is not available on the free plan"
 
 COUNTRY_RE = re.compile(r"^(.+?)\s+([A-Z]{2})\s*$")
@@ -38,8 +37,6 @@ USAGE_LIMIT_RE = re.compile(
 
 PROBE_SCRIPT = """
 const crypto = require("node:crypto");
-const BASE_URL = process.env.PI_OPENCODE_FREE_BASE_URL ?? "https://opencode.ai/inference/openai/v1";
-const USER_AGENT = process.env.PI_OPENCODE_FREE_UA ?? "opencode/latest/2.2.6/cli";
 const ID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 let lastTimestamp = 0, counter = 0;
 function descendingId(timestamp = Date.now()) {
@@ -52,6 +49,12 @@ function descendingId(timestamp = Date.now()) {
   return "ses_" + time + Array.from(bytes, (b) => ID_CHARS[b % 62]).join("");
 }
 async function probe() {
+  // URL, user-agent and model come from the extensions' free-models.ts; without it, skip the probe.
+  let mod;
+  try { mod = await import(process.env.PI_OPENCODE_FREE_MODULE); } catch { process.stdout.write("skip"); return; }
+  const { BASE_URL, ZEN_USER_AGENT: USER_AGENT } = mod;
+  const model = __PROBE_MODEL__ ?? mod.loadCatalog().models[0]?.id;
+  if (!model) { process.stdout.write("skip"); return; }
   const sesId = descendingId();
   const cwd = process.cwd();
   const projectHash = crypto.createHash("sha1").update("directory:" + cwd).digest("hex");
@@ -78,7 +81,7 @@ async function probe() {
         "x-opencode-project": projectHash,
       },
       body: JSON.stringify({
-        model: __PROBE_MODEL__,
+        model,
         messages: [{ role: "system", content: harness }, { role: "user", content: "ping" }],
         stream: true,
         max_completion_tokens: 1,
@@ -131,7 +134,7 @@ def run_cmd(argv, timeout):
     return capture(argv, timeout)
 
 
-def probe_opencode(bun_bin="bun", model=DEFAULT_PROBE_MODEL):
+def probe_opencode(bun_bin="bun", model=None):
     if not shutil.which(bun_bin) and not os.path.exists(bun_bin):
         return "missing_bun"
     script = PROBE_SCRIPT.replace("__PROBE_MODEL__", json.dumps(model))
@@ -541,7 +544,8 @@ class VpnRotator:
         if probe_fn is None and req.get("provider") in ("opencode-free", "opencode"):
             bun_path = self.bun_bin or os.environ.get("PI_VPN_ROTATE_BUN") or shutil.which("bun")
             if bun_path:
-                model = (req.get("provider") == "opencode-free" and req.get("model")) or DEFAULT_PROBE_MODEL
+                # None lets the probe pick a model the cached catalog still serves.
+                model = (req.get("provider") == "opencode-free" and req.get("model")) or None
 
                 def opencode_probe():
                     return probe_opencode(bun_bin=bun_path, model=model)
@@ -625,6 +629,8 @@ class VpnRotator:
                     pass
                 elif p_res == "missing_bun":
                     self.log("bun not found; skipping probe")
+                elif p_res == "skip":
+                    self.log("no free-models module or cached catalog; skipping probe")
                 else:
                     probe_status = str(p_res)
                     if probe_status == "429" or p_res is False:

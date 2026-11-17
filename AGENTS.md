@@ -157,7 +157,9 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   over a Unix socket, persisting rate-limited servers and countries across reboots in
   `$XDG_STATE_HOME/pi-vpn-rotate/state.json`. `pi-vpn-rotate` acts as the socket client, exposing
   `pi-vpn-rotate status` to view live connection state and rate limits, and `pi-vpn-rotate clear`
-  to reset rate-limit tracking. `vpn-rotate.maxRetries` sets the retries per prompt for rate-limit hooks.
+  to reset rate-limit tracking. Its opencode probe imports the bundled `free-models.ts` (`PI_OPENCODE_FREE_MODULE`)
+  for the URL, user-agent and, when the request names no free model, the first model in the cached catalog; it skips
+  the probe when neither is there. `vpn-rotate.maxRetries` sets the retries per prompt for rate-limit hooks.
   `cooldownSeconds`, `maxPerHour` and `maxRetries` treat 0 as no limit, and `maxRetries` defaults to 0.
   `skills.codeReview` ships `skills/code-review` when pi-rlm is on. `meters.speed` adds the tok/s readout to the cost
   footer. `includeInIcedosGc` prunes `sessions/*/*.jsonl` and pi-rlm snapshots older than `sessionRetentionDays`.

@@ -617,6 +617,17 @@ def test_probe_script_syntax_valid(tmp_path):
     assert code == 0, f"Probe script has syntax errors: {out}"
 
 
+def test_probe_skips_without_module_or_model(tmp_path, monkeypatch):
+    # A missing module or an empty catalog must skip, not report "0", which flags countries unreachable.
+    script = service.PROBE_SCRIPT.replace("__PROBE_MODEL__", json.dumps(None))
+    monkeypatch.delenv("PI_OPENCODE_FREE_MODULE", raising=False)
+    assert service.capture(["node", "-e", script], timeout=10)[1].strip() == "skip"
+    stub = tmp_path / "free-models.mjs"
+    stub.write_text('export const BASE_URL = "http://127.0.0.1:9"; export const ZEN_USER_AGENT = "t"; export const loadCatalog = () => ({ models: [] });')
+    monkeypatch.setenv("PI_OPENCODE_FREE_MODULE", str(stub))
+    assert service.capture(["node", "-e", script], timeout=10)[1].strip() == "skip"
+
+
 def test_free_plan_plain_connect_fallback(tmp_path):
     clock = FakeClock(1000.0)
     calls = []
