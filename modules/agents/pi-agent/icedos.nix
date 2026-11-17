@@ -84,6 +84,7 @@
           };
 
           opencodeFree = mkBoolOption { default = e.opencodeFree; };
+          viewImage = mkBoolOption { default = e.viewImage; };
 
           vpn-rotate = {
             enable = mkBoolOption { default = e.vpn-rotate.enable; };
@@ -473,6 +474,10 @@
                 bunBin = "${pkgs.bun}/bin/bun";
               };
             }
+            ++ lib.optional ext.viewImage {
+              name = "view-image.ts";
+              path = ./extensions/view-image.ts;
+            }
             ++ lib.optional vpn.enable {
               name = "vpn-row.ts";
               path = ./extensions/vpn-row.ts;
@@ -546,6 +551,7 @@
               "context-cap"
               "alimit"
               "llamacpp-lifecycle"
+              "view-image"
             ]
           ) extensionPaths;
 
@@ -560,6 +566,10 @@
 
           patchPiRlmScript = pkgs.writeShellScript "pi-rlm-patch" ''
             dir="$1"
+            # A copy patched before view-image joined the list cannot be patched over; pi reinstalls it.
+            if [ -d "$dir" ] && ${pkgs.gnugrep}/bin/grep -q "ESSENTIAL_EXTENSIONS" "$dir/src/child.ts" 2>/dev/null && ! ${pkgs.gnugrep}/bin/grep -q '"view-image"' "$dir/src/child.ts"; then
+              rm -rf "$dir"
+            fi
             if [ -d "$dir" ] && { ! ${pkgs.gnugrep}/bin/grep -q "PI_RLM_EXTENSIONS" "$dir/src/child.ts" 2>/dev/null || ! ${pkgs.gnugrep}/bin/grep -q "coreChildExtensions" "$dir/src/refine.ts" 2>/dev/null; }; then
               if ! ${pkgs.patch}/bin/patch -p1 -d "$dir" --forward --no-backup-if-mismatch -r - < ${./patches/pi-rlm-child-extensions.patch}; then
                 echo "warning: failed to apply pi-rlm-child-extensions.patch to $dir" >&2
