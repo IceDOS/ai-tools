@@ -1,6 +1,6 @@
 --- package/src/child.ts	1985-10-26 10:15:00.000000000 +0200
 +++ package/src/child.ts	2026-11-11 04:50:24.576015589 +0200
-@@ -56,6 +56,34 @@
+@@ -56,6 +56,35 @@
  	signal?: AbortSignal;
  }
  
@@ -9,6 +9,7 @@
 +	"context-cap",
 +	"alimit",
 +	"llamacpp-lifecycle",
++	"view-image",
 +];
 +
 +export function coreChildExtensions(): string[] {
@@ -35,7 +36,7 @@
  export function emptyUsage(): Usage {
  	return {
  		input: 0,
-@@ -208,6 +236,7 @@
+@@ -208,6 +237,7 @@
  		};
  	}
  
@@ -43,7 +44,7 @@
  	const args = [
  		"--mode",
  		"json",
-@@ -218,10 +247,15 @@
+@@ -218,10 +248,15 @@
  		// …except this one, which re-enables rlm() for deeper recursion.
  		"-e",
  		opts.extensionPath,

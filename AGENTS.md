@@ -110,7 +110,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   everything else pi wrote. `auth.json` is never written; sign in with `/login`.
   Extensions are store paths listed in the managed `settings.json` `extensions` key, in order:
   `extensions.builtin` (pi's examples, by name), the shipped cost-footer (behind `meters.cost`), context-cap
-  (behind `context-window-cap.enable`), rate-limit-hook (when `hooks.rateLimit` or `vpn-rotate` is set), opencode-free (behind `extensions.opencodeFree`) and vpn-row (behind `vpn-rotate.enable`, which also adds a `hooks.rateLimit` entry and installs `proton-vpn-cli`), then `extensions.inline` by name.
+  (behind `context-window-cap.enable`), rate-limit-hook (when `hooks.rateLimit` or `vpn-rotate` is set), opencode-free (behind `extensions.opencodeFree`), view-image (behind `extensions.viewImage`) and vpn-row (behind `vpn-rotate.enable`, which also adds a `hooks.rateLimit` entry and installs `proton-vpn-cli`), then `extensions.inline` by name.
   The shipped ones are copied into one `pi-agent-extensions` store directory and those inner paths are what
   `settings.json` lists: they import each other by relative path, so a per-file store path would break them.
   `lib/extensions.nix` holds the `bundleScript`/`bundlePaths` helpers that build and address the directory; an
@@ -148,7 +148,10 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   `rlm_child_start`/`rlm_child_end` records, to `$PI_RLM_CHILD_LOG_DIR/<id>.jsonl`; nested children inherit the dir and record
   their parent through `PI_RLM_CHILD_ID`. The shipped `rlm-children.ts` (`recursive-language-models.childViewer`) sets that dir
   to `<dataDir>/pi-rlm/children/<session id>`, shows running children below the editor and opens transcripts with `/rlm-children`.
-  Bump its `v<N>` marker on every change; the wrapper removes an older patched copy so pi reinstalls it. Prefer an upstream pi package in `packages` over a new
+  Bump its `v<N>` marker on every change; the wrapper removes an older patched copy so pi reinstalls it.
+  The shipped `view-image.ts` (`extensions.viewImage`, on by default) adds a `view_image` tool that runs pi's read on image
+  files only. RLM mode drops only pi's built-in tools, and `rlmCoreExtensions` passes the tool to `rlm()` children, so vision
+  models can view local images in every mode; it rejects text files so RLM mode still reads them through ipython. Prefer an upstream pi package in `packages` over a new
   shipped extension; ship code here only when no package does the job.
   `hooks.rateLimit` entries run their `command` when a listed provider's error has one of their
   `errorKinds` (`usage_limit` covers pi's non-retryable account limits). At most one hook runs per
