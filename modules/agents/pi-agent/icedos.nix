@@ -427,7 +427,7 @@
           # Ordered { name, path, load ? true }; name is the basename inside the bundle.
           # free-models.ts has no factory, so pi must not load it; the other two import it.
           shipped =
-            lib.optional (ext.meters.cost || ext.opencodeFree) {
+            lib.optional (ext.meters.cost || ext.opencodeFree || vpn.enable) {
               name = "free-models.ts";
               path = ./extensions/free-models.ts;
               load = false;
@@ -881,6 +881,11 @@
                     };
                     Service = {
                       ExecStart = "${vpnService}/bin/pi-vpn-rotate-service";
+                      # The probe imports free-models.ts, which reads the catalog cache from the data dir.
+                      Environment = [
+                        "PI_CODING_AGENT_DIR=${dataDir}"
+                        "PI_OPENCODE_FREE_MODULE=${extensionBundle}/free-models.ts"
+                      ];
                       Restart = "always";
                       RestartSec = "5s";
                     };
