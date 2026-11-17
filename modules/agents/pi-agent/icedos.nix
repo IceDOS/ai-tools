@@ -45,6 +45,7 @@
         dirs = mkStrListOption { default = defaults.skills.dirs; };
         extra-builtin = mkAttrsOfOption { default = defaults.skills.extra-builtin; } types.str;
         codeReview = mkBoolOption { default = defaults.skills.codeReview; };
+        opencodeFreeReview = mkBoolOption { default = defaults.skills.opencodeFreeReview; };
       };
 
       settings = {
@@ -222,6 +223,12 @@
             lib.optionalAttrs (rlm.enable && cfg.skills.codeReview) {
               code-review = builtins.readFile ./skills/code-review/SKILL.md;
             }
+            //
+              lib.optionalAttrs
+                (rlm.enable && cfg.skills.codeReview && ext.opencodeFree && cfg.skills.opencodeFreeReview)
+                {
+                  opencode-free-review = builtins.readFile ./skills/opencode-free-review/SKILL.md;
+                }
             // config.icedos.ai-tools.skills
             // cfg.skills.extra-builtin;
 
