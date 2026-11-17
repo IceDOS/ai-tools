@@ -425,8 +425,14 @@
           ];
 
           # Ordered { name, path, load ? true }; name is the basename inside the bundle.
+          # free-models.ts has no factory, so pi must not load it; the other two import it.
           shipped =
-            lib.optional ext.meters.cost {
+            lib.optional (ext.meters.cost || ext.opencodeFree) {
+              name = "free-models.ts";
+              path = ./extensions/free-models.ts;
+              load = false;
+            }
+            ++ lib.optional ext.meters.cost {
               name = "cost-footer";
               path = substituteTs "pi-agent-cost-footer" ./extensions/cost-footer {
                 speed = lib.boolToString ext.meters.speed;

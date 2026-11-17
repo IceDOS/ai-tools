@@ -21,33 +21,19 @@ export const OGO_WINDOWS: [string, string][] = [
   ["weekly", "wk"],
   ["monthly", "mo"],
 ];
-// opencode Zen free models ("opencode" provider): measured 2026-08-31, cap
-// per (IP x model x opencode-UA-class) over 5h; the count is local, not authoritative.
+// opencode Zen free models ("opencode" provider): one measured 5h window, counted locally.
+// Membership lives in the shared free-model manifest, next to the thinking-level table, so a
+// model opencode retires disappears from both the provider and these pools at once.
 export const FREE_WINDOW_MS = 5 * 3600 * 1000;
-// Burned 2026-08-31: each list below shares ONE ~1000 req / 5h bucket per
-// (IP x opencode-UA-class); the group-A burn rate-limited all five together.
-export const FREE_MODEL_POOLS: Record<string, string[]> = {
-  shared: [
-    "big-pickle",
-    "deepseek-v4-flash-free",
-    "mimo-v2.5-free",
-    "ling-3.0-flash-fin-free",
-    "muse-spark-1.2-contributor-free",
-  ],
-  nemotron: ["nemotron-3-ultra-free", "nemotron-3.5-lightning-free"],
-};
-export const FREE_PROVIDERS = ["opencode", "opencode-free"];
-export const freePoolOf = (model: string): string =>
-  Object.entries(FREE_MODEL_POOLS).find(([, ms]) => ms.includes(model))?.[0] ??
-  model;
-export const FREE_POOL_MODELS = (pool: string): string[] =>
-  FREE_MODEL_POOLS[pool] ?? [pool];
-// Measured caps per pool; laguna's tiny pool has no Retry-After and 503s when
-// upstream is out of seats, so its number is approximate.
+import { PROVIDER_ID } from "../free-models.ts";
+export { FREE_MODEL_POOLS, poolModels as FREE_POOL_MODELS, poolOf as freePoolOf } from "../free-models.ts";
+export const FREE_PROVIDERS = ["opencode", PROVIDER_ID];
+// Measured caps per pool, keyed like the pool list (a model that is its own pool uses its id).
+// A pool the catalog retired loses its entry here; a pool with no measurement falls back to
+// FREE_CAP_DEFAULT, which is a guess but never hides a row.
 export const FREE_POOL_CAPS: Record<string, number> = {
   shared: 1000,
   nemotron: 1000,
-  "laguna-s-2.1-free": 30,
 };
 export const FREE_CAP_DEFAULT = 1000;
 // Provider percentages are rounded, so polling each event buys nothing.

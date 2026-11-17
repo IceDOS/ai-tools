@@ -10,41 +10,21 @@ import {
   type Provider,
 } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  BASE_URL,
+  PROVIDER_ID,
+  ZEN_USER_AGENT,
+  catalogDisabled,
+  loadCatalog,
+  resolveCatalog,
+  stalePools,
+  toThinkingLevelMap,
+  type FreeModel,
+} from "./free-models.ts";
 
-export const PROVIDER_ID = "opencode-free";
-const BASE_URL = process.env.PI_OPENCODE_FREE_BASE_URL ?? "https://opencode.ai/inference/openai/v1";
-const ZEN_USER_AGENT = process.env.PI_OPENCODE_FREE_UA ?? "opencode/latest/2.2.6/cli";
+export { PROVIDER_ID, toThinkingLevelMap };
+
 const BUN_BIN = "@bunBin@";
-
-type ModelDef = {
-  id: string;
-  name: string;
-  contextWindow: number;
-  maxTokens: number;
-  reasoning: boolean;
-  input: ("text" | "image")[];
-};
-
-const FREE_MODEL_DEFS: ModelDef[] = [
-  { id: "beam-free", name: "Beam Free", contextWindow: 1048576, maxTokens: 131072, reasoning: true, input: ["text"] },
-  { id: "big-pickle", name: "Big Pickle", contextWindow: 200000, maxTokens: 32000, reasoning: true, input: ["text"] },
-  { id: "crouton-alpha-free", name: "Crouton Alpha Free", contextWindow: 1048576, maxTokens: 270000, reasoning: true, input: ["text", "image"] },
-  { id: "deepseek-v4.1-flash-free", name: "DeepSeek V4.1 Flash Free", contextWindow: 200000, maxTokens: 32000, reasoning: true, input: ["text", "image"] },
-  { id: "flint-40b-free", name: "Flint 40B Free", contextWindow: 262144, maxTokens: 65536, reasoning: true, input: ["text"] },
-  { id: "frantic-ferret-free", name: "Frantic Ferret Free", contextWindow: 1048576, maxTokens: 270000, reasoning: true, input: ["text", "image"] },
-  { id: "glm-5.3-flash-free", name: "GLM-5.3-Flash Free", contextWindow: 200000, maxTokens: 32000, reasoning: true, input: ["text", "image"] },
-  { id: "iceman-free", name: "Iceman Free", contextWindow: 262144, maxTokens: 131072, reasoning: true, input: ["text"] },
-  { id: "inkling-2-small-free", name: "Inkling 2 Small Free", contextWindow: 1048576, maxTokens: 131072, reasoning: true, input: ["text", "image"] },
-  { id: "mimo-v2.6-flash-free", name: "MiMo-V2.6-Flash Free", contextWindow: 200000, maxTokens: 32000, reasoning: true, input: ["text", "image"] },
-  { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning Free", contextWindow: 262144, maxTokens: 262144, reasoning: true, input: ["text"] },
-  { id: "nemotron-3.5-super-vl-free", name: "Nemotron 3.5 Super VL Free", contextWindow: 1048576, maxTokens: 131072, reasoning: true, input: ["text", "image"] },
-  { id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra Free", contextWindow: 262144, maxTokens: 65536, reasoning: true, input: ["text"] },
-  { id: "nemotron-3-super-free", name: "Nemotron 3 Super Free", contextWindow: 262144, maxTokens: 65536, reasoning: true, input: ["text"] },
-  { id: "kimi-k2.5-free", name: "Kimi K2.5 Free", contextWindow: 262144, maxTokens: 65536, reasoning: true, input: ["text"] },
-  { id: "space-bunny-free", name: "Space Bunny Free", contextWindow: 262144, maxTokens: 65536, reasoning: true, input: ["text"] },
-];
-
-const FREE_MODEL_IDS = new Set(FREE_MODEL_DEFS.map((m) => m.id));
 
 let cachedBun: string | null = null;
 
@@ -705,7 +685,7 @@ export function ensureShaped(
   if (typeof body !== "object" || body === null) {
     return { url, init, shaped: false, callerWantsStream: true, model: "" };
   }
-  if (!body.model || !FREE_MODEL_IDS.has(body.model)) {
+  if (!body.model || !registeredIds.has(body.model)) {
     return { url, init, shaped: false, callerWantsStream: true, model: "" };
   }
 
@@ -744,7 +724,8 @@ export function ensureShaped(
     body.max_completion_tokens = body.max_tokens;
     delete body.max_tokens;
   } else if (body.max_completion_tokens === undefined) {
-    body.max_completion_tokens = 32000;
+    // Unregistered ids returned above, so the model is in the published table.
+    body.max_completion_tokens = publishedModels.find((model) => model.id === body.model)!.maxTokens;
   }
 
   body.stream = true;
@@ -845,14 +826,17 @@ function installBunTransport(): void {
   globalThis.fetch = patched;
 }
 
-function toChatModel(def: ModelDef): Model<"openai-completions"> {
+function toChatModel(def: FreeModel): Model<"openai-completions"> {
+  // No effort variants means nothing to choose, so the model reports no reasoning at all.
+  const reasoning = def.variants.some((variant) => variant !== "none");
   return {
     id: def.id,
     name: def.name,
     api: "openai-completions",
     provider: PROVIDER_ID,
     baseUrl: BASE_URL,
-    reasoning: def.reasoning,
+    reasoning,
+    ...(reasoning ? { thinkingLevelMap: toThinkingLevelMap(def.variants) } : {}),
     input: def.input,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: def.contextWindow,
@@ -876,20 +860,119 @@ function withZenSessionHeader(api: ReturnType<typeof openAICompletionsApi>): Ret
   };
 }
 
-function createOpencodeProvider(): Provider<"openai-completions"> {
+function createOpencodeProvider(models: FreeModel[]): Provider<"openai-completions"> {
   return createProvider({
     id: PROVIDER_ID,
     name: "OpenCode Free (bun)",
     baseUrl: BASE_URL,
     auth: { apiKey: envApiKeyAuth("OpenCode Zen API key", ["PI_OPENCODE_FREE_API_KEY", "OPENCODE_ZEN_API_KEY", "OPENCODE_API_KEY"]) },
-    models: FREE_MODEL_DEFS.map(toChatModel),
+    models: models.map(toChatModel),
     api: {
       "openai-completions": withZenSessionHeader(openAICompletionsApi()),
     },
   });
 }
 
+// The model ids the registered provider table serves; ensureShaped asks this set, so nothing is
+// shaped (and no model is offered) until the catalog resolves. Empty is the launch state.
+let registeredIds = new Set<string>();
+/** The table the provider currently serves; the resolve compares against it. */
+let publishedModels: FreeModel[] = [];
+
+/**
+ * Forgets the published table, the queued notes and the notifier: what a process start looks
+ * like. Only tests call this, to run a launch scenario from a clean state.
+ */
+export function resetModelTable(): void {
+  registeredIds = new Set();
+  publishedModels = [];
+  pendingNotes.length = 0;
+  notifier = null;
+}
+
+function registerTable(pi: ExtensionAPI, models: FreeModel[]): void {
+  registeredIds = new Set(models.map((model) => model.id));
+  publishedModels = models;
+  // With no catalog there is nothing to register: an empty provider would only add a dead
+  // group to the picker. The resource appears as soon as the resolve lands.
+  if (models.length > 0) pi.registerProvider(createOpencodeProvider(models));
+}
+
+// The resolve usually finishes before any session starts, so a note that arrives early waits
+// for a session context instead of being dropped.
+type Note = { text: string; level: "info" | "warning" | "error" };
+let notifier: ((text: string, level: Note["level"]) => void) | null = null;
+const pendingNotes: Note[] = [];
+
+function notify(text: string, level: Note["level"] = "warning"): void {
+  if (notifier) notifier(text, level);
+  else pendingNotes.push({ text, level });
+}
+
+/**
+ * Resolves the catalog, then publishes whatever it returned. There is no built-in model list,
+ * so a failure is shown to the user instead of being swallowed: the provider keeps serving the
+ * models it already had (the last cached resolve) or, when there are none, nothing at all until
+ * a later resolve succeeds.
+ */
+async function resolveInBackground(pi: ExtensionAPI): Promise<void> {
+  const resolution = await resolveCatalog({
+    current: publishedModels,
+    onModels: (models) => {
+      registerTable(pi, models);
+      const stale = stalePools(models);
+      if (stale.length > 0) {
+        // A pooled model the catalog dropped still counts against a bucket nothing serves.
+        notify(`opencode-free: rate-limit pool lists ${stale.join(", ")}, which the catalog no longer serves`, "warning");
+      }
+    },
+    onError: (message) => {
+      // Headless runs have no ui.notify, so the launch path gets the error on stderr too.
+      console.error(`opencode-free: ${message}`);
+      notify(`opencode-free: ${message}`, "error");
+    },
+  });
+  if (resolution.status === "updated") notify(`opencode-free catalog updated: ${resolution.change}`, "warning");
+}
+
 export default function opencodeZenBun(pi: ExtensionAPI): void {
+  // off means no fetch and no models, so there is nothing to route either.
+  if (catalogDisabled()) return;
   installBunTransport();
-  pi.registerProvider(createOpencodeProvider());
+  const catalog = loadCatalog();
+  if (catalog.models.length > 0) registerTable(pi, catalog.models);
+
+  let resolving = false;
+  let resolveAgain = false;
+  const resolve = (): void => {
+    if (resolving) {
+      // A session started while a resolve was in flight: run once more when it settles, so the
+      // retry is never lost to the in-flight request.
+      resolveAgain = true;
+      return;
+    }
+    resolving = true;
+    void resolveInBackground(pi).finally(() => {
+      resolving = false;
+      if (resolveAgain) {
+        resolveAgain = false;
+        resolve();
+      }
+    });
+  };
+
+  pi.on("session_start", (_event, ctx: any) => {
+    notifier = (text, level) => {
+      if (!ctx.hasUI) return;
+      try {
+        ctx.ui?.notify(text, level);
+      } catch {}
+    };
+    for (const note of pendingNotes.splice(0)) notifier(note.text, note.level);
+    // Unresolved at launch: keep trying while there is no model table to serve.
+    if (registeredIds.size === 0) resolve();
+  });
+
+  // A fresh cache is the point of the cache, so only an expired (or absent) one resolves now.
+  if (catalog.expired) resolve();
 }
