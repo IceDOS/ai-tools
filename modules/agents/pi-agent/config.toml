@@ -29,8 +29,10 @@ codeReview = false
 opencodeFreeReview = false
 # Extra skill directories listed in settings.json `skills`.
 dirs = []
+# Shared skills pi skips, e.g. ones an installed package already ships.
+exclude = []
 
-# name = full SKILL.md, added to the shared icedos.ai-tools.skills. A name here wins.
+# name = full SKILL.md, added to the shared icedos.ai-tools.skills.pool. A name here wins.
 extra-builtin = {}
 
 [icedos.ai-tools.pi-agent.settings]

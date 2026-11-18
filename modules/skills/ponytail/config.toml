@@ -1,0 +1,19 @@
+[icedos.ai-tools.skills.ponytail]
+# GitHub source of the ponytail skills (same repo as the claude-code marketplace).
+owner = "dietrichgebert"
+repo = "ponytail"
+rev = "main"
+hash = "sha256-PhPtZbeX2wBp19GtWRy+fV93+fFYZe5S487eXPDl/us="
+
+# Skills read from the repo's skills/ dir into the shared icedos.ai-tools.skills.pool.
+skills = [
+  "ponytail",
+  "ponytail-audit",
+  "ponytail-debt",
+  "ponytail-gain",
+  "ponytail-help",
+  "ponytail-review",
+]
+
+# Skills loaded at session start: each gets a <name>-autoload rule in icedos.ai-tools.rules.
+autoload = []

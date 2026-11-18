@@ -7,5 +7,5 @@ url = "https://mcp.context7.com/mcp"
 upstreamSkills = ["context7-mcp"]
 
 # Extra skills, name = full SKILL.md content. A name here replaces the upstream
-# skill of the same name. Both go to the shared icedos.ai-tools.skills pool.
+# skill of the same name. Both go to the shared icedos.ai-tools.skills.pool.
 [icedos.ai-tools.context7-mcp.skills]

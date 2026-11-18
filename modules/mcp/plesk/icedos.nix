@@ -91,7 +91,7 @@ in
             name: _: lib.nameValuePair "plesk-${name}" (lib.mkDefault cfg.gatewayMode)
           ) cfg.servers;
 
-          icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) cfg.skills;
+          icedos.ai-tools.skills.pool = lib.mapAttrs (_: lib.mkDefault) cfg.skills;
         }
       )
     ];

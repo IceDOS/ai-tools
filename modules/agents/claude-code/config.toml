@@ -7,6 +7,8 @@ sessionRetentionDays = 30
 desktopEntry = false
 # Arguments added to every claude invocation, e.g. channel flags from agent-relay.
 extraArgs = []
+# Shared skills Claude Code skips, e.g. ones an installed plugin already ships.
+excludeSkills = []
 
 [[icedos.ai-tools.claude-code.users.username.marketplaces]]
 name = ""

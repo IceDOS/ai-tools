@@ -10,5 +10,5 @@ gatewayMode = "global"
 [icedos.ai-tools.plesk-mcp.servers]
 
 # Skills for this module, name = full SKILL.md content. Added to the shared
-# icedos.ai-tools.skills pool.
+# icedos.ai-tools.skills.pool.
 [icedos.ai-tools.plesk-mcp.skills]

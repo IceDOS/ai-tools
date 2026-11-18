@@ -1,5 +1,5 @@
 # Reads skills shipped in a package source: name = SKILL.md text with the skill's
-# references/*.md appended, since icedos.ai-tools.skills holds plain text.
+# references/*.md appended, since icedos.ai-tools.skills.pool holds plain text.
 # `dir` is inside a package's src, so reading it is IFD that only needs the fetch.
 { lib }:
 

@@ -50,7 +50,7 @@ in
           environment.systemPackages = [ package ];
           icedos.ai-tools.mcp-servers.kwin-mcp.command = lib.getExe package;
           icedos.ai-tools.mcp-gateway-modes.kwin-mcp = lib.mkDefault cfg.gatewayMode;
-          icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) (upstream // cfg.skills);
+          icedos.ai-tools.skills.pool = lib.mapAttrs (_: lib.mkDefault) (upstream // cfg.skills);
         }
       )
     ];

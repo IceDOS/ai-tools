@@ -72,7 +72,7 @@ in
       } 0 1000000;
     };
 
-    # Skills for this module (name = SKILL.md), loaded by every agent via icedos.ai-tools.skills.
+    # Skills for this module (name = SKILL.md), loaded by every agent via icedos.ai-tools.skills.pool.
     skills = icedosLib.mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
   };
 
@@ -124,8 +124,10 @@ in
           );
         in
         {
-          # Skills for this module, added to the shared icedos.ai-tools.skills pool.
-          icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) config.icedos.ai-tools.mcp-server.skills;
+          # Skills for this module, added to the shared icedos.ai-tools.skills.pool.
+          icedos.ai-tools.skills.pool = lib.mapAttrs (
+            _: lib.mkDefault
+          ) config.icedos.ai-tools.mcp-server.skills;
 
           environment.systemPackages = [ icedosMcpServer ];
 

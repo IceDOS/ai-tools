@@ -54,7 +54,7 @@ in
           };
           icedos.ai-tools.mcp-gateway-modes.ddev = lib.mkDefault cfg.gatewayMode;
 
-          icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) cfg.skills;
+          icedos.ai-tools.skills.pool = lib.mapAttrs (_: lib.mkDefault) cfg.skills;
         }
       )
     ];

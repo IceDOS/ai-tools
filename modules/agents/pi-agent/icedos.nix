@@ -43,6 +43,7 @@
 
       skills = {
         dirs = mkStrListOption { default = defaults.skills.dirs; };
+        exclude = mkStrListOption { default = defaults.skills.exclude; };
         extra-builtin = mkAttrsOfOption { default = defaults.skills.extra-builtin; } types.str;
         codeReview = mkBoolOption { default = defaults.skills.codeReview; };
         opencodeFreeReview = mkBoolOption { default = defaults.skills.opencodeFreeReview; };
@@ -229,7 +230,7 @@
                 {
                   opencode-free-review = builtins.readFile ./skills/opencode-free-review/SKILL.md;
                 }
-            // config.icedos.ai-tools.skills
+            // removeAttrs config.icedos.ai-tools.skills.pool cfg.skills.exclude
             // cfg.skills.extra-builtin;
 
           skillName = import ./lib/skill-name.nix { inherit lib; };
@@ -706,7 +707,7 @@
             {
               assertion = invalidSkillNames == [ ];
               message = ''
-                pi-agent skill names (icedos.ai-tools.skills and pi-agent.skills.extra-builtin) must be
+                pi-agent skill names (icedos.ai-tools.skills.pool and pi-agent.skills.extra-builtin) must be
                 lowercase a-z, 0-9 and single hyphens, at most 64 chars: ${lib.concatStringsSep ", " invalidSkillNames}
               '';
             }

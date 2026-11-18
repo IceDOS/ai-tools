@@ -18,5 +18,5 @@ rpcPort = 7583
 gatewayMode = "global"
 
 # Skills for this module, name = full SKILL.md content. Added to the shared
-# icedos.ai-tools.skills pool.
+# icedos.ai-tools.skills.pool.
 [icedos.ai-tools.signal-mcp.skills]

@@ -27,7 +27,7 @@
       port = mkNumberOption { default = port; };
       loadModels = mkStrListOption { default = loadModels; };
 
-      # Skills for this module (name = SKILL.md), loaded by every agent via icedos.ai-tools.skills.
+      # Skills for this module (name = SKILL.md), loaded by every agent via icedos.ai-tools.skills.pool.
       skills = mkAttrsOfOption { default = skills; } lib.types.lines;
     };
 
@@ -51,8 +51,8 @@
             ;
         in
         {
-          # Skills for this module, added to the shared icedos.ai-tools.skills pool.
-          icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) config.icedos.ai-tools.ollama.skills;
+          # Skills for this module, added to the shared icedos.ai-tools.skills.pool.
+          icedos.ai-tools.skills.pool = lib.mapAttrs (_: lib.mkDefault) config.icedos.ai-tools.ollama.skills;
 
           services.ollama = {
             enable = true;

@@ -32,7 +32,7 @@ in
           ];
 
           icedos.ai-tools = {
-            skills = lib.genAttrs' languages (
+            skills.pool = lib.genAttrs' languages (
               lang:
               lib.nameValuePair (skillName lang) (
                 lib.mkDefault (

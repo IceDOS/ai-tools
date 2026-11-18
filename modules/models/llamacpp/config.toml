@@ -86,5 +86,5 @@ disableHostVisibleVidmem = false
 radvNoGttSpill = false
 
 # Skills for this module, name = full SKILL.md content. Added to the shared
-# icedos.ai-tools.skills pool, so every agent loads them.
+# icedos.ai-tools.skills.pool, so every agent loads them.
 [icedos.ai-tools.llamacpp.skills]

@@ -1,0 +1,19 @@
+[icedos.ai-tools.skills.unslop]
+# GitHub source of the unslop skills.
+owner = "MohamedAbdallah-14"
+repo = "unslop"
+rev = "a86d423a64f6a1dd3a56ab54f7059b61baccf209"
+hash = "sha256-9g5K3VRkzZmHIB1ErJbV+HsTwEPoV6QNEt9zJiOAnos="
+
+# Skills read from the repo's skills/ dir into the shared icedos.ai-tools.skills.pool.
+# unslop-file is left out: it runs a scripts/ dir that the text-only pool cannot ship.
+skills = [
+  "unslop",
+  "unslop-commit",
+  "unslop-help",
+  "unslop-reasoning",
+  "unslop-review",
+]
+
+# Skills loaded at session start: each gets a <name>-autoload rule in icedos.ai-tools.rules.
+autoload = []

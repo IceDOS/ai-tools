@@ -17,5 +17,5 @@ gatewayMode = "global"
 [icedos.ai-tools.opencart-mcp.env]
 
 # Extra skills, name = full SKILL.md content; replaces a same-named shipped skill.
-# Added to the shared icedos.ai-tools.skills pool.
+# Added to the shared icedos.ai-tools.skills.pool.
 [icedos.ai-tools.opencart-mcp.skills]
