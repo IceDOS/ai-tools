@@ -65,6 +65,12 @@
         extra = mkAttrsOption { default = defaults.settings.extra; };
       };
 
+      terminal-title = {
+        enable = mkBoolOption { default = defaults.terminal-title.enable; };
+        idleGlyph = mkStrOption { default = defaults.terminal-title.idleGlyph; };
+        workingGlyphs = mkStrListOption { default = defaults.terminal-title.workingGlyphs; };
+      };
+
       extensions =
         let
           e = defaults.extensions;
@@ -116,11 +122,6 @@
           ghost-text = {
             enable = mkBoolOption { default = e.ghost-text.enable; };
             version = mkStrOption { default = e.ghost-text.version; };
-          };
-
-          session-name = {
-            enable = mkBoolOption { default = e.session-name.enable; };
-            version = mkStrOption { default = e.session-name.version; };
           };
 
           ask-user-question = {
@@ -270,10 +271,24 @@
           ) cfg.settings.providers;
 
           ext = cfg.extensions;
+          title = cfg.terminal-title;
           extLib = import ./lib/extensions.nix { inherit lib; };
 
+          # pi rewrites "Pi - <session> - <cwd>" from interactive mode on session events and
+          # offers no setting to stop it, so its writer is blanked and the extension owns it.
+          piUnwrapped =
+            if title.enable then
+              pkgs.pi-coding-agent.overrideAttrs (old: {
+                postInstall = (old.postInstall or "") + ''
+                  ${pkgs.nodejs}/bin/node ${./patches/pi-terminal-title-noop.mjs} \
+                    $out/lib/node_modules/pi-monorepo/dist
+                '';
+              })
+            else
+              pkgs.pi-coding-agent;
+
           # pathExists on the package forces it at eval time, as 0.9.8 did.
-          examplesDir = "${pkgs.pi-coding-agent}/lib/node_modules/pi-monorepo/examples/extensions";
+          examplesDir = "${piUnwrapped}/lib/node_modules/pi-monorepo/examples/extensions";
           # rpiv-todo replaces pi's example todo; both register a todo tool.
           builtinNames = lib.subtractLists (lib.optional ext.todo.enable "todo") ext.builtin;
           missingBuiltins = extLib.missingBuiltins {
@@ -348,10 +363,6 @@
             {
               key = "ghost-text";
               npm = "@apothic-ai/pi-ghost-text-x";
-            }
-            {
-              key = "session-name";
-              npm = "pi-session-name";
             }
             {
               key = "ask-user-question";
@@ -495,6 +506,13 @@
             ++ lib.optional (rlm.enable && rlm.childViewer) {
               name = "rlm-children.ts";
               path = ./extensions/rlm-children.ts;
+            }
+            ++ lib.optional title.enable {
+              name = "terminal-title.ts";
+              path = substituteTs "terminal-title.ts" ./extensions/terminal-title.ts {
+                idleGlyph = title.idleGlyph;
+                workingGlyphs = builtins.toJSON title.workingGlyphs;
+              };
             };
 
           # One store dir for all shipped extensions so their relative imports resolve.
@@ -778,6 +796,7 @@
           nixpkgs.overlays = [
             (final: _prev: {
               pi-agent = final.callPackage ./package.nix {
+                pi-coding-agent = piUnwrapped;
                 inherit (icedosLib.packaging) installDesktopEntry;
                 inherit (cfg) desktopEntry;
                 defaultAgentDir = dataDirLib.shell cfg.settings.dataDir;

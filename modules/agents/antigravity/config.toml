@@ -28,13 +28,14 @@ statusLine = true
 # Render the bar below agy's built-in header instead of replacing it.
 statusLineStackWithDefault = false
 
-# Terminal title "<status glyph> <conversation title>", as Claude Code and pi-agent set it
-# (Zed terminal threads show the glyph as a status marker). The status line command drives it,
-# so it also works with statusLine = false. Use glyphs of one width in the title font.
+# Terminal title "<glyph> <title>", as Claude Code and pi-agent set it (Zed terminal threads
+# show the glyph as a status marker). The status line command drives it, so it also works with
+# statusLine = false: idle glyph ▲, the working glyphs cycle while a turn runs.
+# The title is the conversation's name, else its generated title, else "Antigravity".
 [icedos.ai-tools.antigravity.terminal-title]
 enable = true
-idleGlyph = "◉"
-workingGlyphs = ["◐", "◓", "◑", "◒"]
+idleGlyph = "▲"
+workingGlyphs = ["▖", "▘", "▝", "▗"]
 
 [icedos.ai-tools.antigravity.extensions.recursive-language-models]
 # rlm plugin: ipython MCP tool whose rlm(prompt, context) runs a child agy; adds /rlm and /refine skills.

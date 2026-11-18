@@ -1,7 +1,8 @@
-"""Antigravity CLI terminal title, "<status glyph> <headline>" like Claude Code and pi-agent.
+"""Antigravity CLI terminal title, "<glyph> <title>" over OSC 0.
 
-agy never sets one. It reruns the status line command on every agent state change, so that call
-drives the title, and a detached ticker animates the working glyph between calls.
+agy's own `title` hook only reruns on state changes, so it cannot animate. The status line reruns on
+every state change instead: it saves the state and starts a detached ticker, which draws the glyph,
+animates it while the agent works, follows the conversation title, and clears it once agy exits.
 """
 import fcntl
 import json
@@ -12,12 +13,13 @@ import sys
 import time
 from pathlib import Path
 
-IDLE_GLYPH = os.environ.get("ANTIGRAVITY_TITLE_IDLE_GLYPH") or "◉"
-WORKING_FRAMES = os.environ.get("ANTIGRAVITY_TITLE_WORKING_GLYPHS", "").split() or ["◐", "◓", "◑", "◒"]
+IDLE_GLYPH = os.environ.get("ANTIGRAVITY_TITLE_IDLE_GLYPH") or "▲"
+WORKING_FRAMES = os.environ.get("ANTIGRAVITY_TITLE_WORKING_GLYPHS", "").split() or ["▖", "▘", "▝", "▗"]
 TICK = 0.25
-# agy writes a conversation's title a few seconds into its first turn.
-HEADLINE_REFRESH = 2.0
-HEADLINE_MAX = 80
+TITLE_MAX = 80
+# agy writes a conversation's generated title a few seconds into its first turn.
+TITLE_REFRESH = 2.0
+FALLBACK = "Antigravity"
 
 SUMMARIES = Path.home() / ".gemini/antigravity-cli/conversation_summaries.db"
 STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/antigravity-title-{os.getuid()}") / "antigravity-title"
@@ -29,8 +31,12 @@ def proc_stat(pid):
         stat = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
         return None
-    comm = stat[stat.index("(") + 1 : stat.rindex(")")]
-    return comm, int(stat[stat.rindex(")") + 2 :].split()[1])
+    return stat[stat.index("(") + 1 : stat.rindex(")")], int(stat[stat.rindex(")") + 2 :].split()[1])
+
+
+def is_agy(pid):
+    stat = proc_stat(pid)
+    return bool(stat) and stat[0] == "agy"
 
 
 def find_agy():
@@ -55,35 +61,35 @@ def tty_path(agy_pid):
     return None
 
 
-def emit(tty, title):
+def emit(fd, title):
+    """Set the title in one write, so agy's own frames never split the sequence."""
     try:
-        fd = os.open(tty, os.O_WRONLY | os.O_NOCTTY)
-    except OSError:
-        return
-    try:
-        # one write, so agy's own frames never split the sequence
         os.write(fd, f"\033]0;{title}\007".encode())
-    finally:
-        os.close(fd)
+    except OSError:
+        pass
 
 
-def headline(state):
-    """Conversation title, else its first prompt, else "Antigravity - <dir>"."""
-    text = ""
-    if conversation := state.get("conversation"):
-        try:
-            with sqlite3.connect(f"file:{SUMMARIES}?mode=ro", uri=True, timeout=0.5) as db:
-                row = db.execute(
-                    "select title, preview from conversation_summaries where conversation_id = ?",
-                    (conversation,),
-                ).fetchone()
-            text = next((t for t in row or () if t and t.strip()), "")
-        except sqlite3.Error:
-            pass
-    text = " ".join(text.split())
+def conversation_title(conversation):
+    """The title agy generated for the conversation, else its first prompt."""
+    if not conversation:
+        return ""
+    try:
+        with sqlite3.connect(f"file:{SUMMARIES}?mode=ro", uri=True, timeout=0.5) as db:
+            row = db.execute(
+                "select title, preview from conversation_summaries where conversation_id = ?",
+                (conversation,),
+            ).fetchone()
+    except sqlite3.Error:
+        return ""
+    return next((t for t in row or () if t and t.strip()), "")
+
+
+def title_text(state):
+    """A name the user gave the conversation, else agy's title, else the agent name."""
+    text = " ".join((state.get("name") or conversation_title(state.get("conversation")) or "").split())
     if not text:
-        return f"Antigravity - {os.path.basename(state.get('cwd') or '') or '/'}"
-    return text if len(text) <= HEADLINE_MAX else text[: HEADLINE_MAX - 1] + "…"
+        return FALLBACK
+    return text if len(text) <= TITLE_MAX else text[: TITLE_MAX - 1] + "…"
 
 
 # ---------- per-terminal state ----------
@@ -107,76 +113,69 @@ def save(tty, state):
     os.replace(tmp, path)
 
 
-def ticker_lock(tty, blocking):
-    """The ticker's per-terminal flock, or None while another process holds it."""
+def ticker_lock(tty):
+    """This terminal's ticker lock, or None while a ticker holds it."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     fd = os.open(state_file(tty, ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
-    deadline = time.monotonic() + 1.0
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return fd
-        except BlockingIOError:
-            if not blocking or time.monotonic() > deadline:
-                os.close(fd)
-                return None
-            time.sleep(0.02)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
 
 
+# ---------- the two entry points ----------
 def tick(tty):
-    if (lock := ticker_lock(tty, blocking=False)) is None:
+    """Draw the title until agy exits, then hand the title back to the shell."""
+    try:
+        fd = os.open(tty, os.O_WRONLY | os.O_NOCTTY)
+    except OSError:
         return
-    frame, text, refresh_at = 0, None, 0.0
+    lock = ticker_lock(tty)
+    if lock is None:  # another ticker owns this terminal
+        os.close(fd)
+        return
+    frame, text, shown, seen, refresh_at = 0, "", None, None, 0.0
     while True:
         state = load(tty)
-        if not state.get("working") or proc_stat(state.get("agy", 0)) is None:
+        if not is_agy(state.get("agy", 0)):
+            emit(fd, "")  # agy is gone, so drop our title
             break
-        if time.monotonic() >= refresh_at:
-            text, refresh_at = headline(state), time.monotonic() + HEADLINE_REFRESH
-        emit(tty, f"{WORKING_FRAMES[frame % len(WORKING_FRAMES)]} {text}")
-        frame += 1
+        now, working = time.monotonic(), state.get("working")
+        if state != seen or now >= refresh_at:
+            # agy can generate the conversation title mid-turn
+            text, seen, refresh_at = title_text(state), state, now + TITLE_REFRESH
+        glyph = WORKING_FRAMES[frame % len(WORKING_FRAMES)] if working else IDLE_GLYPH
+        if (title := f"{glyph} {text}") != shown:
+            shown = title
+            emit(fd, title)
+        if working:  # only the working glyph animates
+            frame += 1
         time.sleep(TICK)
     os.close(lock)
+    os.close(fd)
 
 
 def update(payload):
-    """Apply one status line payload: start the ticker, or show the idle title."""
+    """Save the state a status line payload describes and make sure a ticker draws it."""
     agy = find_agy()
     if agy is None or not (tty := tty_path(agy)):
         return
-    state = load(tty)
-    working = payload.get("agent_state") == "working"
-    workspace = payload.get("workspace") or {}
-    new = dict(
-        state,
-        agy=agy,
-        conversation=payload.get("conversation_id") or None,
-        cwd=workspace.get("current_dir") or payload.get("cwd"),
-        working=working,
-    )
-    if working:
-        if new != state:
-            save(tty, new)
-        if (lock := ticker_lock(tty, blocking=False)) is not None:
-            os.close(lock)
-            # no inherited fds: agy reads the status line until its stdout closes
-            subprocess.Popen(
-                [sys.executable, os.path.abspath(__file__), "tick", tty],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                close_fds=True, start_new_session=True,
-            )
-        return
-    title = f"{IDLE_GLYPH} {headline(new)}"
-    new["shown"] = title
-    if new != state:
-        save(tty, new)
-    if state.get("working"):
-        # wait out the ticker so its last working frame cannot land after the idle title
-        if (lock := ticker_lock(tty, blocking=True)) is not None:
-            os.close(lock)
-    elif title == state.get("shown") and state.get("agy") == agy:
-        return
-    emit(tty, title)
+    save(tty, {
+        "agy": agy,
+        "conversation": payload.get("conversation_id") or None,
+        "name": payload.get("conversation_title") or None,
+        "working": payload.get("agent_state") == "working",
+    })
+    if (lock := ticker_lock(tty)) is not None:
+        os.close(lock)  # hand the lock to the ticker
+        # no inherited fds: agy reads the status line until its stdout closes
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "tick", tty],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True, start_new_session=True,
+        )
 
 
 if __name__ == "__main__":

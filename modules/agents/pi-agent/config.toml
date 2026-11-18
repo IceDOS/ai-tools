@@ -48,6 +48,14 @@ providers = {}
 # Raw keys merged into settings.json on activation.
 extra = {}
 
+[icedos.ai-tools.pi-agent.terminal-title]
+# "<glyph> <title>", like Claude Code: a fixed glyph while pi waits for you, a spinner while it works.
+enable = true
+# Shown while pi waits for input, including while a question or approval prompt is open.
+idleGlyph = "○"
+# Cycled every 250ms while pi works; each entry is one frame.
+workingGlyphs = ["◜", "◝", "◞", "◟"]
+
 [icedos.ai-tools.pi-agent.hooks]
 # Commands run when a listed provider fails; exit 0 makes pi retry the request. Each entry:
 # command (argv, gets a JSON payload on stdin), providers, errorKinds (rate_limit, usage_limit,
@@ -92,12 +100,6 @@ maxRetries = 0
 # pi-ghost-text-x: inline prompt suggestions; adds /suggest and /suggest-model.
 enable = true
 # Exact npm version to pin, e.g. "1.0.0"; "" installs the newest release once.
-version = ""
-
-[icedos.ai-tools.pi-agent.extensions.session-name]
-# pi-session-name: names each session with the active model and shows it in the terminal title.
-enable = true
-# Exact npm version to pin, e.g. "0.1.7"; "" installs the newest release once.
 version = ""
 
 [icedos.ai-tools.pi-agent.extensions.ask-user-question]

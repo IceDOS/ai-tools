@@ -56,8 +56,8 @@
       # Render the bar below agy's built-in header instead of replacing it.
       statusLineStackWithDefault = mkBoolOption { default = statusLineStackWithDefault; };
 
-      # Terminal title "<status glyph> <conversation title>"; the status line command drives it.
-      # Give every glyph the same width in the title font.
+      # Terminal title "<glyph> <title>"; the status line command drives it, and a detached
+      # ticker animates the working glyph. Use glyphs of one width in the title font.
       terminal-title = {
         enable = mkBoolOption { default = terminal-title.enable; };
         idleGlyph = mkStrOption { default = terminal-title.idleGlyph; };

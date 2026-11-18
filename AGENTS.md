@@ -140,7 +140,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   everything else pi wrote. `auth.json` is never written; sign in with `/login`.
   Extensions are store paths listed in the managed `settings.json` `extensions` key, in order:
   `extensions.builtin` (pi's examples, by name), the shipped cost-footer (behind `meters.cost`), context-cap
-  (behind `context-window-cap.enable`), rate-limit-hook (when `hooks.rateLimit` or `vpn-rotate` is set), opencode-free (behind `extensions.opencodeFree`), view-image (behind `extensions.viewImage`) and vpn-row (behind `vpn-rotate.enable`, which also adds a `hooks.rateLimit` entry and installs `proton-vpn-cli`), then `extensions.inline` by name.
+  (behind `context-window-cap.enable`), rate-limit-hook (when `hooks.rateLimit` or `vpn-rotate` is set), opencode-free (behind `extensions.opencodeFree`), view-image (behind `extensions.viewImage`), vpn-row (behind `vpn-rotate.enable`, which also adds a `hooks.rateLimit` entry and installs `proton-vpn-cli`) and terminal-title (behind `terminal-title.enable`), then `extensions.inline` by name. terminal-title owns the terminal title, so `patches/pi-terminal-title-noop.mjs` blanks pi's own `updateTerminalTitle` in the package (there is no setting for it) and the extension writes only on change.
   The shipped ones are copied into one `pi-agent-extensions` store directory and those inner paths are what
   `settings.json` lists: they import each other by relative path, so a per-file store path would break them.
   `lib/extensions.nix` holds the `bundleScript`/`bundlePaths` helpers that build and address the directory; an
@@ -164,9 +164,9 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   `PI_CLM_*` env goes into the wrapper as `--set-default`. Check sources with `tests/typecheck.sh`.
   `packages` entries go into settings.json `packages` and pi installs them, with `npmCommand` set to
   a store npm; activation keeps `pi install` entries and drops only those listed in
-  `<dataDir>/.icedos-packages.json`. pi-ghost-text-x (`extensions.ghost-text`), pi-session-name
-  (`extensions.session-name`), rpiv-ask-user-question (`extensions.ask-user-question`), rpiv-todo
-  (`extensions.todo`, which drops `todo` from `extensions.builtin`) pi-markdown-preview
+  `<dataDir>/.icedos-packages.json`. pi-ghost-text-x (`extensions.ghost-text`), rpiv-ask-user-question
+  (`extensions.ask-user-question`), rpiv-todo (`extensions.todo`, which drops `todo` from
+  `extensions.builtin`) pi-markdown-preview
   (`extensions.markdown-preview`) and pi-web-access (`extensions.web-access`), all on by default, pi-clm (`extensions.context-language-models`) and
   pi-rlm (`extensions.recursive-language-models`) are such packages, appended after `packages` and unpinned unless their
   `version` is set. New default packages get an `enable` and `version` option and an `optionPackages` entry. pi loads package extensions before the `extensions` list. With `steering = ""`
