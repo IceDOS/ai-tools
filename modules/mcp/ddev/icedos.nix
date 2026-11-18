@@ -1,7 +1,7 @@
 { icedosLib, lib, ... }:
 
 let
-  inherit (icedosLib) mkAttrsOfOption mkIntBetweenOption;
+  inherit (icedosLib) mkAttrsOfOption mkEnumOption mkIntBetweenOption;
   defaults = (lib.importTOML ./config.toml).icedos.ai-tools.ddev-mcp;
 in
 {
@@ -14,6 +14,20 @@ in
     } 1000 86400000;
 
     skills = mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
+
+    # How the MCP gateway runs this server: global, per-agent or stdio.
+    gatewayMode =
+      mkEnumOption
+        {
+          path = "icedos.ai-tools.ddev-mcp.gatewayMode";
+          source = ./config.toml;
+          default = defaults.gatewayMode;
+        }
+        [
+          "global"
+          "per-agent"
+          "stdio"
+        ];
   };
 
   outputs.nixosModules =
@@ -38,6 +52,7 @@ in
             command = lib.getExe package;
             inherit (cfg) timeout;
           };
+          icedos.ai-tools.mcp-gateway-modes.ddev = lib.mkDefault cfg.gatewayMode;
 
           icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) cfg.skills;
         }

@@ -16,3 +16,10 @@
 # which all agent modules read, and /etc/mcp/servers.json lists them for agents
 # outside Home Manager.
 [icedos.ai-tools.mcp-servers]
+
+# How the gateway runs each registered server: name = "global" (one process for
+# every agent), "per-agent" (one per agent session) or "stdio" (not routed).
+# Modules set their own entry as a default, so a value here overrides a shipped
+# server (rea = "per-agent") and covers servers you add to mcp-servers yourself.
+# Servers added straight to home-manager programs.mcp.servers are not routed.
+[icedos.ai-tools.mcp-gateway-modes]

@@ -15,6 +15,9 @@ forceLocal = true
 # memory-research, memory-schema, memory-tasks.
 upstreamSkills = ["memory-capture", "memory-continue", "memory-notes"]
 
+# One SQLite writer for the shared notes, no cwd use.
+gatewayMode = "global"
+
 # Extra skills, name = full SKILL.md content. A name here replaces the upstream
 # skill of the same name. Both go to the shared icedos.ai-tools.skills pool.
 [icedos.ai-tools.basic-memory-mcp.skills]

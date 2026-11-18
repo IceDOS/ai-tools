@@ -2,6 +2,9 @@
 # Tool-call timeout in milliseconds for agents that honour it. Rebuilds run long.
 timeout = 3600000
 
+# Each agent edits through its own sandbox copy.
+gatewayMode = "per-agent"
+
 # Remote Nix build hosts for build_hosts and nix_build, as ssh destinations
 # (e.g. "user@192.168.1.50"), in priority order. "local" places this PC in that
 # order; without it this PC comes first. The hosts need Nix with flakes; their

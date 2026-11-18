@@ -3,6 +3,7 @@
 let
   inherit (icedosLib)
     mkAttrsOfOption
+    mkEnumOption
     mkIntBetweenOption
     mkStrListOption
     mkStrOption
@@ -32,6 +33,20 @@ in
     } 1 65535;
 
     skills = mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
+
+    # How the MCP gateway runs this server: global, per-agent or stdio.
+    gatewayMode =
+      mkEnumOption
+        {
+          path = "icedos.ai-tools.signal-mcp.gatewayMode";
+          source = ./config.toml;
+          default = defaults.gatewayMode;
+        }
+        [
+          "global"
+          "per-agent"
+          "stdio"
+        ];
   };
 
   outputs.nixosModules =
@@ -74,6 +89,7 @@ in
             }
             // lib.optionalAttrs (cfg.account != "") { SIGNAL_MCP_ACCOUNT = cfg.account; };
           };
+          icedos.ai-tools.mcp-gateway-modes.signal-mcp = lib.mkDefault cfg.gatewayMode;
 
           icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) cfg.skills;
         }

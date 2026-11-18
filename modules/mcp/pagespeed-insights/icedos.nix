@@ -1,7 +1,12 @@
 { icedosLib, lib, ... }:
 
 let
-  inherit (icedosLib) mkAttrsOfOption mkIntBetweenOption mkNonEmptyStrOption;
+  inherit (icedosLib)
+    mkAttrsOfOption
+    mkEnumOption
+    mkIntBetweenOption
+    mkNonEmptyStrOption
+    ;
   defaults = (lib.importTOML ./config.toml).icedos.ai-tools.pagespeed-insights-mcp;
 in
 {
@@ -17,6 +22,20 @@ in
     } 1000 86400000;
 
     skills = mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
+
+    # How the MCP gateway runs this server: global, per-agent or stdio.
+    gatewayMode =
+      mkEnumOption
+        {
+          path = "icedos.ai-tools.pagespeed-insights-mcp.gatewayMode";
+          source = ./config.toml;
+          default = defaults.gatewayMode;
+        }
+        [
+          "global"
+          "per-agent"
+          "stdio"
+        ];
   };
 
   outputs.nixosModules =
@@ -43,6 +62,7 @@ in
             env.GOOGLE_API_KEY_FILE = cfg.apiKeyFile;
             inherit (cfg) timeout;
           };
+          icedos.ai-tools.mcp-gateway-modes.pagespeed-insights = lib.mkDefault cfg.gatewayMode;
 
           icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) cfg.skills;
         }

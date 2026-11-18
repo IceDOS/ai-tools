@@ -12,6 +12,20 @@ in
       default = defaults.timeout;
     } 1000 86400000;
 
+    # How the MCP gateway runs this server: global, per-agent or stdio.
+    gatewayMode =
+      icedosLib.mkEnumOption
+        {
+          path = "icedos.ai-tools.mcp-server.gatewayMode";
+          source = ./config.toml;
+          default = defaults.gatewayMode;
+        }
+        [
+          "global"
+          "per-agent"
+          "stdio"
+        ];
+
     build = {
       hosts = icedosLib.mkStrListOption { default = defaults.build.hosts; };
       remoteExec = icedosLib.mkBoolOption { default = defaults.build.remoteExec; };
@@ -123,6 +137,8 @@ in
             ];
             inherit (config.icedos.ai-tools.mcp-server) timeout;
           };
+
+          icedos.ai-tools.mcp-gateway-modes.icedos = lib.mkDefault config.icedos.ai-tools.mcp-server.gatewayMode;
 
           icedos.system.toolset.commands = [
             {

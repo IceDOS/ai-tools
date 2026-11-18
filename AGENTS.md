@@ -18,13 +18,14 @@ AI agents, local model servers and their glue: `claude-code`, `antigravity`, `pi
 (agents), `llamacpp`, `ollama` (model servers),
 `mcp-server` (`icedos mcp serve`), one module per MCP server (`aws-mcp`, `basic-memory-mcp`,
 `chrome-devtools-mcp`, `context7-mcp`, `ddev-mcp`, `kwin-mcp`, `nixos-mcp`, `opencart-mcp`, `pagespeed-insights-mcp`, `plesk-mcp`, `rea-mcp`,
-`signal-mcp`), `alimit` (usage limits for every agent and provider),
+`signal-mcp`), `mcp-gateway` (one local HTTP server in front of the shared MCP servers),
+`alimit` (usage limits for every agent and provider),
 `ai-accounts` (several accounts per agent), `agent-launch` (fzf agent picker) and
 `code-intelligence` (per-language LSP skills).
 
 ## Namespace
-Every option here lives under `icedos.ai-tools`: the shared `rules`, `skills` and `mcp-servers`, and one
-attrset per module (`icedos.ai-tools.pi-agent`, ...).
+Every option here lives under `icedos.ai-tools`: the shared `rules`, `skills`, `mcp-servers` and
+`mcp-gateway-modes`, and one attrset per module (`icedos.ai-tools.pi-agent`, ...).
 
 ## Layout
 `modules/<category>/<name>/{icedos.nix,config.toml}`; `flake.nix` exposes them via
@@ -32,7 +33,8 @@ attrset per module (`icedos.ai-tools.pi-agent`, ...).
 `meta.name` (not the folder) names the module. The categories are `agents` (antigravity,
 claude-code, pi-agent), `models` (llamacpp, ollama), `mcp` (one folder per MCP server: icedos-mcp, whose module name is `mcp-server`, and
 aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pagespeed-insights, plesk, rea, signal, each named
-`<folder>-mcp` except `kwin-mcp`; `mcp/lib` holds their shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence).
+`<folder>-mcp` except `kwin-mcp`; gateway, whose module name is `mcp-gateway`; `mcp/lib` holds their
+shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence).
 `modules/default` loads whenever the repo is listed and owns the shared options.
 
 ## Shared options (`icedos.ai-tools.*`)
@@ -60,6 +62,11 @@ aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pages
   wrapper sources the credentials from `PLESK_ENV_FILE`, so they stay out of the store.
   `opencart-mcp` sources `OPENCART_ENV_FILE` (`envFile`) the same way, and
   `pagespeed-insights-mcp` reads `GOOGLE_API_KEY` from `GOOGLE_API_KEY_FILE` (`apiKeyFile`).
+- Every module with a local process also declares `gatewayMode` (`global`, `per-agent` or `stdio`) in its
+  own `config.toml`, with a one-line reason, and mirrors it to
+  `icedos.ai-tools.mcp-gateway-modes.<server>` (as a `lib.mkDefault`, so a user value wins) where it
+  registers the `mcp-servers` entry. `context7-mcp` is a remote url, so it has none; `plesk-mcp` applies
+  one mode to every `plesk-<name>` it registers.
 - Skills that upstream ships come from the package source: `upstreamSkills` lists the names,
   `lib/upstream-skills.nix` reads `SKILL.md` and appends `references/*.md`. They read
   `${package.src}` (`pkgs.context7-mcp.src` for context7), an IFD that only needs the fetch,
@@ -85,6 +92,30 @@ aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pages
   for the SDK) and an `update-<module>.yml` workflow over `module-update.yml`. kwin-mcp, opencart-mcp and
   signal-mcp track upstream `main`, which runs ahead of their tags; basic-memory follows its
   latest release and the exact FastMCP version its `pyproject.toml` pins.
+
+- `mcp-gateway` serves the stdio servers over streamable HTTP from one per-user service
+  (`systemd.user.services.icedos-mcp-gateway`, `graphical-session.target`), so agents connect instead of
+  each starting a copy. It names no servers itself: it reads `icedos.ai-tools.mcp-gateway-modes`, which
+  each MCP module fills in from its `gatewayMode`. `global` keeps one child for every agent, `per-agent`
+  one child per MCP session, and `stdio` (the default, and the only choice for remote-url servers)
+  leaves the entry alone. `default` turns each routed registry entry into `{ type = "http"; url = ...; }` from
+  `icedos.ai-tools.mcp-http-endpoints` (mkDefault per entry, port `7800`, alias `icedos-mcps` added to
+  `networking.hosts` for 127.0.0.1), and the daemon spawns the registry's own `command`/`args`/`env`,
+  so routing never touches a module. `mcp-gateway-modes` is a normal option, and a module's value is only
+  a default, so a user config routes its own server — or flips a shipped one — without a module:
+  ```toml
+  [icedos.ai-tools.mcp-servers.my-server]
+  command = "my-server"
+  args = [ "serve" ]
+
+  [icedos.ai-tools.mcp-gateway-modes]
+  my-server = "per-agent"
+  rea = "per-agent" # ships as stdio
+  ```
+  Only what `mcp-servers` registers is routed: entries added straight to `programs.mcp.servers` (per hm
+  user) stay outside the gateway.
+  A mode naming a server nothing registers (a module name like `rea-mcp` instead of `rea`, say), or a
+  non-`stdio` mode on a url entry, fails the build with an assertion instead of being dropped silently.
 
 ## Agent registry
 `agent-launch` owns `icedos.ai-tools.agent-launch.agents.<name>` (`command`, `label`,

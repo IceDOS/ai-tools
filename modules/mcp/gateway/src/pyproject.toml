@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "icedos-mcp-gateway"
+version = "0.1.0"
+description = "MCP gateway: serves configured stdio MCP servers over streamable HTTP"
+readme = "README.md"
+license = "GPL-3.0-only"
+requires-python = ">=3.10"
+dependencies = [
+  "mcp>=1.27,<2",
+  "uvicorn",
+  "starlette",
+]
+
+[project.scripts]
+icedos-mcp-gateway = "icedos_mcp_gateway.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["icedos_mcp_gateway"]
