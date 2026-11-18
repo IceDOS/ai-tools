@@ -14,7 +14,7 @@ class AccountsTest(unittest.TestCase):
         root = Path(self.tmp.name)
         (root / "config.json").write_text(json.dumps({"agents": {
             "claude": {"accounts": {"work": {"mode": "shared"}}},
-            "opencode": {"accounts": {"solo": {"mode": "isolated"}}},
+            "pi-agent": {"accounts": {"solo": {"mode": "isolated"}}},
             "ollama": {"accounts": {}},
         }}))
         self.env = mock.patch.dict(os.environ, {
@@ -30,12 +30,11 @@ class AccountsTest(unittest.TestCase):
 
     def test_declared(self):
         got = sorted((a.agent, a.name, a.tag) for a in accounts.declared())
-        self.assertEqual(got, [("claude", "work", "work"), ("opencode", "solo", "opencode.solo")])
+        self.assertEqual(got, [("claude", "work", "work"), ("pi-agent", "solo", "pi-agent.solo")])
 
     def test_credentials_paths(self):
         st = self.root / "state"
         self.assertEqual(accounts.Account("claude", "work").credentials, st / "claude/work/.credentials.json")
-        self.assertEqual(accounts.Account("opencode", "solo").credentials, st / "opencode/solo/opencode/auth.json")
         self.assertEqual(accounts.Account("pi-agent", "w").credentials, st / "pi-agent/w/auth.json")
         self.assertEqual(accounts.Account("ollama", "h").credentials, st / "ollama/h/key")
 
@@ -123,5 +122,5 @@ class HeadroomTest(unittest.TestCase):
     def test_agent_account(self):
         self.assertEqual(accounts.agent_account("claude@work/five_hour"), ("claude", "work"))
         self.assertEqual(accounts.agent_account("five_hour"), ("claude", "default"))
-        self.assertEqual(accounts.agent_account("opencode-go@opencode.solo/rolling"), ("opencode", "solo"))
+        self.assertEqual(accounts.agent_account("opencode-go@pi-agent.solo/rolling"), ("pi-agent", "solo"))
         self.assertIsNone(accounts.agent_account("opencode-go/rolling"))

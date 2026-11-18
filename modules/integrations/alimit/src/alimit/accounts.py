@@ -34,7 +34,6 @@ def read_json(path: Path) -> dict:
 CREDENTIALS = {
     "claude": ".credentials.json",
     "pi-agent": "auth.json",
-    "opencode": "opencode/auth.json",
     "ollama": "key",
 }
 

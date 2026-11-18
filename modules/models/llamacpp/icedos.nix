@@ -265,7 +265,7 @@
           lifecycle = cfg.lifecycle.enable;
           lifecycleIdleSeconds = cfg.lifecycle.idle;
 
-          # Not configurable: opencode and pi-agent's context-cap match this exact name.
+          # Not configurable: pi-agent's context-cap excludes this exact name.
           provider = "llamacpp";
 
           # The GGUF file name, minus a split model's -00001-of-00003 suffix.
@@ -912,32 +912,6 @@
               RestartSec = 5;
             };
           };
-
-          home-manager.sharedModules = [
-            {
-              programs.opencode.settings.provider.llamacpp = {
-                npm = "@ai-sdk/openai-compatible";
-                name = "llama.cpp (Vulkan)";
-                options = {
-                  baseURL = "http://${clientHost}:${toString port}/v1";
-                  apiKey = "no-key";
-                };
-
-                models = lib.optionalAttrs (model != "" && modelId != "") {
-                  ${modelId} = {
-                    name = if modelName != "" then modelName else modelId;
-                    reasoning = modelReasoning;
-                    tool_call = true;
-                    images = mmproj != "";
-                    limit = {
-                      context = contextSize;
-                      output = modelMaxTokens;
-                    };
-                  };
-                };
-              };
-            }
-          ];
 
           icedos.system.tips.list = [
             "icedos llamacpp serve runs an AI model on your own machine."

@@ -29,18 +29,11 @@
         }:
 
         let
-          inherit (lib) mkIf optionalAttrs replaceStrings;
+          inherit (lib) mkIf optionalAttrs;
           cfg = config.icedos.ai-tools.agent-relay;
           pkg = pkgs.callPackage ./package.nix { };
           lib' = "${pkg}/lib/agent-relay";
           has = name: icedosLib.hasModule { inherit config repoUrl name; };
-
-          # opencode resolves @opencode-ai/plugin from ~/.config/opencode; core comes from the store.
-          opencodeServer =
-            replaceStrings
-              [ "./core.ts" "./opencode-hooks.ts" ]
-              [ "${lib'}/core.ts" "${lib'}/opencode-hooks.ts" ]
-              (builtins.readFile ./src/opencode-server.ts);
 
           claudeMcpConfig = pkgs.writeText "agent-relay-mcp.json" (
             builtins.toJSON {
@@ -86,7 +79,7 @@
 
           home-manager.sharedModules = [
             (
-              { config, lib, ... }:
+              { config, ... }:
               {
                 xdg.configFile."agent-relay/config.json".text = builtins.toJSON { inherit (cfg) hopLimit; };
 
@@ -103,13 +96,6 @@
                       ];
                     }
                   ];
-                };
-
-                programs.opencode.tui.plugin = mkIf (config.programs.opencode.enable or false) [
-                  "${lib'}/opencode-tui.ts"
-                ];
-                xdg.configFile."opencode/plugins/agent-relay.ts" = mkIf (config.programs.opencode.enable or false) {
-                  text = opencodeServer;
                 };
 
                 xdg.configFile."gemini/hooks.json" = mkIf (has "antigravity") {

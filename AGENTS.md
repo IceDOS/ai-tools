@@ -14,7 +14,7 @@
 - Format with `icedos nixf .` after editing any `.nix`.
 
 ## Purpose
-AI agents, local model servers and their glue: `claude-code`, `antigravity`, `opencode`, `pi-agent`
+AI agents, local model servers and their glue: `claude-code`, `antigravity`, `pi-agent`
 (agents), `llamacpp`, `ollama` (model servers),
 `mcp-server` (`icedos mcp serve`), one module per MCP server (`aws-mcp`, `basic-memory-mcp`,
 `chrome-devtools-mcp`, `context7-mcp`, `ddev-mcp`, `kwin-mcp`, `nixos-mcp`, `opencart-mcp`, `pagespeed-insights-mcp`, `plesk-mcp`, `rea-mcp`,
@@ -30,7 +30,7 @@ attrset per module (`icedos.ai-tools.pi-agent`, ...).
 `modules/<category>/<name>/{icedos.nix,config.toml}`; `flake.nix` exposes them via
 `icedosLib.scanModules { path = ./modules; filename = "icedos.nix"; }`, which recurses, and
 `meta.name` (not the folder) names the module. The categories are `agents` (antigravity,
-claude-code, opencode, pi-agent), `models` (llamacpp, ollama), `mcp` (one folder per MCP server: icedos-mcp, whose module name is `mcp-server`, and
+claude-code, pi-agent), `models` (llamacpp, ollama), `mcp` (one folder per MCP server: icedos-mcp, whose module name is `mcp-server`, and
 aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pagespeed-insights, plesk, rea, signal, each named
 `<folder>-mcp` except `kwin-mcp`; `mcp/lib` holds their shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence).
 `modules/default` loads whenever the repo is listed and owns the shared options.
@@ -38,14 +38,13 @@ aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pages
 ## Shared options (`icedos.ai-tools.*`)
 - `icedos.ai-tools.rules` — name = markdown. pi-agent writes them all to
   `<dataDir>/APPEND_SYSTEM.md`, which pi appends to every system prompt,
-  antigravity writes `~/.config/gemini/rules/<name>.md` (agy reads them through the `~/.gemini` symlink), opencode
-  writes `~/.config/opencode/rules/<name>.md` and lists it in `instructions`, and `claude-code`
-  sets `programs.claude-code.rules` (mkDefault per entry).
-- `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: antigravity `~/.local/share/gemini/antigravity-cli/skills/` (agy reads them through the `~/.gemini` symlink), opencode
-  `programs.opencode.skills`, Claude Code `programs.claude-code.skills`.
+  antigravity writes `~/.config/gemini/rules/<name>.md` (agy reads them through the
+  `~/.gemini` symlink), and `claude-code` sets `programs.claude-code.rules` (mkDefault per entry).
+- `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: antigravity `~/.local/share/gemini/antigravity-cli/skills/` (agy reads them through the
+  `~/.gemini` symlink), Claude Code `programs.claude-code.skills`.
   pi-agent builds them into a store dir that its settings.json lists under skills.
 - Per-agent options of the same name win over the shared entry
-  (`antigravity.{rules,skills}`, `opencode.skills`, `pi-agent.{rules,skills.extra-builtin}`).
+  (`antigravity.{rules,skills}`, `pi-agent.{rules,skills.extra-builtin}`).
 - Non-agent modules (`llamacpp`, `ollama` and the `mcp` modules) have a `skills`
   option that adds to `icedos.ai-tools.skills`, so a skill ships with the module it documents.
 - `icedos.ai-tools.mcp-servers` — name = `programs.mcp.servers` entry. `default` gives every hm
@@ -186,15 +185,12 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   (self-materialised via `genDefaults`). `ai-account exec <agent> --` picks an account (flag,
   `AI_ACCOUNT_<AGENT>`, sticky, alimit headroom, `default`) and execs the real binary with
   per-account env. Agent modules wrap their package through `lib/wrap.nix` only when
-  `lib/has-accounts.nix` finds declared accounts; `opencode` also counts as declaring when
-  `ollama` does, because it passes its key in.
+  `lib/has-accounts.nix` finds declared accounts.
   - State lives in `~/.local/state/icedos/ai-accounts/<agent>/<account>/`. Shared mode links the real dir
     except `adapters.*_PRIVATE` (never linked) and `adapters.*_SEED` (copied once, then owned by the
     account, because agents rewrite those files by renaming over the target).
   - A logged-out account fails with exit 3 when stdin is not a tty. On a tty the launch signs in
-    first: ollama prompts for the key, opencode runs `opencode auth login`, the other agents start
-    and show their own sign-in. An opencode launch also prompts for the key of the ollama account
-    it tags, when that account has no key.
+    first: ollama prompts for the key, and the other agents start and show their own sign-in.
   - alimit keys for non-default accounts are `<provider>@<tag>/<window>`. Status lines read
     `AI_ACCOUNT_TAGS`, and `alimit headroom` feeds auto-pick.
   - Per-account `settings` merge over the agent module's `icedos.managed-settings.<agent>` into the
@@ -211,8 +207,8 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   (claude, opencode-go, ollama, openrouter) for idle periods. Antigravity has no quota API,
   so only its status line records it.
   - Every bar shows only its own agent's usage: Claude Code's status line shows claude,
-    antigravity's shows antigravity, pi-agent's footer and opencode's sidebar show the
-    provider of the current model.
+    antigravity's shows antigravity and pi-agent's footer shows the provider of the current
+    model.
   - Weekly and monthly windows (`config.period_of`) project their end from the average burn since
     the window opened (reset minus 7 days, or one calendar month), blended with the previous
     period's for its first 2/7 (`rates.paced`). A backtest on a week of samples put it closest to
@@ -222,8 +218,8 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   - Every weekly window paired with a 5h one (`config.weekly_of`; Claude, Antigravity families,
     opencode-go `rolling`) carries `exchange`, the 5h percent per 1% weekly (`rates.exchange`):
     rises both report at the same instants, polls only when any exist, idle-session redraws
-    skipped, and a missing `resets_at` (an idle 5h window) counts as a reset. Agent bars and
-    opencode's sidebar print it as `1%=X% 5h`, the dashboard one line per pair. Ollama's `session`
+    skipped, and a missing `resets_at` (an idle 5h window) counts as a reset. Agent bars print it
+    as `1%=X% 5h`, the dashboard one line per pair. Ollama's `session`
     is unpaired: its length is undocumented, and current Ollama plans only have a monthly allowance.
   - `alimit headroom` ranks accounts by each window's peak (`rates.compute`), not its last row.
   - API keys come from env, then pi-agent's `auth.json`, then opencode's; alimit never

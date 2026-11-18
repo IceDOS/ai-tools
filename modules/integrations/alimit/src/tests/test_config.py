@@ -76,7 +76,7 @@ class TestAccountKeys(unittest.TestCase):
             ("five_hour", "work", "claude@work/five_hour"),
             ("weekly_scoped:claude_opus_4.5", "work", "claude@work/weekly_scoped:claude_opus_4.5"),
             ("ollama/weekly", "home", "ollama@home/weekly"),
-            ("opencode-go/rolling", "opencode.work", "opencode-go@opencode.work/rolling"),
+            ("opencode-go/rolling", "pi-agent.work", "opencode-go@pi-agent.work/rolling"),
         ]
         for base, tag, key in cases:
             self.assertEqual(config.with_account(base, tag), key)
@@ -100,7 +100,7 @@ class TestAccountKeys(unittest.TestCase):
         self.assertEqual(config.period("claude@work/five_hour"), ("5h", 0))
         self.assertEqual(config.period("weekly_scoped:fable"), ("wk", 2))
         self.assertEqual(config.period("antigravity@joanna/gemini-weekly"), ("wk", 2))
-        self.assertEqual(config.period("opencode-go@opencode.solo/rolling"), ("5h", 0))
+        self.assertEqual(config.period("opencode-go@pi-agent.solo/rolling"), ("5h", 0))
         self.assertEqual(config.period("opencode-go/monthly"), ("mo", 3))
 
     def test_weekly_of_pairs_five_hour_windows(self):
@@ -129,5 +129,5 @@ class TestAccountKeys(unittest.TestCase):
 
     def test_account_tag(self):
         self.assertEqual(config.account_tag("claude", "work"), "work")
-        self.assertEqual(config.account_tag("opencode", "work"), "opencode.work")
+        self.assertEqual(config.account_tag("pi-agent", "work"), "pi-agent.work")
         self.assertEqual(config.account_tag("ollama", "default"), "default")

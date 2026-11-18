@@ -7,7 +7,7 @@ function four() {
   const t = tmpRelay();
   const a = t.relay.register({ kind: "pi", pid: 100, cwd: "/a", id: "aaaa1", name: "planner" });
   const b = t.relay.register({ kind: "claude", pid: 200, cwd: "/b", id: "bbbb2" });
-  const c = t.relay.register({ kind: "opencode", pid: 300, cwd: "/c", id: "cccc3" });
+  const c = t.relay.register({ kind: "claude", pid: 300, cwd: "/c", id: "cccc3" });
   const d = t.relay.register({ kind: "agy", pid: 400, cwd: "/d", id: "dddd4" });
   return { ...t, a, b, c, d };
 }
