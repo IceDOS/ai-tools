@@ -4,6 +4,7 @@ let
   inherit (icedosLib)
     mkAttrsOfOption
     mkBoolOption
+    mkEnumOption
     mkIntBetweenOption
     mkNonEmptyStrOption
     mkStrOption
@@ -34,6 +35,20 @@ in
     };
 
     skills = mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
+
+    # How the MCP gateway runs this server: global, per-agent or stdio.
+    gatewayMode =
+      mkEnumOption
+        {
+          path = "icedos.ai-tools.plesk-mcp.gatewayMode";
+          source = ./config.toml;
+          default = defaults.gatewayMode;
+        }
+        [
+          "global"
+          "per-agent"
+          "stdio"
+        ];
   };
 
   outputs.nixosModules =
@@ -70,6 +85,10 @@ in
                   if server.envFile != "" then server.envFile else "~/.config/secrets/plesk-${name}.env";
               };
             }
+          ) cfg.servers;
+
+          icedos.ai-tools.mcp-gateway-modes = lib.mapAttrs' (
+            name: _: lib.nameValuePair "plesk-${name}" (lib.mkDefault cfg.gatewayMode)
           ) cfg.servers;
 
           icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) cfg.skills;

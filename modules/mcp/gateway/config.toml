@@ -1,0 +1,13 @@
+[icedos.ai-tools.mcp-gateway]
+# Hostname the gateway URLs use; networking.hosts resolves it to 127.0.0.1.
+host = "icedos-mcps"
+
+# Port the gateway listens on. It is machine-wide, so only one user's daemon binds.
+port = 7800
+
+# Seconds without requests before an idle server process is stopped.
+idleTimeoutSec = 600
+
+# Which servers are routed, and how, is declared per server in
+# icedos.ai-tools.mcp-gateway-modes: each MCP module sets its own entry as a
+# default, so a value there adds your own server or overrides a shipped one.

@@ -9,6 +9,9 @@ timeout = 600000
 # Skills shipped in ./skills (SKILL.md with references/*.md inlined).
 shippedSkills = ["opencart-extension"]
 
+# Configured by an env file, no cwd use.
+gatewayMode = "global"
+
 # Plain OPENCART_* settings passed to the server, e.g. OPENCART_SSH_HOST = "ddev"
 # for a local DDEV project. Keep secrets in envFile.
 [icedos.ai-tools.opencart-mcp.env]

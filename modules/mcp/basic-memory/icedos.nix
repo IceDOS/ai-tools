@@ -4,6 +4,7 @@ let
   inherit (icedosLib)
     mkAttrsOfOption
     mkBoolOption
+    mkEnumOption
     mkNonEmptyStrOption
     mkStrListOption
     ;
@@ -26,6 +27,20 @@ in
 
     # Skills, name = full SKILL.md content; replaces a same-named upstream skill.
     skills = mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
+
+    # How the MCP gateway runs this server: global, per-agent or stdio.
+    gatewayMode =
+      mkEnumOption
+        {
+          path = "icedos.ai-tools.basic-memory-mcp.gatewayMode";
+          source = ./config.toml;
+          default = defaults.gatewayMode;
+        }
+        [
+          "global"
+          "per-agent"
+          "stdio"
+        ];
   };
 
   outputs.nixosModules =
@@ -63,6 +78,7 @@ in
             command = lib.getExe package;
             args = [ "mcp" ];
           };
+          icedos.ai-tools.mcp-gateway-modes.basic-memory = lib.mkDefault cfg.gatewayMode;
 
           icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) (upstream // cfg.skills);
         }

@@ -1,7 +1,7 @@
 { icedosLib, lib, ... }:
 
 let
-  inherit (icedosLib) mkAttrsOfOption mkStrListOption;
+  inherit (icedosLib) mkAttrsOfOption mkEnumOption mkStrListOption;
   defaults = (lib.importTOML ./config.toml).icedos.ai-tools.kwin-mcp;
 in
 {
@@ -11,6 +11,20 @@ in
 
     # Extra skills, name = full SKILL.md content; replaces a same-named upstream skill.
     skills = mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
+
+    # How the MCP gateway runs this server: global, per-agent or stdio.
+    gatewayMode =
+      mkEnumOption
+        {
+          path = "icedos.ai-tools.kwin-mcp.gatewayMode";
+          source = ./config.toml;
+          default = defaults.gatewayMode;
+        }
+        [
+          "global"
+          "per-agent"
+          "stdio"
+        ];
   };
 
   outputs.nixosModules =
@@ -35,6 +49,7 @@ in
         {
           environment.systemPackages = [ package ];
           icedos.ai-tools.mcp-servers.kwin-mcp.command = lib.getExe package;
+          icedos.ai-tools.mcp-gateway-modes.kwin-mcp = lib.mkDefault cfg.gatewayMode;
           icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) (upstream // cfg.skills);
         }
       )

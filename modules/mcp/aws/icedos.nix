@@ -3,6 +3,7 @@
 let
   inherit (icedosLib)
     mkAttrsOfOption
+    mkEnumOption
     mkListOption
     mkNonEmptyStrOption
     mkStrListOption
@@ -29,6 +30,20 @@ in
     );
 
     skills = mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
+
+    # How the MCP gateway runs this server: global, per-agent or stdio.
+    gatewayMode =
+      mkEnumOption
+        {
+          path = "icedos.ai-tools.aws-mcp.gatewayMode";
+          source = ./config.toml;
+          default = defaults.gatewayMode;
+        }
+        [
+          "global"
+          "per-agent"
+          "stdio"
+        ];
   };
 
   outputs.nixosModules =
@@ -53,6 +68,7 @@ in
             command = lib.getExe package.proxy;
             args = [ cfg.url ] ++ cfg.extraArgs;
           };
+          icedos.ai-tools.mcp-gateway-modes.aws-mcp = lib.mkDefault cfg.gatewayMode;
 
           icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) cfg.skills;
 

@@ -10,6 +10,9 @@ extraArgs = ["--skip-auth", "--disable-telemetry"]
 # DEVOPS_AGENT_TOKEN. aws-startup-advisor adds usage telemetry and partner offers.
 plugins = ["aws-core", "aws-agents", "aws-data-analytics"]
 
+# Signs with the user's AWS credentials and ignores the cwd.
+gatewayMode = "global"
+
 # Skills for this module, name = full SKILL.md content. Added to the shared
 # icedos.ai-tools.skills pool.
 [icedos.ai-tools.aws-mcp.skills]

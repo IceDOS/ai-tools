@@ -4,6 +4,7 @@ let
   inherit (icedosLib)
     mkAttrsOfOption
     mkBoolOption
+    mkEnumOption
     mkIntBetweenOption
     mkStrListOption
     mkStrOption
@@ -37,6 +38,20 @@ in
 
     # Extra skills, name = full SKILL.md content; replaces a same-named upstream skill.
     skills = mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
+
+    # How the MCP gateway runs this server: global, per-agent or stdio.
+    gatewayMode =
+      mkEnumOption
+        {
+          path = "icedos.ai-tools.chrome-devtools-mcp.gatewayMode";
+          source = ./config.toml;
+          default = defaults.gatewayMode;
+        }
+        [
+          "global"
+          "per-agent"
+          "stdio"
+        ];
   };
 
   outputs.nixosModules =
@@ -73,6 +88,7 @@ in
             ++ cfg.extraArgs;
             inherit (cfg) timeout;
           };
+          icedos.ai-tools.mcp-gateway-modes.chrome-devtools = lib.mkDefault cfg.gatewayMode;
 
           icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) (upstream // cfg.skills);
         }

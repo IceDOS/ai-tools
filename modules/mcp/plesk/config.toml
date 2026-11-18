@@ -1,4 +1,7 @@
 [icedos.ai-tools.plesk-mcp]
+# Talks to the Plesk API with env-file credentials, no cwd use.
+gatewayMode = "global"
+
 # Plesk servers, one MCP server named "plesk-<name>" each. Each entry:
 # host = base URL, port included (https://plesk.example.net:8443),
 # envFile = KEY=value file outside the Nix store with PLESK_API_KEY, or
