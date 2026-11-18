@@ -47,8 +47,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual((cfg.select, cfg.threshold, cfg.bus_talk), ("auto", 80, ["org.kde.*"]))
 
     def test_agent_without_accounts_has_none(self):
-        self.write({"agents": {"opencode": {"realDir": "/d", "accounts": {}}}})
-        self.assertEqual(config.load().accounts["opencode"], {})
+        self.write({"agents": {"pi-agent": {"realDir": "/d", "accounts": {}}}})
+        self.assertEqual(config.load().accounts["pi-agent"], {})
 
     def test_alimit_db_ignores_later_xdg_change(self):
         with mock.patch.dict(os.environ, {"XDG_DATA_HOME": "/real"}, clear=False):

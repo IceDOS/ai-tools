@@ -2,7 +2,7 @@ const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
 const path = process.getBuiltinModule("node:path") as typeof import("node:path");
 const crypto = process.getBuiltinModule("node:crypto") as typeof import("node:crypto");
 
-export type Kind = "pi" | "claude" | "opencode" | "agy" | "script";
+export type Kind = "pi" | "claude" | "agy" | "script";
 
 export interface SessionRecord {
   id: string;

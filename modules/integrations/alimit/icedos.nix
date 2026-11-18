@@ -32,7 +32,7 @@
       alerts = mkBoolOption { default = alerts; };
       widget = mkBoolOption { default = widget; };
 
-      # alimit's usage bar in Claude Code's status line, pi-agent's footer and opencode's sidebar.
+      # alimit's usage bar in Claude Code's status line and pi-agent's footer.
       statusLine = mkBoolOption { default = statusLine; };
 
       # Providers the timer polls: claude, opencode-go, ollama, openrouter.
@@ -116,10 +116,6 @@
             "ollama"
             "openrouter"
           ];
-
-          opencodePlugin = pkgs.writeText "alimit-opencode.tsx" (
-            replaceStrings [ "@alimit@" ] [ alimit ] (builtins.readFile ./opencode.tsx)
-          );
 
           # KDE Plasma 6 applet rendering `status --json` (store path baked in via
           # @alimit@). It only reads the DB the timer and status lines fill; no network.
@@ -236,8 +232,6 @@
                   # Redraw between model responses so timer samples and reset countdowns show up.
                   refreshInterval = 60;
                 };
-
-                programs.opencode.tui.plugin = mkIf userCfg.statusLine [ "${opencodePlugin}" ];
 
                 # Live usage view as a Zed task (bottom terminal dock), when Zed is in use.
                 programs.zed-editor.userTasks = mkIf (config.programs.zed-editor.enable or false) [

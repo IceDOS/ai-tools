@@ -26,7 +26,6 @@ class CliTest(unittest.TestCase):
                 "claude": {"realDir": str(root / "real"), "bin": "/x/claude",
                            "accounts": {"work": {"mode": "shared"}}},
                 "ollama": {"accounts": {"home": {}}},
-                "opencode": {"realDir": "", "bin": "/x/opencode", "accounts": {}},
             },
         }))
         self.env = mock.patch.dict(os.environ, {
@@ -70,14 +69,6 @@ class CliTest(unittest.TestCase):
         self.assertIn("claude=work", env["AI_ACCOUNT_TAGS"])
         self.assertEqual(env["ALIMIT_DB"], str(Path(os.environ["XDG_DATA_HOME"]) / "alimit/usage.db"))
 
-    def test_build_env_composes_ollama_for_opencode(self):
-        self.login("ollama", "home", "key", "sk-h")
-        state.set_sticky("ollama", "home")
-        acct = config.Account("opencode", "default")
-        env = cli.build_env(self.cfg, "opencode", acct, adapters.Launch({}, []), dict(os.environ))
-        self.assertEqual(env["OLLAMA_API_KEY"], "sk-h")
-        self.assertIn("ollama=home", env["AI_ACCOUNT_TAGS"])
-
     def test_build_env_leaves_ollama_out_of_pi_agent(self):
         self.login("ollama", "home", "key", "sk-h")
         state.set_sticky("ollama", "home")
@@ -107,33 +98,9 @@ class CliTest(unittest.TestCase):
         ex.assert_called_once()
         self.assertIn("claude/work is not logged in; sign in when the agent asks", err.getvalue())
 
-    def test_exec_tty_prompts_for_the_key_a_dependent_ollama_account_needs(self):
-        # opencode carries an ollama tag, so a keyless ollama account must ask
-        # here instead of failing once the agent is already up.
-        self.cfg.accounts["opencode"] = {"work": config.Account("opencode", "work")}
-        self.login("opencode", "work", "opencode/auth.json")
-        state.set_sticky("ollama", "home")
-        with mock.patch.object(cli.config, "load", return_value=self.cfg), \
-             mock.patch.object(cli.sys, "stdin", TtyInput()), \
-             mock.patch.object(cli.getpass, "getpass", return_value="sk-home") as ask, \
-             mock.patch.object(cli.os, "execvpe") as ex:
-            cli.main(["exec", "opencode", "--account", "work", "--", "/x/opencode"])
-        ask.assert_called_once()
-        ex.assert_called_once()
-        self.assertEqual(ex.call_args.args[2]["OLLAMA_API_KEY"], "sk-home")
-        self.assertIn("ollama=home", ex.call_args.args[2]["AI_ACCOUNT_TAGS"])
-        key = config.state_dir() / "ollama" / "home" / "key"
-        self.assertEqual(key.read_text(), "sk-home\n")
-        self.assertEqual(key.stat().st_mode & 0o777, 0o600)
-
-    def test_exec_without_tty_still_exits_3_when_the_ollama_key_is_missing(self):
-        self.cfg.accounts["opencode"] = {"work": config.Account("opencode", "work")}
-        self.login("opencode", "work", "opencode/auth.json")
-        state.set_sticky("ollama", "home")
-        with mock.patch.object(cli.config, "load", return_value=self.cfg), \
-             mock.patch.object(cli.sys, "stdin", io.StringIO()):
-            self.assertEqual(
-                cli.main(["exec", "opencode", "--account", "work", "--", "/x/opencode"]), 3)
+    def test_exec_without_tty_exits_3_when_the_ollama_key_is_missing(self):
+        with mock.patch.object(cli.sys, "stdin", io.StringIO()):
+            self.assertEqual(cli.main(["exec", "ollama", "--account", "home", "--", "/x/ollama"]), 3)
 
     def test_exec_logged_out_tty_prompts_for_the_ollama_key(self):
         with mock.patch.object(cli.sys, "stdin", TtyInput()), \
@@ -146,25 +113,6 @@ class CliTest(unittest.TestCase):
         self.assertEqual(key.read_text(), "sk-x\n")
         self.assertEqual(key.stat().st_mode & 0o777, 0o600)
         self.assertEqual(ex.call_args.args[2]["OLLAMA_API_KEY"], "sk-x")
-
-    def test_exec_logged_out_tty_runs_the_opencode_login_first(self):
-        acct = config.Account("opencode", "work")
-        self.cfg.accounts["opencode"] = {"work": acct}
-
-        def login(argv, **kw):
-            auth = acct.dir / "opencode" / "auth.json"
-            auth.parent.mkdir(parents=True, exist_ok=True)
-            auth.write_text("{}")
-            return mock.Mock(returncode=0)
-
-        with mock.patch.object(cli.config, "load", return_value=self.cfg), \
-             mock.patch.object(cli, "_headroom", return_value=None), \
-             mock.patch.object(cli.sys, "stdin", TtyInput()), \
-             mock.patch.object(cli.subprocess, "run", side_effect=login) as run, \
-             mock.patch.object(cli.os, "execvpe") as ex:
-            cli.main(["exec", "opencode", "--account", "work", "--", "/x/opencode"])
-        self.assertEqual(run.call_args.args[0], ["/x/opencode", "auth", "login"])
-        ex.assert_called_once()
 
     def test_exec_sets_env_and_status(self):
         self.login("claude", "work", ".credentials.json")

@@ -1,5 +1,4 @@
 """Per-agent environment, private entries, login and logged-in checks."""
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,14 +28,12 @@ SETTINGS_FILE = {
     "claude": "settings.json",
     "pi-agent": "settings.json",
     "antigravity": "home/.gemini/antigravity-cli/settings.json",
-    "opencode": "opencode-settings.json",
 }
 LEDGER = ".ai-account-settings.json"
 
 CREDS = {
     "claude": (".credentials.json",),
     "pi-agent": ("auth.json",),
-    "opencode": ("opencode/auth.json",),
     "ollama": ("key",),
 }
 
@@ -79,14 +76,6 @@ def _pi_agent(acct, cfg):
     return Launch({"PI_CODING_AGENT_DIR": str(acct.dir)}, [])
 
 
-def _opencode(acct, cfg):
-    acct.dir.mkdir(parents=True, exist_ok=True)
-    if acct.mode == "isolated":
-        return Launch({"XDG_DATA_HOME": str(acct.dir)}, [])
-    auth = acct.dir / "opencode" / "auth.json"
-    return Launch({"OPENCODE_AUTH_CONTENT": auth.read_text() if auth.exists() else "{}"}, [])
-
-
 def _antigravity(acct, cfg):
     if acct.mode == "shared" and not AGY_PRIVATE:
         raise AdapterError('antigravity shared mode needs the token file name; set mode = "isolated" for now')
@@ -115,7 +104,6 @@ def _ollama(acct, cfg):
 PREPARE = {
     "claude": _claude,
     "pi-agent": _pi_agent,
-    "opencode": _opencode,
     "antigravity": _antigravity,
     "ollama": _ollama,
 }
@@ -138,20 +126,17 @@ def prepare(acct: Account, cfg: Config) -> Launch:
             _sync_antigravity_settings(acct, cfg)
         return Launch({}, [])
     launch = PREPARE[acct.agent](acct, cfg)
-    _apply_settings(acct, cfg, launch)
+    _apply_settings(acct, cfg)
     return launch
 
 
-def _apply_settings(acct: Account, cfg: Config, launch: Launch) -> None:
+def _apply_settings(acct: Account, cfg: Config) -> None:
     rel = SETTINGS_FILE.get(acct.agent)
     ledger = acct.dir / LEDGER
     desired = settings.merge(cfg.managed.get(acct.agent, {}), acct.settings)
     if rel is None or (not desired and not ledger.exists()):
         return
-    target = acct.dir / rel
-    settings.apply(target, desired, ledger)
-    if acct.agent == "opencode" and target.exists():
-        launch.env["OPENCODE_CONFIG"] = str(target)
+    settings.apply(acct.dir / rel, desired, ledger)
 
 
 def creds_paths(acct: Account) -> list:
@@ -169,20 +154,10 @@ def logged_in(acct: Account) -> bool:
     return bool(paths) and all(p.is_file() and p.stat().st_size > 0 for p in paths)
 
 
-def opencode_oauth(acct: Account) -> list:
-    try:
-        data = json.loads((acct.dir / "opencode" / "auth.json").read_text())
-    except (FileNotFoundError, ValueError):
-        return []
-    return sorted(k for k, v in data.items() if isinstance(v, dict) and v.get("type") == "oauth")
-
-
 def login_plan(acct: Account, cfg: Config):
     agent, bin_ = acct.agent, cfg.bins.get(acct.agent, "")
     if agent == "ollama":
         return None, {}, "paste the ollama.com API key for this account"
-    if agent == "opencode":
-        return [bin_, "auth", "login"], {"XDG_DATA_HOME": str(acct.dir)}, "pick the provider and finish its login"
     if agent == "antigravity":
         return [bin_], {}, "sign in when agy asks, then quit agy"
     return [bin_], {}, "run /login inside the agent, then quit it"

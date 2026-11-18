@@ -364,7 +364,7 @@ async def get_config(section: str = "", file: str = "") -> str:
     Args:
         section: Optional dotted path to a specific section (e.g. 'icedos.system.arch').
         file: Optional config-root-relative file to read in isolation
-              (e.g. 'configs/opencode.toml'); default reads the merged config.
+              (e.g. 'configs/ai/agents/pi-agent.toml'); default reads the merged config.
     """
     try:
         f = file or None

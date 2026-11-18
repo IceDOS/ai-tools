@@ -16,7 +16,6 @@ PROVIDERS = {
     "claude": ("claude",),
     "antigravity": ("antigravity",),
     "ollama": ("ollama",),
-    "opencode": ("opencode-go", "openrouter"),
     "pi-agent": ("opencode-go", "openrouter"),
 }
 
@@ -24,7 +23,7 @@ PROVIDERS = {
 def tag(agent: str, name: str) -> str:
     if name == "default":
         return "default"
-    return f"{agent}.{name}" if agent in ("opencode", "pi-agent") else name
+    return f"{agent}.{name}" if agent == "pi-agent" else name
 
 
 def _headroom(cfg, agent, eligible):
@@ -66,12 +65,6 @@ def build_env(cfg, agent, acct, launch, environ) -> dict:
     env.setdefault("ALIMIT_DB", str(config.alimit_db()))
     env.update(launch.env)
     tags = {p: tag(agent, acct.name) for p in PROVIDERS[agent]}
-    if agent == "opencode" and cfg.accounts.get("ollama"):
-        ollama = choose(cfg, "ollama", environ=environ)
-        if not adapters.logged_in(ollama) and sys.stdin.isatty():
-            _prompt_key(ollama, cfg)  # prepare raises NotLoggedIn without a key
-        env.update(adapters.prepare(ollama, cfg).env)
-        tags["ollama"] = tag("ollama", ollama.name)
     env["AI_ACCOUNT"], env["AI_ACCOUNT_AGENT"] = acct.name, agent
     env["AI_ACCOUNT_TAGS"] = ",".join(f"{p}={t}" for p, t in sorted(tags.items()))
     return env
@@ -91,9 +84,7 @@ def cmd_exec(args) -> int:
     argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
     if not argv:
         return _fail(EXIT_UNKNOWN, "missing command after --")
-    has_own = bool(cfg.accounts.get(args.agent))
-    has_ollama = args.agent == "opencode" and bool(cfg.accounts.get("ollama"))
-    if not (has_own or has_ollama):
+    if not cfg.accounts.get(args.agent):
         os.execvp(argv[0], argv)
         return 0
     try:
@@ -115,8 +106,6 @@ def cmd_exec(args) -> int:
     except dbusproxy.ProxyError as e:
         return _fail(EXIT_PROXY, str(e))
     _record_status(cfg, args.agent)
-    if args.agent == "opencode" and acct.mode == "shared" and adapters.opencode_oauth(acct):
-        print("ai-account: opencode OAuth tokens refresh into the shared auth.json; use mode = \"isolated\"", file=sys.stderr)
     os.execvpe(argv[0], [argv[0], *launch.args, *argv[1:]], env)
 
 
@@ -137,12 +126,6 @@ def _login_before_launch(agent, acct, cfg) -> int:
     argv, extra, hint = adapters.login_plan(acct, cfg)
     if argv is None:
         return _prompt_key(acct, cfg)
-    if agent == "opencode":
-        print(f"ai-account: {agent}/{acct.name} is not logged in; {hint}", file=sys.stderr)
-        code = subprocess.run(argv, env={**os.environ, **extra}).returncode
-        if code or not adapters.logged_in(acct):
-            return _fail(EXIT_LOGIN, f"opencode login did not finish (exit {code}); run: ai-account login {agent} {acct.name}")
-        return 0
     # At launch the agent signs in itself and the account keeps it, so no "then quit".
     who = "agy" if agent == "antigravity" else "the agent"
     print(f"ai-account: {agent}/{acct.name} is not logged in; sign in when {who} asks", file=sys.stderr)
@@ -158,7 +141,7 @@ def cmd_login(args) -> int:
     if argv is None:
         return _prompt_key(acct, cfg)
     try:
-        launch = adapters.prepare(acct, cfg) if args.agent != "opencode" else adapters.Launch({}, [])
+        launch = adapters.prepare(acct, cfg)
     except dbusproxy.ProxyError as e:
         return _fail(EXIT_PROXY, str(e))
     except (mirror.MirrorConflict, adapters.AdapterError) as e:
@@ -240,7 +223,7 @@ def cmd_doctor(args) -> int:
                 continue
             if not adapters.logged_in(a):
                 problems.append(f"{agent}/{a.name}: not logged in")
-            if a.mode != "shared" or agent in ("opencode", "ollama"):
+            if a.mode != "shared" or agent == "ollama":
                 continue
             real = cfg.real_dirs.get(agent, "")
             if agent == "claude":
@@ -254,9 +237,6 @@ def cmd_doctor(args) -> int:
                 problems += mirror.check(config.Path(real), home, skip={".gemini"})
                 problems += mirror.check(adapters.agy_data(cfg), home / ".gemini", adapters.AGY_PRIVATE,
                                          seed=adapters.AGY_SEED)
-        for a in accounts.values():
-            if agent == "opencode" and a.mode == "shared" and adapters.opencode_oauth(a):
-                problems.append(f"opencode/{a.name}: OAuth entries {adapters.opencode_oauth(a)} in shared mode; use isolated")
     for p in problems:
         print(p)
     return 1 if problems else 0

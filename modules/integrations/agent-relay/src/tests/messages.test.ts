@@ -14,7 +14,7 @@ function setup() {
   const a = relay.register({ kind: "pi", pid: 100, cwd: "/a", id: "aaaa1" });
   const b = relay.register({ kind: "claude", pid: 200, cwd: "/b", id: "bbbb2" });
   const c = relay.register({ kind: "agy", pid: 300, cwd: "/c", id: "cccc3" });
-  const x = relay.register({ kind: "opencode", pid: 400, cwd: "/x", id: "dddd9" });
+  const x = relay.register({ kind: "agy", pid: 400, cwd: "/x", id: "dddd9" });
   relay.link(a.id, b.id);
   relay.link(c.id, a.id);
   return { root, relay, clock, a, b, c, x };

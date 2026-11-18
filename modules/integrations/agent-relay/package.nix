@@ -40,7 +40,7 @@ stdenvNoCC.mkDerivation {
   '';
 
   meta = {
-    description = "Message relay between pi, Claude Code, opencode and Antigravity CLI sessions";
+    description = "Message relay between pi, Claude Code and Antigravity CLI sessions";
     platforms = lib.platforms.linux;
   };
 }

@@ -169,12 +169,11 @@ PROVIDER_SHORT = {"antigravity": "ag", "opencode-go": "go", "ollama": "ol", "ope
 # Non-default accounts: "<provider>@<tag>/<window>"; Claude's bare keys become "claude@<tag>/<key>".
 ACCOUNT_SEP = "@"
 # Agents whose auth file holds several providers tag their windows "<agent>.<account>".
-MULTI_PROVIDER_AGENTS = ("opencode", "pi-agent")
+MULTI_PROVIDER_AGENTS = ("pi-agent",)
 AGENT_PROVIDERS = {
     "claude": ("claude",),
     "antigravity": ("antigravity",),
     "ollama": ("ollama",),
-    "opencode": ("opencode-go", "openrouter"),
     "pi-agent": ("opencode-go", "openrouter"),
 }
 

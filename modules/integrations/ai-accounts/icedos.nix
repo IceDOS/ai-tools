@@ -80,7 +80,6 @@
           agents = [
             "claude"
             "pi-agent"
-            "opencode"
             "antigravity"
             "ollama"
           ];
@@ -101,7 +100,6 @@
                 realDirs = {
                   claude = "${home}/.claude";
                   pi-agent = "${config.xdg.configHome}/pi-agent";
-                  opencode = "${config.xdg.dataHome}/opencode";
                   antigravity = home;
                   ollama = "";
                 };
@@ -110,7 +108,6 @@
                 bins = {
                   claude = lib.getExe pkgs.claude-code;
                   pi-agent = lib.getExe pkgs.pi-agent;
-                  opencode = lib.getExe pkgs.opencode;
                   antigravity = "${pkgs.antigravity-cli}/bin/agy";
                   ollama = "";
                 };

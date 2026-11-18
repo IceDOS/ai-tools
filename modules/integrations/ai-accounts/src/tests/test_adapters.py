@@ -24,8 +24,7 @@ class AdapterTest(unittest.TestCase):
         self.real.mkdir()
         (self.real / "settings.json").write_text("{}")
         self.cfg = Config(real_dirs={a: str(self.real) for a in ("claude", "pi-agent", "antigravity")},
-                          bins={"claude": "/x/claude", "opencode": "/x/opencode", "antigravity": "/x/agy",
-                                "pi-agent": "/x/pi"},
+                          bins={"claude": "/x/claude", "antigravity": "/x/agy", "pi-agent": "/x/pi"},
                           bus_talk=["org.kde.*"])
 
     def tearDown(self):
@@ -65,26 +64,6 @@ class AdapterTest(unittest.TestCase):
         acct.dir.mkdir(parents=True)
         (acct.dir / "auth.json").write_text("{}")
         self.assertTrue(adapters.logged_in(acct))
-
-    def test_opencode_shared_passes_auth_content(self):
-        acct = Account("opencode", "work")
-        auth = acct.dir / "opencode" / "auth.json"
-        auth.parent.mkdir(parents=True)
-        auth.write_text('{"openrouter": {"type": "api", "key": "k"}}')
-        launch = adapters.prepare(acct, self.cfg)
-        self.assertEqual(json.loads(launch.env["OPENCODE_AUTH_CONTENT"])["openrouter"]["key"], "k")
-        self.assertNotIn("XDG_DATA_HOME", launch.env)
-
-    def test_opencode_isolated_moves_data_home(self):
-        acct = Account("opencode", "solo", "isolated")
-        self.assertEqual(adapters.prepare(acct, self.cfg).env, {"XDG_DATA_HOME": str(acct.dir)})
-
-    def test_opencode_oauth_detection(self):
-        acct = Account("opencode", "work")
-        auth = acct.dir / "opencode" / "auth.json"
-        auth.parent.mkdir(parents=True)
-        auth.write_text('{"anthropic": {"type": "oauth"}, "openrouter": {"type": "api"}}')
-        self.assertEqual(adapters.opencode_oauth(acct), ["anthropic"])
 
     def test_ollama_key(self):
         acct = Account("ollama", "work")
@@ -146,9 +125,9 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(json.loads(own.read_text()), {"from": "data"})
 
     def test_login_plans(self):
-        argv, env, hint = adapters.login_plan(Account("opencode", "work"), self.cfg)
-        self.assertEqual(argv, ["/x/opencode", "auth", "login"])
-        self.assertEqual(env, {"XDG_DATA_HOME": str(Account("opencode", "work").dir)})
+        argv, env, hint = adapters.login_plan(Account("antigravity", "work"), self.cfg)
+        self.assertEqual((argv, env), (["/x/agy"], {}))
+        self.assertIn("agy", hint)
         argv, env, hint = adapters.login_plan(Account("claude", "work"), self.cfg)
         self.assertEqual(argv, ["/x/claude"])
         self.assertIn("/login", hint)
@@ -211,17 +190,16 @@ class AdapterTest(unittest.TestCase):
         self.assertFalse(own.is_symlink())
         self.assertEqual((own / ".checksum").read_text(), "builtin:real")
 
-    def test_opencode_settings_file_passed(self):
-        acct = Account("opencode", "work", settings={"model": "x/y"})
-        launch = adapters.prepare(acct, self.cfg)
-        self.assertEqual(launch.env["OPENCODE_CONFIG"], str(acct.dir / "opencode-settings.json"))
-        self.assertEqual(json.loads((acct.dir / "opencode-settings.json").read_text()), {"model": "x/y"})
+    def test_agent_settings_file_written(self):
+        acct = Account("pi-agent", "work", settings={"model": "x/y"})
+        adapters.prepare(acct, self.cfg)
+        self.assertEqual(json.loads((acct.dir / "settings.json").read_text()), {"model": "x/y"})
 
     def test_no_settings_writes_nothing(self):
-        acct = Account("opencode", "work")
-        launch = adapters.prepare(acct, self.cfg)
-        self.assertNotIn("OPENCODE_CONFIG", launch.env)
+        acct = Account("claude", "work")
+        adapters.prepare(acct, self.cfg)
         self.assertFalse((acct.dir / adapters.LEDGER).exists())
+        self.assertEqual((acct.dir / "settings.json").read_text(), "{}")
 
     def test_antigravity_settings_shared_newest_wins(self):
         cli = self.real / ".gemini" / "antigravity-cli"
