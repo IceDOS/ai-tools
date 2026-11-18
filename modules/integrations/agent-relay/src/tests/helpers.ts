@@ -6,5 +6,5 @@ const path = process.getBuiltinModule("node:path") as typeof import("node:path")
 
 export function tmpRelay(alive: Set<number> = new Set([100, 200, 300, 400]), now?: () => Date) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-"));
-  return { root, alive, relay: new Relay({ root, isAlive: (p) => alive.has(p), now }) };
+  return { root, alive, relay: new Relay({ root, isAlive: (p) => alive.has(p), now, ancestorsOf: (p) => [p] }) };
 }

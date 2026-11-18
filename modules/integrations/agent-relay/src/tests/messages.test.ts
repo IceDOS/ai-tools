@@ -10,7 +10,7 @@ function setup() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-msg-"));
   let t = Date.parse("2026-11-11T10:00:00Z");
   const clock = { tick: (ms = 1000) => (t += ms) };
-  const relay = new Relay({ root, isAlive: (p) => p < 1000, now: () => new Date(t) });
+  const relay = new Relay({ root, isAlive: (p) => p < 1000, now: () => new Date(t), ancestorsOf: (p) => (p === 500 ? [500, 450, 100] : [p]) });
   const a = relay.register({ kind: "pi", pid: 100, cwd: "/a", id: "aaaa1" });
   const b = relay.register({ kind: "claude", pid: 200, cwd: "/b", id: "bbbb2" });
   const c = relay.register({ kind: "agy", pid: 300, cwd: "/c", id: "cccc3" });
@@ -29,7 +29,7 @@ test("send writes one message into the target inbox", () => {
   const m = JSON.parse(fs.readFileSync(path.join(root, "inbox", b.id, f), "utf8")) as Message;
   assert.equal(m.text, "hi");
   assert.equal(m.hop, 1);
-  assert.deepEqual(m.from, { id: a.id, kind: "pi" });
+  assert.deepEqual(m.from, { id: a.id, kind: "pi", parent: null });
 });
 
 test("send to all fans out without echo", () => {
@@ -120,4 +120,16 @@ test("watcher keeps a message the adapter could not deliver", async () => {
 test("formatMessage matches the spec", () => {
   const m: Message = { v: 1, id: "1", from: { id: "3f2a9", kind: "claude", name: "auth" }, to: "b", group: "g", hop: 2, ts: "", text: "hello" };
   assert.equal(formatMessage(m), '[relay from claude 3f2a9 "auth", hop 2]\nhello\n(reply with relay_send to="3f2a9")');
+});
+
+test("a session spawned under another agent carries it as parent in messages", () => {
+  const { root, relay, a, b } = setup();
+  const kid = relay.register({ kind: "pi", pid: 500, cwd: "/a", id: "eeee5" });
+  assert.deepEqual(kid.parent, { id: a.id, kind: "pi" });
+  assert.equal(b.parent, null);
+  relay.link(kid.id, b.id);
+  relay.send(kid.id, b.id, "done", 10);
+  const [f] = inbox(root, b.id);
+  const m = JSON.parse(fs.readFileSync(path.join(root, "inbox", b.id, f), "utf8")) as Message;
+  assert.equal(formatMessage(m), '[relay from pi eeee5, parent pi aaaa1, hop 1]\ndone\n(reply with relay_send to="eeee5")');
 });
