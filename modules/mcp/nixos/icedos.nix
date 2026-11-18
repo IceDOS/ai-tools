@@ -36,7 +36,9 @@
           environment.systemPackages = [ pkgs.mcp-nixos ];
           icedos.ai-tools.mcp-servers.nixos.command = lib.getExe pkgs.mcp-nixos;
           icedos.ai-tools.mcp-gateway-modes.nixos = lib.mkDefault config.icedos.ai-tools.nixos-mcp.gatewayMode;
-          icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) config.icedos.ai-tools.nixos-mcp.skills;
+          icedos.ai-tools.skills.pool = lib.mapAttrs (
+            _: lib.mkDefault
+          ) config.icedos.ai-tools.nixos-mcp.skills;
         }
       )
     ];

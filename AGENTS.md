@@ -24,7 +24,7 @@ AI agents, local model servers and their glue: `claude-code`, `antigravity`, `pi
 `code-intelligence` (per-language LSP skills).
 
 ## Namespace
-Every option here lives under `icedos.ai-tools`: the shared `rules`, `skills`, `mcp-servers` and
+Every option here lives under `icedos.ai-tools`: the shared `rules`, `skills.pool`, `mcp-servers` and
 `mcp-gateway-modes`, and one attrset per module (`icedos.ai-tools.pi-agent`, ...).
 
 ## Layout
@@ -42,13 +42,13 @@ shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-
   `<dataDir>/APPEND_SYSTEM.md`, which pi appends to every system prompt,
   antigravity writes `~/.config/gemini/rules/<name>.md` (agy reads them through the
   `~/.gemini` symlink), and `claude-code` sets `programs.claude-code.rules` (mkDefault per entry).
-- `icedos.ai-tools.skills` — name = full SKILL.md. Same fan-out: antigravity `~/.local/share/gemini/antigravity-cli/skills/` (agy reads them through the
+- `icedos.ai-tools.skills.pool` — name = full SKILL.md. Same fan-out: antigravity `~/.local/share/gemini/antigravity-cli/skills/` (agy reads them through the
   `~/.gemini` symlink), Claude Code `programs.claude-code.skills`.
   pi-agent builds them into a store dir that its settings.json lists under skills.
 - Per-agent options of the same name win over the shared entry
   (`antigravity.{rules,skills}`, `pi-agent.{rules,skills.extra-builtin}`).
 - Non-agent modules (`llamacpp`, `ollama` and the `mcp` modules) have a `skills`
-  option that adds to `icedos.ai-tools.skills`, so a skill ships with the module it documents.
+  option that adds to `icedos.ai-tools.skills.pool`, so a skill ships with the module it documents.
 - `icedos.ai-tools.mcp-servers` — name = `programs.mcp.servers` entry. `default` gives every hm
   user these servers (mkDefault per entry, so a same-named `programs.mcp.servers` entry wins),
   which every agent module reads, and writes `/etc/mcp/servers.json` (`{"mcpServers": ...}`,
@@ -257,6 +257,11 @@ Point this repo's `overrideUrl` at the local checkout in the config root
     refreshes Claude Code's OAuth token.
   - `icedos ai limits` opens the full dashboard. `widget` installs the Plasma applet
     `org.icedos.alimit`.
+- `skills` category (`ponytail`, `unslop`, options at `icedos.ai-tools.skills.<name>`) — each fetches a GitHub repo (`owner`/`repo`/`rev`/`hash`)
+  and reads the `skills` it lists from the repo's `skills/` dir into the shared pool through
+  `mcp/lib/upstream-skills.nix`. Each name in `autoload` adds a `<name>-autoload` rule telling agents
+  to load that skill at session start. Claude Code drops a shared skill whose name matches a managed
+  plugin (the `ponytail` plugin ships `ponytail`), since home-manager rejects the clash.
 - `code-intelligence` — ships one `code-intelligence-<lang>` skill per folder listed in
   `icedos.ai-tools.code-intelligence.languages`, plus a `code-intelligence` rule pointing agents
   at them. Both land in the shared `skills` and `rules` with mkDefault.

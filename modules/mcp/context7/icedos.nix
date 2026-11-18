@@ -37,7 +37,7 @@ in
         in
         {
           icedos.ai-tools.mcp-servers.context7.url = cfg.url;
-          icedos.ai-tools.skills = lib.mapAttrs (_: lib.mkDefault) (upstream // cfg.skills);
+          icedos.ai-tools.skills.pool = lib.mapAttrs (_: lib.mkDefault) (upstream // cfg.skills);
         }
       )
     ];

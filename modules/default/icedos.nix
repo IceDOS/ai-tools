@@ -11,7 +11,7 @@
       rules = mkAttrsOfOption { default = rules; } lib.types.lines;
 
       # Skills every agent loads: name = full SKILL.md content.
-      skills = mkAttrsOfOption { default = skills; } lib.types.lines;
+      skills.pool = mkAttrsOfOption { default = skills.pool; } lib.types.lines;
 
       # MCP servers every agent loads: name = programs.mcp.servers entry.
       mcp-servers = mkAttrsOfOption { default = mcp-servers; } lib.types.anything;

@@ -37,7 +37,7 @@ largeGb = 5
 maxFlakeCopyMb = 200
 
 # Skills for this module, name = full SKILL.md content. Added to the shared
-# icedos.ai-tools.skills pool, so every agent loads them.
+# icedos.ai-tools.skills.pool, so every agent loads them.
 [icedos.ai-tools.mcp-server.skills]
 icedos-mcp = """
 ---
@@ -84,7 +84,7 @@ To build a module repo (ai-tools, apps, desktop and so on) from a local checkout
 
 The server keeps overrides in its own file inside the sandbox. They never touch a config file, never show in `sandbox_diff`, and config writes never land there. Never set `overrideUrl` with `set_config_value` for testing. `sandbox_list` and `list_repositories` show each sandbox's overrides. An `overrideUrl` for the same url in a file that loads earlier still wins, and the tool returns a warning when that happens. `explore_repo`, `list_repo_tree` and `read_repo_file` read the overridden checkout too. Core itself is the flake input in `flake.nix`, not a repository, so this tool cannot override it.
 
-Edit the checkout with your normal file tools, then `rebuild` the sandbox. The build copies the checkout into the store, so later edits need another `rebuild`. Use `nix_eval` to confirm the result, e.g. `config.icedos.ai-tools.skills`.
+Edit the checkout with your normal file tools, then `rebuild` the sandbox. The build copies the checkout into the store, so later edits need another `rebuild`. Use `nix_eval` to confirm the result, e.g. `config.icedos.ai-tools.skills.pool`.
 
 ## Builds off the root disk
 

@@ -135,7 +135,8 @@ in
           gcDays = config.icedos.ai-tools.claude-code.sessionRetentionDays;
           desktopEntry = config.icedos.ai-tools.claude-code.desktopEntry;
           claudeExtraArgs = config.icedos.ai-tools.claude-code.extraArgs;
-          inherit (config.icedos.ai-tools) rules skills;
+          inherit (config.icedos.ai-tools) rules;
+          skills = config.icedos.ai-tools.skills.pool;
 
           # Prune stale claude session data during `icedos gc` in nh clean style.
           claudeGcHook = ''
@@ -421,7 +422,10 @@ in
                     enableMcpIntegration = true;
                     # Shared icedos.ai-tools entries; mkDefault lets a same-named programs.claude-code entry win.
                     rules = lib.mapAttrs (_: lib.mkDefault) rules;
-                    skills = lib.mapAttrs (_: lib.mkDefault) skills;
+                    # A managed plugin of the same name already ships that skill; HM rejects the clash.
+                    skills = lib.mapAttrs (_: lib.mkDefault) (
+                      removeAttrs skills (lib.attrNames config.programs.claude-code.plugins)
+                    );
                   };
                   # Terminal=true: the desktop environment launches the user's default terminal.
                   xdg.desktopEntries."claude-code" = lib.mkIf (desktopEntry && config.programs.claude-code.enable) {

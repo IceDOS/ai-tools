@@ -125,7 +125,7 @@
           # Shared icedos.ai-tools entries first, so a same-named antigravity entry wins.
           rules = config.icedos.ai-tools.rules // config.icedos.ai-tools.antigravity.rules;
 
-          skills = config.icedos.ai-tools.skills // config.icedos.ai-tools.antigravity.skills;
+          skills = config.icedos.ai-tools.skills.pool // config.icedos.ai-tools.antigravity.skills;
 
           inherit (lib)
             filterAttrs

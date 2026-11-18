@@ -207,7 +207,7 @@
         };
       };
 
-      # Skills for this module (name = SKILL.md), loaded by every agent via icedos.ai-tools.skills.
+      # Skills for this module (name = SKILL.md), loaded by every agent via icedos.ai-tools.skills.pool.
       skills = mkAttrsOfOption { default = defaults.skills; } lib.types.lines;
     };
 
@@ -782,8 +782,8 @@
 
           # optionalAttrs, not mkIf: mkIf still resolves the option path, which fails without pi-agent.
           icedos.ai-tools = {
-            # Skills for this module, added to the shared icedos.ai-tools.skills pool.
-            skills = lib.mapAttrs (_: lib.mkDefault) config.icedos.ai-tools.llamacpp.skills;
+            # Skills for this module, added to the shared icedos.ai-tools.skills.pool.
+            skills.pool = lib.mapAttrs (_: lib.mkDefault) config.icedos.ai-tools.llamacpp.skills;
           }
           // lib.optionalAttrs hasPiAgent {
             pi-agent.extensions.meters.power.providers = lib.optional (model != "") provider;

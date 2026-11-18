@@ -9,7 +9,7 @@
 # Shared AI agent skills: name = full SKILL.md content (frontmatter included).
 # Written for claude-code, antigravity and pi-agent. A per-agent
 # skill of the same name wins.
-[icedos.ai-tools.skills]
+[icedos.ai-tools.skills.pool]
 
 # Shared MCP server registry: name = server entry (command/args/env or url).
 # Each MCP module adds its own. Every hm user gets them in programs.mcp.servers,
