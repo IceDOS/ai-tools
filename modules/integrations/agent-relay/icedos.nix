@@ -50,6 +50,7 @@
 
           icedos.ai-tools = {
             skills.pool.agent-relay-scripts = builtins.readFile ./skills/agent-relay-scripts/SKILL.md;
+            skills.pool.agent-relay-planner = builtins.readFile ./skills/agent-relay-planner/SKILL.md;
           }
           // optionalAttrs (has "pi-agent") {
             pi-agent.extensions.inline.agent-relay = ''
