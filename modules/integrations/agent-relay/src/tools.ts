@@ -53,7 +53,7 @@ export function peersText(relay: Relay, selfId: string): string {
   const peers = relay.members(selfId).filter((s) => s.id !== selfId && s.kind !== "script");
   const lines = [`you: ${describe(me)}`];
   if (!peers.length) lines.push("not linked to any session; ask the user for a peer relay ID and call relay_link");
-  else lines.push(`group ${me.group}:`, ...peers.map((p) => `- ${describe(p)} cwd=${p.cwd}`));
+  else lines.push(`group ${me.group}:`, ...peers.map((p) => `- ${describe(p)} cwd=${p.cwd}${p.parent ? ` parent=${p.parent.id}` : ""}`));
   return lines.join("\n");
 }
 

@@ -16,6 +16,14 @@ export interface SessionRecord {
   hopReset?: string;
   started: string;
   agent?: Record<string, unknown>;
+  // Nearest registered agent above this process, e.g. the pi that spawned an RLM child.
+  parent?: ParentRef | null;
+}
+
+export interface ParentRef {
+  id: string;
+  kind: Kind;
+  name?: string;
 }
 
 export interface Group {
@@ -36,6 +44,7 @@ export interface RelayOptions {
   root?: string;
   isAlive?: (pid: number) => boolean;
   now?: () => Date;
+  ancestorsOf?: (pid: number) => number[];
 }
 
 export class RelayError extends Error {}
@@ -90,7 +99,7 @@ export const hex = (n: number): string => crypto.randomBytes(Math.ceil(n / 2)).t
 export interface Message {
   v: 1;
   id: string;
-  from: { id: string; kind: Kind; name?: string };
+  from: { id: string; kind: Kind; name?: string; parent?: ParentRef | null };
   to: string;
   group?: string;
   hop: number;
@@ -123,7 +132,9 @@ export function formatMessage(m: Message): string {
     return `${RELAY_PREFIX}script ${who}]\n${m.text}${reply}`;
   }
   const name = m.from.name ? ` "${m.from.name}"` : "";
-  return `${RELAY_PREFIX}${m.from.kind} ${m.from.id}${name}, hop ${m.hop}]\n${m.text}\n(reply with relay_send to="${m.from.id}")`;
+  const p = m.from.parent;
+  const parent = p ? `, parent ${p.kind} ${p.id}${p.name ? ` "${p.name}"` : ""}` : "";
+  return `${RELAY_PREFIX}${m.from.kind} ${m.from.id}${name}${parent}, hop ${m.hop}]\n${m.text}\n(reply with relay_send to="${m.from.id}")`;
 }
 
 export function nextHop(r: SessionRecord): number {
@@ -143,11 +154,13 @@ export class Relay {
   readonly root: string;
   protected isAlive: (pid: number) => boolean;
   protected now: () => Date;
+  protected ancestorsOf: (pid: number) => number[];
 
   constructor(o: RelayOptions = {}) {
     this.root = o.root ?? defaultRoot();
     this.isAlive = o.isAlive ?? pidAlive;
     this.now = o.now ?? (() => new Date());
+    this.ancestorsOf = o.ancestorsOf ?? ancestors;
     for (const d of ["sessions", "groups", "inbox"]) {
       fs.mkdirSync(path.join(this.root, d), { recursive: true, mode: 0o700 });
     }
@@ -224,12 +237,15 @@ export class Relay {
     const taken = new Set(all.map((s) => s.id));
     let id = input.id && ID_RE.test(input.id) && !taken.has(input.id) ? input.id : "";
     while (!id || taken.has(id)) id = hex(5);
+    const above = this.ancestorsOf(input.pid).filter((pid) => pid !== input.pid);
+    const p = this.findByPid(above, (s) => s.kind !== "script");
     const rec: SessionRecord = {
       id,
       kind: input.kind,
       pid: input.pid,
       cwd: input.cwd,
       started: this.iso(),
+      parent: p ? { id: p.id, kind: p.kind, ...(p.name ? { name: p.name } : {}) } : null,
       ...(input.name ? { name: input.name } : {}),
       ...(input.agent ? { agent: input.agent } : {}),
     };
@@ -387,7 +403,7 @@ export class Relay {
       const msg: Message = {
         v: 1,
         id: messageId(this.now()),
-        from: { id: me.id, kind: me.kind, ...(me.name ? { name: me.name } : {}) },
+        from: { id: me.id, kind: me.kind, ...(me.name ? { name: me.name } : {}), parent: me.parent ?? null },
         to: t.id,
         ...(me.group ? { group: me.group } : {}),
         hop,
