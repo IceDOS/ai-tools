@@ -9,6 +9,7 @@ from unittest import mock
 
 import statusline
 import terminal_title
+import tool_state
 
 
 class TestStatuslineQuota(unittest.TestCase):
@@ -88,8 +89,8 @@ class TestStatuslineQuota(unittest.TestCase):
 class FakeTime:
     """Stands in for terminal_title's time module, so ticks do not sleep."""
 
-    def __init__(self):
-        self.now = 0.0
+    def __init__(self, start=0.0):
+        self.now = start
 
     def monotonic(self):
         self.now += 0.1
@@ -97,6 +98,9 @@ class FakeTime:
 
     def sleep(self, seconds):
         pass
+
+    def time(self):
+        return self.now
 
 
 class TestTerminalTitle(unittest.TestCase):
@@ -109,6 +113,10 @@ class TestTerminalTitle(unittest.TestCase):
         tty.touch()
         self.tty = str(tty)
         self.patch("STATE_DIR", self.state_dir)
+        # the ticker reads the tool call the hook recorded from the same runtime dir
+        tools = mock.patch("tool_state.STATE_DIR", self.state_dir)
+        self.addCleanup(tools.stop)
+        tools.start()
 
     def patch(self, name, value):
         patcher = mock.patch(f"terminal_title.{name}", value)
@@ -174,6 +182,23 @@ class TestTerminalTitle(unittest.TestCase):
         titles = self.tick({"agy": 7, "name": "Task", "working": False})
         self.assertEqual(titles, ["\u25b2 Task", ""])
 
+    def test_tick_keeps_the_timer_while_agy_reports_idle_mid_call(self):
+        # agy redraws its status line only on state changes and reports "idle" while a long
+        # tool still runs, so the record, not the agent state, decides the timer and glyph.
+        # the record is fresh on tool_state's own clock and 7s old on the ticker's
+        self.patch("tool_state.time", FakeTime(10.0))
+        tool_state.save("c1", "run_command", "call-1", started=-7)
+        titles = self.tick({"agy": 7, "name": "Task", "working": False, "conversation": "c1"})
+        self.assertEqual(
+            titles,
+            [
+                "\u2596 Task \u00b7 \u23f1 run_command 7s",
+                "\u2598 Task \u00b7 \u23f1 run_command 7s",
+                "\u259d Task \u00b7 \u23f1 run_command 7s",
+                "",
+            ],
+        )
+
     def test_tick_gives_up_when_another_ticker_holds_the_lock(self):
         terminal_title.save(self.tty, {"agy": 7, "name": "Task", "working": True})
         titles = self.patch("emit", mock.Mock())
@@ -211,6 +236,16 @@ class TestTerminalTitle(unittest.TestCase):
         terminal_title.update({"agent_state": "working"})
         popen.assert_not_called()
         self.assertFalse(self.state_dir.exists())
+
+
+class TestProcStat(unittest.TestCase):
+    def test_a_zombie_agy_counts_as_gone(self):
+        def stat(text):
+            with mock.patch.object(terminal_title.Path, "read_text", return_value=text):
+                return terminal_title.proc_stat(1)
+
+        self.assertEqual(stat("42 (agy) S 7 42 42 0"), ("agy", 7))
+        self.assertIsNone(stat("42 (agy) Z 7 42 42 0"))
 
 
 class TestTurnTimer(unittest.TestCase):
@@ -324,6 +359,119 @@ class TestTurnTransitions(unittest.TestCase):
         loaded = terminal_title.load(self.tty)
         self.assertEqual(loaded["custom_field"], "preserved")
         self.assertTrue(loaded["working"])
+
+
+def _tick_once(state, alive=3):
+    """Run one ticker over a fake terminal to its end; return the titles it drew."""
+    tmp = tempfile.TemporaryDirectory()
+    tty = Path(tmp.name) / "tty"
+    tty.touch()
+    with mock.patch.object(terminal_title, "STATE_DIR", Path(tmp.name) / "state"), \
+         mock.patch.object(terminal_title, "time", FakeTime(BASE)), \
+         mock.patch.object(terminal_title, "emit", mock.Mock()) as emit, \
+         mock.patch.object(terminal_title, "proc_stat", mock.Mock(side_effect=[("agy", 1)] * alive + [None] * 5)):
+        terminal_title.save(str(tty), state)
+        terminal_title.tick(str(tty))
+    tmp.cleanup()
+    return [call.args[1] for call in emit.call_args_list]
+
+
+BASE = 1_800_000_000.0
+
+
+class TestToolTimer(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state_dir = Path(tmp.name)
+        for patcher in (
+            mock.patch("tool_state.STATE_DIR", self.state_dir),
+            mock.patch("time.time", mock.Mock(return_value=BASE)),
+        ):
+            self.addCleanup(patcher.stop)
+            patcher.start()
+
+    def test_format_duration_keeps_the_seconds_when_asked(self):
+        cases = [
+            (0, "0s"), (42, "42s"), (42.8, "42s"), (-5, "0s"),
+            (60, "1m 0s"), (77, "1m 17s"), (240, "4m 0s"),
+            (3600, "1h 0m 0s"), (3725, "1h 2m 5s"),
+        ]
+        for val, expected in cases:
+            with self.subTest(val=val):
+                self.assertEqual(terminal_title.format_duration(val, always_seconds=True), expected)
+
+    def test_short_tool_drops_the_mcp_namespace(self):
+        self.assertEqual(terminal_title.short_tool("run_command"), "run_command")
+        self.assertEqual(terminal_title.short_tool("mcp__basic-memory__search"), "search")
+        self.assertEqual(terminal_title.short_tool("mcp__kernel__ipython"), "ipython")
+        self.assertEqual(terminal_title.short_tool(""), "")
+
+    def test_tool_state_round_trip(self):
+        tool_state.save("c1", "run_command", "toolu_01", 19, started=BASE - 5.0)
+        record = tool_state.load("c1")
+        self.assertEqual(
+            record, {"tool": "run_command", "start_ts": BASE - 5.0, "id": "toolu_01", "step": 19}
+        )
+
+    def test_tool_state_ages_out_and_clears(self):
+        tool_state.save("c1", "run_command", started=BASE - 1.0)
+        self.assertIsNotNone(tool_state.load("c1"))
+        tool_state.clear("c1")
+        self.assertIsNone(tool_state.load("c1"))
+        tool_state.save("c1", "run_command", started=BASE - tool_state.MAX_AGE - 1)
+        self.assertIsNone(tool_state.load("c1"))
+
+    def test_clear_keeps_a_newer_call(self):
+        tool_state.save("c1", "run_command", "toolu_02", started=BASE - 1.0)
+        tool_state.clear("c1", "toolu_01")
+        self.assertIsNotNone(tool_state.load("c1"))
+        tool_state.clear("c1", "toolu_02")
+        self.assertIsNone(tool_state.load("c1"))
+
+    def test_tool_state_ignores_a_call_without_a_conversation(self):
+        tool_state.save(None, "run_command")
+        tool_state.save("c1", "")
+        self.assertFalse(self.state_dir.joinpath("tools").exists())
+
+    def test_tool_timer_counts_up(self):
+        tool_state.save("c1", "mcp__basic-memory__search", started=BASE)
+        self.assertEqual(terminal_title.tool_timer("c1", now=BASE), "\u23f1 search 0s")
+        self.assertEqual(terminal_title.tool_timer("c1", now=BASE + 46), "\u23f1 search 46s")
+        self.assertEqual(terminal_title.tool_timer("c1", now=BASE + 240), "\u23f1 search 4m 0s")
+        self.assertEqual(terminal_title.tool_timer("c2", now=BASE + 240), "")
+
+    def test_compose_title_keeps_the_timer_visible(self):
+        self.assertEqual(terminal_title.compose_title("\u25b2", "Task"), "\u25b2 Task")
+        self.assertEqual(
+            terminal_title.compose_title("\u2596", "Task", "\u23f1 run_command 46s"),
+            "\u2596 Task \u00b7 \u23f1 run_command 46s",
+        )
+        long = terminal_title.compose_title("\u2596", "x" * 200, "\u23f1 run_command 4m 0s")
+        self.assertEqual(len(long), terminal_title.TITLE_MAX)
+        self.assertTrue(long.endswith("\u00b7 \u23f1 run_command 4m 0s"))
+        self.assertIn("\u2026", long)
+
+    def test_tick_draws_the_running_tool_time(self):
+        tool_state.save("c1", "run_command", started=BASE - 8.0)
+        titles = _tick_once({"agy": 7, "name": "Task", "conversation": "c1", "working": True})
+        self.assertEqual(
+            titles,
+            [
+                "\u2596 Task \u00b7 \u23f1 run_command 8s",
+                "\u2598 Task \u00b7 \u23f1 run_command 8s",
+                "\u259d Task \u00b7 \u23f1 run_command 8s",
+                "",
+            ],
+        )
+
+    def test_tick_hides_the_timer_once_the_call_ended(self):
+        tool_state.save("c1", "run_command", started=BASE - 8.0)
+        tool_state.clear("c1")
+        titles = _tick_once(
+            {"agy": 7, "name": "Task", "conversation": "c1", "working": True}, alive=2
+        )
+        self.assertEqual(titles, ["\u2596 Task", "\u2598 Task", ""])
 
 
 class TestStatuslineOutput(unittest.TestCase):

@@ -2,7 +2,8 @@
 
 agy's own `title` hook only reruns on state changes, so it cannot animate. The status line reruns on
 every state change instead: it saves the state and starts a detached ticker, which draws the glyph,
-animates it while the agent works, follows the conversation title, and clears it once agy exits.
+animates it while the agent works, follows the conversation title, times the tool call that a
+PreToolUse hook recorded, and clears the title once agy exits.
 """
 from datetime import datetime
 import fcntl
@@ -14,6 +15,8 @@ import sys
 import time
 from pathlib import Path
 
+import tool_state
+
 IDLE_GLYPH = os.environ.get("ANTIGRAVITY_TITLE_IDLE_GLYPH") or "▲"
 WORKING_FRAMES = os.environ.get("ANTIGRAVITY_TITLE_WORKING_GLYPHS", "").split() or ["▖", "▘", "▝", "▗"]
 TICK = 0.25
@@ -23,10 +26,12 @@ TITLE_REFRESH = 2.0
 FALLBACK = "Antigravity"
 
 SUMMARIES = Path.home() / ".gemini/antigravity-cli/conversation_summaries.db"
-STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/antigravity-title-{os.getuid()}") / "antigravity-title"
+# The hook writes the running tool call into this dir, so both scripts share one path.
+STATE_DIR = tool_state.STATE_DIR
 
 
-def format_duration(seconds):
+def format_duration(seconds, always_seconds=False):
+    """`42s`, `1m 17s`, `4m`, `1h 2m`; always_seconds keeps the seconds (`4m 0s`, `1h 2m 5s`)."""
     total = max(0, int(seconds))
     if total < 60:
         return f"{total}s"
@@ -34,8 +39,10 @@ def format_duration(seconds):
     m = (total % 3600) // 60
     s = total % 60
     if h > 0:
+        if always_seconds:
+            return f"{h}h {m}m {s}s"
         return f"{h}h {m}m" if m > 0 else f"{h}h"
-    return f"{m}m {s}s" if s > 0 else f"{m}m"
+    return f"{m}m {s}s" if always_seconds or s > 0 else f"{m}m"
 
 
 def format_time(dt=None):
@@ -49,13 +56,31 @@ def compose_banner(elapsed, dt=None, glyph=IDLE_GLYPH):
     return f"{glyph} Worked for {format_duration(elapsed)} · done {format_time(dt)}"
 
 
+def short_tool(name):
+    """`mcp__server__tool` as `tool`: the tool row already names the server."""
+    return name.rsplit("__", 1)[-1] if name.startswith("mcp__") else name
+
+
+def tool_timer(conversation, now=None):
+    """`⏱ run_command 46s` while a tool runs in that conversation, else ""."""
+    record = tool_state.load(conversation)
+    if record is None:
+        return ""
+    elapsed = (time.time() if now is None else now) - record["start_ts"]
+    return f"⏱ {short_tool(record['tool'])} {format_duration(elapsed, always_seconds=True)}"
+
+
 def proc_stat(pid):
     """(comm, ppid) of pid, or None once it is gone."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
         return None
-    return stat[stat.index("(") + 1 : stat.rindex(")")], int(stat[stat.rindex(")") + 2 :].split()[1])
+    state, ppid = stat[stat.rindex(")") + 2 :].split()[:2]
+    # A zombie keeps its comm until agy_pty reaps it, which it may never do.
+    if state == "Z":
+        return None
+    return stat[stat.index("(") + 1 : stat.rindex(")")], int(ppid)
 
 
 def is_agy(pid):
@@ -116,6 +141,17 @@ def title_text(state):
     return text if len(text) <= TITLE_MAX else text[: TITLE_MAX - 1] + "…"
 
 
+def compose_title(glyph, text, timer=""):
+    """One title line, keeping the timer inside TITLE_MAX even when the name must shrink."""
+    suffix = f" · {timer}" if timer else ""
+    room = TITLE_MAX - len(glyph) - 1 - len(suffix)
+    if room <= 0:
+        return f"{glyph} {text}"
+    if len(text) > room:
+        text = text[: room - 1] + "…"
+    return f"{glyph} {text}{suffix}"
+
+
 # ---------- per-terminal state ----------
 def state_file(tty, suffix):
     return STATE_DIR / (tty.strip("/").replace("/", "-") + suffix)
@@ -172,8 +208,12 @@ def tick(tty):
         if state != seen or now >= refresh_at:
             # agy can generate the conversation title mid-turn
             text, seen, refresh_at = title_text(state), state, now + TITLE_REFRESH
+        timer = tool_timer(state.get("conversation"))
+        # agy redraws its status line only on state changes and reports "idle" while a long
+        # tool still runs, so a live record keeps the glyph moving and the timer counting.
+        working = working or bool(timer)
         glyph = WORKING_FRAMES[frame % len(WORKING_FRAMES)] if working else IDLE_GLYPH
-        if (title := f"{glyph} {text}") != shown:
+        if (title := compose_title(glyph, text, timer)) != shown:
             shown = title
             emit(fd, title)
         if working:  # only the working glyph animates

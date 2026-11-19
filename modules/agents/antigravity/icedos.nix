@@ -146,11 +146,14 @@
           # The bar is alimit's shared agent status line.
           alimitPkg = pkgs.callPackage ../../integrations/alimit/package.nix { };
 
-          # statusline.py imports terminal_title.py from its own directory.
-          statusLineScripts = pkgs.runCommand "antigravity-statusline-scripts" { } ''
+          # statusline.py imports terminal_title.py and tool_state.py from its own directory,
+          # and the tool timer hook runs from the same one.
+          agentScripts = pkgs.runCommand "antigravity-agent-scripts" { } ''
             mkdir -p $out
             cp ${./statusline.py} $out/statusline.py
             cp ${./terminal_title.py} $out/terminal_title.py
+            cp ${./tool_state.py} $out/tool_state.py
+            cp ${./tool_timer.py} $out/tool_timer.py
           '';
 
           # Wrapper so activation and settings.json share one store path.
@@ -161,7 +164,7 @@
               export ANTIGRAVITY_BIN=${agyBin}
               export ANTIGRAVITY_TITLE_IDLE_GLYPH=${lib.escapeShellArg terminal-title.idleGlyph}
               export ANTIGRAVITY_TITLE_WORKING_GLYPHS=${lib.escapeShellArg (lib.concatStringsSep " " terminal-title.workingGlyphs)}
-              exec ${pkgs.python3}/bin/python3 ${statusLineScripts}/statusline.py "$@"
+              exec ${pkgs.python3}/bin/python3 ${agentScripts}/statusline.py "$@"
             '';
           };
 
@@ -172,6 +175,52 @@
             ++ lib.optional terminal-title.enable "--title"
             ++ lib.optional (!statusLine) "--no-bar"
           );
+
+          # agy loads hooks.json from a plugin root and merges its hooks with the user's own
+          # ~/.config/gemini/hooks.json, which agent-relay owns. The hook records the tool call
+          # that is running, so the title's ticker can time it, and answers the
+          # PreToolUse decision agy requires to keep its own permission flow.
+          toolTimerHook = event: [
+            {
+              type = "command";
+              command = "${pkgs.python3}/bin/python3 ${agentScripts}/tool_timer.py ${event}";
+              timeout = 10;
+            }
+          ];
+
+          toolTimerPlugin = pkgs.runCommand "antigravity-tool-timer-plugin" { } ''
+            mkdir -p $out
+            cp ${
+              pkgs.writeText "plugin.json" (
+                builtins.toJSON {
+                  name = "tool-timer";
+                  displayName = "Tool timer";
+                  description = "Records the running tool call, so the terminal title can time it.";
+                  version = "0.1.0";
+                }
+              )
+            } $out/plugin.json
+            cp ${
+              pkgs.writeText "hooks.json" (
+                builtins.toJSON {
+                  tool-timer = {
+                    PreToolUse = [
+                      {
+                        matcher = "*";
+                        hooks = toolTimerHook "PreToolUse";
+                      }
+                    ];
+                    PostToolUse = [
+                      {
+                        matcher = "*";
+                        hooks = toolTimerHook "PostToolUse";
+                      }
+                    ];
+                  };
+                }
+              )
+            } $out/hooks.json
+          '';
 
           # agy hardcodes $HOME/.gemini, so agy_home.py runs it with HOME at a symlink farm
           # of ~ whose .gemini is ~/.local/share/gemini; ai-accounts' mirror.py builds the farm.
@@ -332,6 +381,9 @@
                   ) rules
                   // lib.optionalAttrs rlmCfg.enable {
                     "gemini/plugins/rlm".source = rlm.plugin;
+                  }
+                  // lib.optionalAttrs terminal-title.enable {
+                    "gemini/plugins/tool-timer".source = toolTimerPlugin;
                   };
 
                   xdg.dataFile = mapAttrs' (
