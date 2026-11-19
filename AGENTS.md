@@ -79,8 +79,10 @@ shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-
   scripts that the text-only shared `skills` pool would lose. `package.nix` removes each plugin's uvx `aws-mcp`
   entry and points its hooks at a store Python.
 - `lib/python.nix` is Python 3 with the MCP Python SDK 2.x from pinned wheels, used by
-  `kwin-mcp` and `basic-memory-mcp`; `basic-memory-mcp` adds the FastMCP release it pins on top.
-  `lib/python-mcp1.nix` pins the SDK back to 1.x for `aws-mcp`, `mcp-server`, `opencart-mcp`, `plesk-mcp`
+  `kwin-mcp`, `basic-memory-mcp` and `aws-mcp`; `basic-memory-mcp` adds the FastMCP release it pins on top.
+  `aws-mcp` bumps nixpkgs' FastMCP to 4.x and the deps whose floors nixpkgs trails, each only while
+  nixpkgs is older, and `check-deps.py` fails its build on any unmet requirement in the closure.
+  `lib/python-mcp1.nix` pins the SDK back to 1.x for `mcp-server`, `opencart-mcp`, `plesk-mcp`
   and `signal-mcp`. nixpkgs ships SDK 2.x, which marks its FastMCP 3.x broken.
   `lib/python-bin.nix` runs an entry point through `python.withPackages`, since kwin-mcp
   re-runs `sys.executable -m kwin_mcp.*` and needs its packages in the child.
