@@ -235,7 +235,7 @@ test("failed hooks leave the message alone and every matching entry is tried", a
   assert.deepEqual(seen, ["a", "b"]);
 });
 
-test("does not run in child subagents (PI_RLM_DEPTH set)", async () => {
+test("runs in child subagents (PI_RLM_DEPTH set)", async () => {
   process.env.PI_RLM_DEPTH = "1";
   try {
     let runs = 0;
@@ -243,8 +243,8 @@ test("does not run in child subagents (PI_RLM_DEPTH set)", async () => {
       runs += 1;
       return true;
     });
-    assert.equal(await handlers.messageEnd({ message: failed("429") }, ctx), undefined);
-    assert.equal(runs, 0);
+    assert.ok(await handlers.messageEnd({ message: failed("429") }, ctx));
+    assert.equal(runs, 1);
   } finally {
     delete process.env.PI_RLM_DEPTH;
   }

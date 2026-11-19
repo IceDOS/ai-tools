@@ -1,6 +1,6 @@
 --- package/src/child.ts	1985-10-26 10:15:00.000000000 +0200
 +++ package/src/child.ts	2026-11-11 04:50:24.576015589 +0200
-@@ -56,6 +56,35 @@
+@@ -56,6 +56,36 @@
  	signal?: AbortSignal;
  }
  
@@ -10,6 +10,7 @@
 +	"alimit",
 +	"llamacpp-lifecycle",
 +	"view-image",
++	"rate-limit-hook",
 +];
 +
 +export function coreChildExtensions(): string[] {

@@ -605,6 +605,7 @@
               "alimit"
               "llamacpp-lifecycle"
               "view-image"
+              "rate-limit-hook"
             ]
           ) extensionPaths;
 

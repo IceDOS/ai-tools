@@ -144,7 +144,6 @@ function createHandlers(hooks: Entry[], run: Run = runHook, maxRetries = MAX_RET
   const state: State = { timeouts: 0, retries: 0 };
   return {
     async messageEnd(event: { message: Message }, ctx: Ctx): Promise<{ message: Message } | undefined> {
-      if (process.env.PI_RLM_DEPTH) return undefined;
       const message = event.message;
       const kind = classify(message, state);
       if (!kind || (maxRetries > 0 && state.retries >= maxRetries)) return undefined;
@@ -184,7 +183,6 @@ function createHandlers(hooks: Entry[], run: Run = runHook, maxRetries = MAX_RET
 export const lib = { classify, entriesFor, payload, runHook, createHandlers };
 
 export default function rateLimitHook(pi: ExtensionAPI) {
-  if (process.env.PI_RLM_DEPTH) return;
   const handlers = createHandlers(HOOKS);
   pi.on("message_end", (event, ctx) => handlers.messageEnd(event as any, ctx as any) as any);
   pi.on("agent_settled", () => handlers.settled());
