@@ -1,66 +1,29 @@
-import { existsSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const STATE = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/pi-vpn-rotate.json`;
-const CACHE_TTL_MS = 5000;
-const NMCLI = existsSync("/run/current-system/sw/bin/nmcli") ? "/run/current-system/sw/bin/nmcli" : "nmcli";
-let cachedServer: string | undefined;
-let lastServerCheck = 0;
+const statePath = (): string => `${process.env.XDG_RUNTIME_DIR || "/tmp"}/pi-vpn-rotate.json`;
 
-function isTunnelUp(): boolean {
-  return existsSync("/sys/class/net/proton0");
-}
+// A flagged host IP while direct means the next call will likely be rate-limited.
+const hostIpFlagged = (s: any): boolean =>
+  typeof s.hostIpFlaggedUntil === "number" && s.hostIpFlaggedUntil > Date.now() / 1000;
 
-function currentTunnelServer(): string | undefined {
-  const now = Date.now();
-  if (now - lastServerCheck < CACHE_TTL_MS) {
-    return cachedServer;
-  }
-  lastServerCheck = now;
+// The state file is the only source; nmcli would report the host tunnel, not this one.
+export function rowText(): string | undefined {
+  let s: any;
   try {
-    const out = execFileSync(NMCLI, ["-t", "-f", "NAME,DEVICE", "connection", "show", "--active"], {
-      encoding: "utf8",
-      timeout: 500,
-    });
-    for (const line of out.split("\n")) {
-      const [name, dev] = line.split(":");
-      if (dev === "proton0") {
-        const match = name.match(/ProtonVPN\s+(\S+)/i);
-        cachedServer = match ? match[1] : name;
-        return cachedServer;
-      }
-    }
-  } catch {}
-  cachedServer = undefined;
-  return undefined;
-}
-
-function rowText(): string | undefined {
-  if (!isTunnelUp()) {
-    cachedServer = undefined;
-    lastServerCheck = 0;
+    s = JSON.parse(readFileSync(statePath(), "utf8"));
+  } catch {
     return undefined;
   }
-  let s: any = null;
-  try {
-    s = JSON.parse(readFileSync(STATE, "utf8"));
-  } catch {}
-  if (s?.at && s.at > lastServerCheck) {
-    lastServerCheck = 0;
+  if (!s || typeof s !== "object") return undefined;
+  if (s.rotating) return "vpn rotating…";
+  if (s.allRateLimited) return `vpn all rate-limited${s.refreshIn ? ` (refresh in ${s.refreshIn}s)` : ""}`;
+  if (s.mode === "tunnel") {
+    const where = [s.server, s.country].filter((part) => typeof part === "string" && part !== "").join(" ");
+    const ip = typeof s.egressIp === "string" && s.egressIp !== "" ? ` ${s.egressIp}` : "";
+    return `vpn tunnel${where ? ` ${where}` : ""}${ip}`;
   }
-  if (s?.allRateLimited) {
-    return `vpn all rate-limited${s.refreshIn ? ` (refresh in ${s.refreshIn}s)` : ""}`;
-  }
-  const active = currentTunnelServer();
-  const stateServer = s?.server || s?.country;
-  if (active && stateServer && active !== stateServer) {
-    return `vpn ${active}`;
-  }
-  if (stateServer) {
-    return `vpn ${stateServer}${s.location ? ` (${s.location})` : ""}${s.egressIp ? ` ${s.egressIp}` : ""}`;
-  }
-  return active ? `vpn ${active}` : "vpn connected";
+  return hostIpFlagged(s) ? "vpn direct (host ip flagged)" : "vpn direct";
 }
 
 function refresh(ctx: any) {

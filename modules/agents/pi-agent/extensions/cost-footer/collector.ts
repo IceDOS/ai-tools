@@ -109,12 +109,25 @@ try {
   // no prior state: count everything in the window until a change is observed
 }
 
+// Rotation moves only the private tunnel, so ipify (host route) would never change.
+const tunnelIp = (): string | null => {
+  try {
+    const s = JSON.parse(
+      readFileSync(`${process.env.XDG_RUNTIME_DIR || "/tmp"}/pi-vpn-rotate.json`, "utf8"),
+    );
+    return s?.mode === "tunnel" && typeof s.egressIp === "string" && s.egressIp ? s.egressIp : null;
+  } catch {
+    return null;
+  }
+};
+
 const fetchIp = async (): Promise<void> => {
   try {
-    const res = await fetch("https://api.ipify.org?format=json", {
-      signal: AbortSignal.timeout(5000),
-    });
-    const ip = ((await res.json()) as any)?.ip;
+    const ip =
+      tunnelIp() ??
+      ((await (
+        await fetch("https://api.ipify.org?format=json", { signal: AbortSignal.timeout(5000) })
+      ).json()) as any)?.ip;
     if (typeof ip !== "string" || ip === freeIp) return;
     if (freeIp == null) {
       freeIp = ip; // first observation: adopt without marking a change

@@ -117,6 +117,18 @@
               source = ./config.toml;
               default = e.vpn-rotate.maxRetries;
             } 0 100;
+
+            proxyPort = mkIntBetweenOption {
+              path = "icedos.ai-tools.pi-agent.extensions.vpn-rotate.proxyPort";
+              source = ./config.toml;
+              default = e.vpn-rotate.proxyPort;
+            } 1 65535;
+
+            directRetrySeconds = mkIntBetweenOption {
+              path = "icedos.ai-tools.pi-agent.extensions.vpn-rotate.directRetrySeconds";
+              source = ./config.toml;
+              default = e.vpn-rotate.directRetrySeconds;
+            } 60 86400;
           };
 
           ghost-text = {
@@ -217,7 +229,7 @@
           rules =
             config.icedos.ai-tools.rules
             // lib.optionalAttrs vpn.enable {
-              vpn-rotate = "When a provider rate-limits a request, the agent may rotate the ProtonVPN server and retry on its own. Do not run protonvpn connect or disconnect yourself.";
+              vpn-rotate = "When a listed provider rate-limits a request, a background service retries it through a private userspace tunnel of its own and may change servers inside that tunnel. Do not run protonvpn connect or disconnect yourself: the host network must stay as it is.";
             }
             // cfg.rules;
           # The bundled review drives rlm() children, so it needs pi-rlm.
@@ -405,13 +417,19 @@
 
           vpnServiceScript = pkgs.writers.writePython3Bin "pi-vpn-rotate-service-unwrapped" {
             flakeIgnore = [ "E501" ];
+            libraries = [
+              pkgs.python3Packages.proton-vpn-api-core
+              pkgs.python3Packages.proton-keyring-linux
+            ];
           } (builtins.readFile ./lib/pi_vpn_service.py);
 
           vpnService =
             pkgs.runCommand "pi-vpn-rotate-service" { nativeBuildInputs = [ pkgs.makeWrapper ]; }
               ''
                 makeWrapper ${vpnServiceScript}/bin/pi-vpn-rotate-service-unwrapped $out/bin/pi-vpn-rotate-service \
-                  --set PI_VPN_ROTATE_PROTONVPN ${pkgs.proton-vpn-cli}/bin/protonvpn \
+                  --set PI_VPN_ROTATE_WIREPROXY ${pkgs.wireproxy}/bin/wireproxy \
+                  --set PI_VPN_ROTATE_PROXY_PORT ${toString vpn.proxyPort} \
+                  --set PI_VPN_ROTATE_DIRECT_TTL_S ${toString vpn.directRetrySeconds} \
                   --set PI_VPN_ROTATE_COOLDOWN_S ${toString vpn.cooldownSeconds} \
                   --set PI_VPN_ROTATE_MAX_PER_HOUR ${toString vpn.maxPerHour} \
                   --set PI_VPN_ROTATE_COUNTRIES ${lib.escapeShellArg (lib.concatStringsSep "," vpn.countries)} \

@@ -107,13 +107,15 @@ def print_status(resp):
         print(f"Error querying VPN status: {resp.get('reason')}", file=sys.stderr)
         return
     connected = resp.get("connected")
+    ip = resp.get("egressIp") or ""
+    ip_str = f" [IP: {ip}]" if ip else ""
     if connected:
         server = resp.get("server") or "unknown"
         country = resp.get("country") or ""
         location = resp.get("location") or ""
-        ip = resp.get("egressIp") or ""
-        ip_str = f" [IP: {ip}]" if ip else ""
-        print(f"VPN Status: Connected to {server} ({country}, {location}){ip_str}")
+        print(f"VPN Status: Tunnelled via {server} ({country}, {location}){ip_str}")
+    elif resp.get("mode") == "direct":
+        print(f"VPN Status: Direct (host network){ip_str}")
     else:
         print("VPN Status: Disconnected")
     if resp.get("allRateLimited"):

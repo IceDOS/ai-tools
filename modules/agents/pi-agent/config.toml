@@ -80,12 +80,12 @@ enable = false
 percent = 30
 
 [icedos.ai-tools.pi-agent.extensions.vpn-rotate]
-# Rotates the ProtonVPN server and retries when a listed provider rate-limits, and shows the
-# server in a status row. Installs proton-vpn-cli; needs a signed-in Proton account and an active tunnel.
+# Retries a rate-limited provider through a private userspace tunnel and shows it in a status row.
+# Needs a `protonvpn signin` account; the host network is never touched, and only opencode-free uses the tunnel.
 enable = false
 # Providers whose limit follows the egress IP; an account-keyed quota survives a rotation.
 providers = ["opencode-free"]
-# Country codes to rotate through; empty uses every country.
+# Country codes to rotate through, spelled Proton's way ("UK", not "GB"); empty uses every country.
 countries = []
 # Country codes never to rotate to; applied after countries.
 excludedCountries = []
@@ -95,6 +95,10 @@ cooldownSeconds = 0
 maxPerHour = 0
 # Retries per prompt for rate-limit hooks while vpn-rotate is on; 0 means no limit.
 maxRetries = 0
+# Port of the tunnel's local HTTP proxy, which only opencode-free's requests go through.
+proxyPort = 25345
+# How long a tunnel stays up before traffic goes direct again, in seconds.
+directRetrySeconds = 3600
 
 [icedos.ai-tools.pi-agent.extensions.ghost-text]
 # pi-ghost-text-x: inline prompt suggestions; adds /suggest and /suggest-model.

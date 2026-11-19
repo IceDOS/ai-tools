@@ -140,7 +140,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   everything else pi wrote. `auth.json` is never written; sign in with `/login`.
   Extensions are store paths listed in the managed `settings.json` `extensions` key, in order:
   `extensions.builtin` (pi's examples, by name), the shipped cost-footer (behind `meters.cost`), context-cap
-  (behind `context-window-cap.enable`), rate-limit-hook (when `hooks.rateLimit` or `vpn-rotate` is set), opencode-free (behind `extensions.opencodeFree`), view-image (behind `extensions.viewImage`), vpn-row (behind `vpn-rotate.enable`, which also adds a `hooks.rateLimit` entry and installs `proton-vpn-cli`) and terminal-title (behind `terminal-title.enable`), then `extensions.inline` by name. terminal-title owns the terminal title, so `patches/pi-terminal-title-noop.mjs` blanks pi's own `updateTerminalTitle` in the package (there is no setting for it) and the extension writes only on change.
+  (behind `context-window-cap.enable`), rate-limit-hook (when `hooks.rateLimit` or `vpn-rotate` is set), opencode-free (behind `extensions.opencodeFree`), view-image (behind `extensions.viewImage`), vpn-row (behind `vpn-rotate.enable`, which also adds a `hooks.rateLimit` entry and installs `proton-vpn-cli` for `protonvpn signin` only) and terminal-title (behind `terminal-title.enable`), then `extensions.inline` by name. terminal-title owns the terminal title, so `patches/pi-terminal-title-noop.mjs` blanks pi's own `updateTerminalTitle` in the package (there is no setting for it) and the extension writes only on change.
   The shipped ones are copied into one `pi-agent-extensions` store directory and those inner paths are what
   `settings.json` lists: they import each other by relative path, so a per-file store path would break them.
   `lib/extensions.nix` holds the `bundleScript`/`bundlePaths` helpers that build and address the directory; an
@@ -188,11 +188,16 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   prompt, and on exit 0 `rate-limit-hook.ts` rewrites the error so pi's own retry fires.
   When `vpn-rotate.enable` is true, rotation is managed by a systemd user daemon (`pi-vpn-rotate-service`)
   over a Unix socket, persisting rate-limited servers and countries across reboots in
-  `$XDG_STATE_HOME/pi-vpn-rotate/state.json`. `pi-vpn-rotate` acts as the socket client, exposing
+  `$XDG_STATE_HOME/pi-vpn-rotate/state.json`. It never touches the host network: once the host IP is
+  rate-limited it starts a private `wireproxy` tunnel (HTTP proxy on `127.0.0.1:proxyPort`), rotates
+  Proton servers inside it, and is direct again after `directRetrySeconds`. Only opencode-free's bun child
+  rides it, from `mode`/`proxy` in `$XDG_RUNTIME_DIR/pi-vpn-rotate.json`; the key comes from the CLI
+  session in the keyring (`proton-keyring-linux`). `pi-vpn-rotate` acts as the socket client, exposing
   `pi-vpn-rotate status` to view live connection state and rate limits, and `pi-vpn-rotate clear`
   to reset rate-limit tracking. Its opencode probe imports the bundled `free-models.ts` (`PI_OPENCODE_FREE_MODULE`)
-  for the URL, user-agent and, when the request names no free model, the first model in the cached catalog; it skips
-  the probe when neither is there. `vpn-rotate.maxRetries` sets the retries per prompt for rate-limit hooks.
+  for the URL, user-agent and cached models, probes with the request's opencode-free model and only falls back to the
+  catalog's first model when the request names no free model, and skips the probe when it has no module or model.
+  `vpn-rotate.maxRetries` sets the retries per prompt for rate-limit hooks.
   `cooldownSeconds`, `maxPerHour` and `maxRetries` treat 0 as no limit, and `maxRetries` defaults to 0.
   `skills.codeReview` ships `skills/code-review` when pi-rlm is on, and `skills.opencodeFreeReview` adds
   `skills/opencode-free-review` when code-review and opencode-free are on too. `meters.speed` adds the tok/s readout to the cost

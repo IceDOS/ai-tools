@@ -9,6 +9,7 @@ import opencodeZenBun, {
   buildHarnessPrompt,
   ensureShaped,
   bunFetch,
+  tunnelProxyEnv,
 } from "../extensions/opencode-free.ts";
 import {
   FREE_MODEL_POOLS,
@@ -119,6 +120,20 @@ function testToolShaping() {
   assert.ok(bodyWithoutRead.messages[0].content.includes("Notice: The 'read' tool is an internal placeholder and is unavailable. Do not call 'read'."));
 }
 
+function testTunnelProxyEnv() {
+  const tunnel = { HTTPS_PROXY: "http://127.0.0.1:25345", HTTP_PROXY: "http://127.0.0.1:25345" };
+  assert.deepStrictEqual(tunnelProxyEnv({ mode: "tunnel", proxy: "http://127.0.0.1:25345" }), tunnel);
+  // Direct mode is the host IP, so a proxy left in the file by an earlier tunnel is ignored.
+  assert.deepStrictEqual(tunnelProxyEnv({ mode: "direct", proxy: "http://127.0.0.1:25345" }), {});
+  assert.deepStrictEqual(tunnelProxyEnv({ mode: "tunnel", proxy: null }), {});
+  assert.deepStrictEqual(tunnelProxyEnv({ mode: "tunnel" }), {});
+  assert.deepStrictEqual(tunnelProxyEnv({ mode: "tunnel", proxy: "" }), {});
+  // An older state file, or none at all, keeps the child on the host network.
+  assert.deepStrictEqual(tunnelProxyEnv({ server: "nl-1", egressIp: "1.2.3.4" }), {});
+  assert.deepStrictEqual(tunnelProxyEnv(null), {});
+  assert.deepStrictEqual(tunnelProxyEnv(undefined), {});
+}
+
 async function testBunFetchSuite() {
   const tmpDir = fs.mkdtempSync(path.join("/tmp", "fake-bun-test-"));
   const fakeBunPath = path.join(tmpDir, "fake-bun.js");
@@ -148,13 +163,33 @@ if (mode === "multibyte_split") {
 } else if (mode === "null_metadata") {
   process.stdout.write("orphan output");
   process.exit(0);
+} else if (mode === "dump_env") {
+  const seen = {};
+  for (const key of ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"]) seen[key] = process.env[key] ?? null;
+  fs.writeFileSync(process.env.FAKE_BUN_ENV_OUT, JSON.stringify(seen));
+  try {
+    fs.writeSync(3, JSON.stringify({ status: 200, headers: {} }));
+  } catch {}
+  process.stdout.write('data: {"id":"1","choices":[{"index":0,"delta":{"content":"ok"}}]}' + String.fromCharCode(10));
+  setTimeout(() => process.exit(0), 10);
 }
 `;
   fs.writeFileSync(fakeBunPath, scriptContent);
   fs.chmodSync(fakeBunPath, 0o755);
 
+  const envOut = path.join(tmpDir, "child-env.json");
+  const vpnStateFile = path.join(tmpDir, "pi-vpn-rotate.json");
+  const writeVpnState = (state: unknown) => fs.writeFileSync(vpnStateFile, JSON.stringify(state));
+
   const prevEnv = process.env.PI_OPENCODE_FREE_BUN;
+  const prevRuntime = process.env.XDG_RUNTIME_DIR;
+  const prevProxy = { HTTPS_PROXY: process.env.HTTPS_PROXY, HTTP_PROXY: process.env.HTTP_PROXY, ALL_PROXY: process.env.ALL_PROXY };
   process.env.PI_OPENCODE_FREE_BUN = fakeBunPath;
+  process.env.XDG_RUNTIME_DIR = tmpDir;
+  process.env.FAKE_BUN_ENV_OUT = envOut;
+  delete process.env.HTTPS_PROXY;
+  delete process.env.HTTP_PROXY;
+  delete process.env.ALL_PROXY;
 
   try {
     // 1. Multibyte character split across two stdout chunks
@@ -187,6 +222,23 @@ if (mode === "multibyte_split") {
     }
     assert.ok(metaErr, "should reject on exit 0 without metadata");
     assert.ok(metaErr.message.includes("bun exited 0 before response"), "error message should specify bun exited 0 before response");
+
+    // 4. The only provider that rides the tunnel: the child's env follows the state file.
+    process.env.FAKE_BUN_MODE = "dump_env";
+    const childEnv = async () => {
+      await bunFetch("https://opencode.ai/inference/openai/v1/chat/completions", "POST", {}, "{}", false, "big-pickle");
+      return JSON.parse(fs.readFileSync(envOut, "utf8"));
+    };
+    const proxy = "http://127.0.0.1:25345";
+    writeVpnState({ mode: "tunnel", proxy });
+    assert.deepStrictEqual(await childEnv(), { HTTPS_PROXY: proxy, HTTP_PROXY: proxy, ALL_PROXY: null });
+    // Direct mode without rate limits must not carry a stale proxy.
+    writeVpnState({ mode: "direct", proxy });
+    assert.deepStrictEqual(await childEnv(), { HTTPS_PROXY: null, HTTP_PROXY: null, ALL_PROXY: null });
+    writeVpnState({ mode: "tunnel", proxy: null });
+    assert.deepStrictEqual(await childEnv(), { HTTPS_PROXY: null, HTTP_PROXY: null, ALL_PROXY: null });
+    fs.rmSync(vpnStateFile, { force: true });
+    assert.deepStrictEqual(await childEnv(), { HTTPS_PROXY: null, HTTP_PROXY: null, ALL_PROXY: null });
   } finally {
     if (prevEnv !== undefined) {
       process.env.PI_OPENCODE_FREE_BUN = prevEnv;
@@ -194,6 +246,13 @@ if (mode === "multibyte_split") {
       delete process.env.PI_OPENCODE_FREE_BUN;
     }
     delete process.env.FAKE_BUN_MODE;
+    delete process.env.FAKE_BUN_ENV_OUT;
+    if (prevRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = prevRuntime;
+    for (const [key, value] of Object.entries(prevProxy)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
@@ -649,6 +708,7 @@ async function runAll() {
   testPromptHygiene();
   testToolShaping();
   testThinkingLevelMap();
+  testTunnelProxyEnv();
   testParseServedModels();
   testPoolInvariants();
   testCatalogCache();

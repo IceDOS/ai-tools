@@ -364,6 +364,7 @@ export function bunFetch(
 
       child = spawn(bun, ["-e", BRIDGE], {
         stdio: ["pipe", "pipe", "pipe", "pipe"],
+        env: { ...process.env, ...readTunnelProxyEnv() },
       });
 
       let stderr = "";
@@ -538,13 +539,13 @@ function descendingId(timestamp = Date.now()): string {
   return "ses_" + time + Array.from(bytes, (byte) => ID_CHARS[byte % 62]).join("");
 }
 
-const STATE = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/pi-vpn-rotate.json`;
+const statePath = (): string => `${process.env.XDG_RUNTIME_DIR || "/tmp"}/pi-vpn-rotate.json`;
 let lastKnownRotationEpoch = 0;
 
 function checkGlobalRotationEpoch(): boolean {
   try {
-    if (fs.existsSync(STATE)) {
-      const s = JSON.parse(fs.readFileSync(STATE, "utf8"));
+    if (fs.existsSync(statePath())) {
+      const s = JSON.parse(fs.readFileSync(statePath(), "utf8"));
       // rotatedAt only moves when a rotation finishes; `at` moves on every save (debounce, flags).
       if (s?.rotatedAt > lastKnownRotationEpoch) {
         lastKnownRotationEpoch = s.rotatedAt;
@@ -553,6 +554,20 @@ function checkGlobalRotationEpoch(): boolean {
     }
   } catch {}
   return false;
+}
+
+// Only the service's private tunnel gets a proxy; direct mode is the host IP as-is.
+export function tunnelProxyEnv(state: any): Record<string, string> {
+  if (state?.mode !== "tunnel" || typeof state.proxy !== "string" || state.proxy === "") return {};
+  return { HTTPS_PROXY: state.proxy, HTTP_PROXY: state.proxy };
+}
+
+function readTunnelProxyEnv(): Record<string, string> {
+  try {
+    return tunnelProxyEnv(JSON.parse(fs.readFileSync(statePath(), "utf8")));
+  } catch {
+    return {};
+  }
 }
 
 export function rotateZenSessions(): void {
@@ -565,8 +580,8 @@ async function waitForRotation(signal?: AbortSignal): Promise<void> {
   while (Date.now() - start < 20000) {
     if (signal?.aborted) return;
     try {
-      if (fs.existsSync(STATE)) {
-        const s = JSON.parse(fs.readFileSync(STATE, "utf8"));
+      if (fs.existsSync(statePath())) {
+        const s = JSON.parse(fs.readFileSync(statePath(), "utf8"));
         // Stale flag: a service killed mid-rotation leaves rotating:true (tmpfs) until logout.
         if (!s?.rotating || Date.now() - s.at > 120000) break;
       } else {
