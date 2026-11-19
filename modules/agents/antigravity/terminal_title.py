@@ -4,6 +4,7 @@ agy's own `title` hook only reruns on state changes, so it cannot animate. The s
 every state change instead: it saves the state and starts a detached ticker, which draws the glyph,
 animates it while the agent works, follows the conversation title, and clears it once agy exits.
 """
+from datetime import datetime
 import fcntl
 import json
 import os
@@ -23,6 +24,29 @@ FALLBACK = "Antigravity"
 
 SUMMARIES = Path.home() / ".gemini/antigravity-cli/conversation_summaries.db"
 STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/antigravity-title-{os.getuid()}") / "antigravity-title"
+
+
+def format_duration(seconds):
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    if h > 0:
+        return f"{h}h {m}m" if m > 0 else f"{h}h"
+    return f"{m}m {s}s" if s > 0 else f"{m}m"
+
+
+def format_time(dt=None):
+    if dt is None:
+        dt = datetime.now()
+    hour = dt.hour % 12 or 12
+    return f"{hour}:{dt.minute:02d} {'PM' if dt.hour >= 12 else 'AM'}"
+
+
+def compose_banner(elapsed, dt=None, glyph=IDLE_GLYPH):
+    return f"{glyph} Worked for {format_duration(elapsed)} · done {format_time(dt)}"
 
 
 def proc_stat(pid):
@@ -108,8 +132,10 @@ def load(tty):
 def save(tty, state):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     path = state_file(tty, ".json")
+    merged = load(tty)
+    merged.update(state)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(state))
+    tmp.write_text(json.dumps(merged))
     os.replace(tmp, path)
 
 
@@ -157,18 +183,34 @@ def tick(tty):
     os.close(fd)
 
 
-def update(payload):
-    """Save the state a status line payload describes and make sure a ticker draws it."""
+def update(payload, start_ticker=True):
+    """Save state and turn timer, start ticker if requested, return current banner."""
     agy = find_agy()
     if agy is None or not (tty := tty_path(agy)):
-        return
+        return None
+    cur = load(tty)
+    working = payload.get("agent_state") == "working"
+    was_working = bool(cur.get("working"))
+    turn_start = cur.get("turn_start")
+    banner = cur.get("banner")
+
+    if working and not was_working:
+        turn_start = time.time()
+        banner = None
+    elif not working and was_working and turn_start is not None:
+        elapsed = time.time() - turn_start
+        banner = compose_banner(elapsed)
+        turn_start = None
+
     save(tty, {
         "agy": agy,
         "conversation": payload.get("conversation_id") or None,
         "name": payload.get("conversation_title") or None,
-        "working": payload.get("agent_state") == "working",
+        "working": working,
+        "turn_start": turn_start,
+        "banner": banner,
     })
-    if (lock := ticker_lock(tty)) is not None:
+    if start_ticker and (lock := ticker_lock(tty)) is not None:
         os.close(lock)  # hand the lock to the ticker
         # no inherited fds: agy reads the status line until its stdout closes
         subprocess.Popen(
@@ -176,6 +218,7 @@ def update(payload):
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, start_new_session=True,
         )
+    return banner
 
 
 if __name__ == "__main__":

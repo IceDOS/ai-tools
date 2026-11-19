@@ -69,6 +69,7 @@ builtin = ["todo", "git-checkpoint", "confirm-destructive", "status-line"]
 opencodeFree = false
 # view_image tool: shows the model a local image in every mode, including RLM mode and rlm() children, which lack read.
 viewImage = true
+turnTimer = true
 
 # name = TypeScript source, loaded after the shipped extensions. Modules add theirs here.
 inline = {}

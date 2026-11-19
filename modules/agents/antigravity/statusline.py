@@ -157,16 +157,20 @@ def main(argv):
         return fetch_quota(agy)
     payload = read_payload()
     maybe_refresh_quota(payload)
-    if "--title" in argv:
-        try:
-            import terminal_title
+    banner = None
+    try:
+        import terminal_title
 
-            terminal_title.update(payload)
-        except Exception:  # noqa: BLE001, S110 - the title must never break the bar
-            pass
-    # --no-bar keeps agy's default bar (stacked) while the call still drives the title
-    if "--no-bar" not in argv:
-        print(render(payload))
+        banner = terminal_title.update(payload, start_ticker="--title" in argv)
+    except Exception:  # noqa: BLE001, S110 - the title must never break the bar
+        pass
+    bar = render(payload) if "--no-bar" not in argv else ""
+    if banner and bar:
+        print(f"{banner}\n{bar}")
+    elif banner:
+        print(banner)
+    elif bar:
+        print(bar)
     return 0
 
 

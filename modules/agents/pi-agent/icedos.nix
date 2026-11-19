@@ -93,6 +93,7 @@
 
           opencodeFree = mkBoolOption { default = e.opencodeFree; };
           viewImage = mkBoolOption { default = e.viewImage; };
+          turnTimer = mkBoolOption { default = e.turnTimer; };
 
           vpn-rotate = {
             enable = mkBoolOption { default = e.vpn-rotate.enable; };
@@ -516,6 +517,12 @@
             ++ lib.optional ext.viewImage {
               name = "view-image.ts";
               path = ./extensions/view-image.ts;
+            }
+            ++ lib.optional ext.turnTimer {
+              name = "turn-timer.ts";
+              path = substituteTs "turn-timer.ts" ./extensions/turn-timer.ts {
+                idleGlyph = title.idleGlyph;
+              };
             }
             ++ lib.optional vpn.enable {
               name = "vpn-row.ts";

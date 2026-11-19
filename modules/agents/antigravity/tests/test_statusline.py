@@ -186,13 +186,14 @@ class TestTerminalTitle(unittest.TestCase):
     def test_update_saves_the_state_and_starts_one_ticker(self):
         self.patch("find_agy", mock.Mock(return_value=7))
         self.patch("tty_path", mock.Mock(return_value=self.tty))
+        self.patch("time.time", mock.Mock(return_value=1000.0))
         popen = self.patch("subprocess.Popen", mock.Mock())
         terminal_title.update(
             {"agent_state": "working", "conversation_id": "c1", "conversation_title": "My task"}
         )
         self.assertEqual(
             terminal_title.load(self.tty),
-            {"agy": 7, "conversation": "c1", "name": "My task", "working": True},
+            {"agy": 7, "conversation": "c1", "name": "My task", "working": True, "turn_start": 1000.0, "banner": None},
         )
         self.assertEqual(popen.call_count, 1)
         self.assertEqual(popen.call_args.args[0][2:], ["tick", self.tty])
@@ -210,6 +211,143 @@ class TestTerminalTitle(unittest.TestCase):
         terminal_title.update({"agent_state": "working"})
         popen.assert_not_called()
         self.assertFalse(self.state_dir.exists())
+
+
+class TestTurnTimer(unittest.TestCase):
+    def test_format_duration(self):
+        cases = [
+            (0, "0s"), (1, "1s"), (42, "42s"), (59, "59s"), (42.8, "42s"), (-5, "0s"),
+            (60, "1m"), (77, "1m 17s"), (119, "1m 59s"), (120, "2m"), (3599, "59m 59s"),
+            (3600, "1h"), (3720, "1h 2m"), (3725, "1h 2m"), (7200, "2h"), (7380, "2h 3m"),
+        ]
+        for val, expected in cases:
+            with self.subTest(val=val):
+                self.assertEqual(terminal_title.format_duration(val), expected)
+
+    def test_format_time(self):
+        from datetime import datetime
+
+        cases = [
+            (datetime(2026, 11, 18, 9, 49), "9:49 AM"),
+            (datetime(2026, 11, 18, 21, 49), "9:49 PM"),
+            (datetime(2026, 11, 18, 0, 0), "12:00 AM"),
+            (datetime(2026, 11, 18, 12, 0), "12:00 PM"),
+            (datetime(2026, 11, 18, 12, 5), "12:05 PM"),
+            (datetime(2026, 11, 18, 23, 59), "11:59 PM"),
+        ]
+        for dt, expected in cases:
+            with self.subTest(dt=dt):
+                self.assertEqual(terminal_title.format_time(dt), expected)
+
+    def test_compose_banner(self):
+        from datetime import datetime
+
+        at = datetime(2026, 11, 18, 21, 49)
+        self.assertEqual(terminal_title.compose_banner(77, at), f"{terminal_title.IDLE_GLYPH} Worked for 1m 17s · done 9:49 PM")
+        self.assertEqual(terminal_title.compose_banner(42, at), f"{terminal_title.IDLE_GLYPH} Worked for 42s · done 9:49 PM")
+        self.assertEqual(terminal_title.compose_banner(3720, at), f"{terminal_title.IDLE_GLYPH} Worked for 1h 2m · done 9:49 PM")
+        self.assertEqual(terminal_title.compose_banner(77, at, "★"), "★ Worked for 1m 17s · done 9:49 PM")
+
+
+class TestTurnTransitions(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.state_dir = self.dir / "state"
+        tty = self.dir / "tty"
+        tty.touch()
+        self.tty = str(tty)
+        patcher = mock.patch("terminal_title.STATE_DIR", self.state_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.patch("find_agy", 7)
+        self.patch("tty_path", self.tty)
+        self.patch("subprocess.Popen", mock.Mock())
+
+    def patch(self, name, value):
+        patcher = mock.patch(f"terminal_title.{name}", value if callable(value) else mock.Mock(return_value=value))
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def test_turn_lifecycle(self):
+        from datetime import datetime
+
+        fixed_dt = datetime(2026, 11, 18, 21, 49)
+        self.patch("format_time", "9:49 PM")
+
+        # 1. Idle -> Working
+        time_mock = self.patch("time.time", 1000.0)
+        banner = terminal_title.update({"agent_state": "working", "conversation_id": "c1"})
+        self.assertIsNone(banner)
+        state = terminal_title.load(self.tty)
+        self.assertTrue(state["working"])
+        self.assertEqual(state["turn_start"], 1000.0)
+        self.assertIsNone(state["banner"])
+
+        # 2. Mid-turn Working -> Working preserves turn_start
+        time_mock.return_value = 1030.0
+        banner = terminal_title.update({"agent_state": "working"})
+        self.assertIsNone(banner)
+        state = terminal_title.load(self.tty)
+        self.assertEqual(state["turn_start"], 1000.0)
+
+        # 3. Working -> Idle computes banner and clears turn_start
+        time_mock.return_value = 1077.0  # 77s elapsed
+        banner = terminal_title.update({"agent_state": "idle"})
+        expected = f"{terminal_title.IDLE_GLYPH} Worked for 1m 17s · done 9:49 PM"
+        self.assertEqual(banner, expected)
+        state = terminal_title.load(self.tty)
+        self.assertFalse(state["working"])
+        self.assertIsNone(state["turn_start"])
+        self.assertEqual(state["banner"], expected)
+
+        # 4. Subsequent Idle -> Idle redraw retains banner
+        time_mock.return_value = 1100.0
+        banner = terminal_title.update({"agent_state": "idle"})
+        self.assertEqual(banner, expected)
+        state = terminal_title.load(self.tty)
+        self.assertEqual(state["banner"], expected)
+
+        # 5. Next turn start drops old banner
+        time_mock.return_value = 1200.0
+        banner = terminal_title.update({"agent_state": "working"})
+        self.assertIsNone(banner)
+        state = terminal_title.load(self.tty)
+        self.assertTrue(state["working"])
+        self.assertEqual(state["turn_start"], 1200.0)
+        self.assertIsNone(state["banner"])
+
+    def test_save_merges_extra_keys(self):
+        terminal_title.save(self.tty, {"agy": 7, "custom_field": "preserved"})
+        terminal_title.save(self.tty, {"working": True})
+        loaded = terminal_title.load(self.tty)
+        self.assertEqual(loaded["custom_field"], "preserved")
+        self.assertTrue(loaded["working"])
+
+
+class TestStatuslineOutput(unittest.TestCase):
+    def test_output_combinations(self):
+        import io
+
+        def run_main(argv, banner, bar_text="BAR_OUTPUT"):
+            out = io.StringIO()
+            with mock.patch("statusline.read_payload", return_value={}), \
+                 mock.patch("statusline.maybe_refresh_quota"), \
+                 mock.patch("statusline.render", return_value=bar_text), \
+                 mock.patch("terminal_title.update", return_value=banner), \
+                 mock.patch("sys.stdout", out):
+                statusline.main(argv)
+            return out.getvalue()
+
+        # Normal: banner above bar
+        self.assertEqual(run_main([], "✻ Banner"), "✻ Banner\nBAR_OUTPUT\n")
+        # No bar: banner only
+        self.assertEqual(run_main(["--no-bar"], "✻ Banner"), "✻ Banner\n")
+        # Normal without banner: bar only
+        self.assertEqual(run_main([], None), "BAR_OUTPUT\n")
+        # No bar without banner: nothing
+        self.assertEqual(run_main(["--no-bar"], None), "")
 
 
 if __name__ == "__main__":
