@@ -39,18 +39,24 @@ function main(kind: Kind) {
     id: process.env.AGENT_RELAY_ID,
   });
   const out = (line: string) => process.stdout.write(line + "\n");
+  const injected: Message[] = [];
   const server = new McpServer({
     name: "agent-relay",
     instructions: `${INSTRUCTIONS} Your relay ID is ${rec.id}.`,
     tools: TOOLS,
     experimental: kind === "claude" ? { "claude/channel": {} } : undefined,
-    call: (name, args) => runTool(relay, rec.id, readConfig().hopLimit, name, args),
+    call: (name, args) => {
+      // Claude has seen the channel notifications once it calls a relay tool.
+      for (const m of injected.splice(0)) relay.read(m);
+      return runTool(relay, rec.id, readConfig().hopLimit, name, args);
+    },
   });
 
   const deliver = async (m: Message): Promise<boolean> => {
     const text = formatMessage(m);
     out(server.notify("notifications/claude/channel", { content: text, meta: { from: m.from.id, kind: m.from.kind, hop: String(m.hop) } }));
-    relay.markInjected(rec.id, m.hop);
+    relay.delivered(m);
+    injected.push(m);
     return true;
   };
 

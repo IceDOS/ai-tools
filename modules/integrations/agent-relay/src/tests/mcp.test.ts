@@ -17,7 +17,7 @@ test("initialize advertises tools, the channel capability and instructions", () 
 
 test("tools/list and tools/call, including errors", () => {
   const s = new McpServer({ name: "x", instructions: "", tools: TOOLS, call: (n) => { if (n === "relay_send") throw new Error("boom"); return "fine"; } });
-  assert.equal(JSON.parse(s.handle(rpc(2, "tools/list"))[0]).result.tools.length, 3);
+  assert.equal(JSON.parse(s.handle(rpc(2, "tools/list"))[0]).result.tools.length, 4);
   const ok = JSON.parse(s.handle(rpc(3, "tools/call", { name: "relay_peers", arguments: {} }))[0]).result;
   assert.deepEqual(ok, { content: [{ type: "text", text: "fine" }] });
   const bad = JSON.parse(s.handle(rpc(4, "tools/call", { name: "relay_send", arguments: {} }))[0]).result;

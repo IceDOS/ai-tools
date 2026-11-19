@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { Relay, capText, formatMessage, type Message } from "../core.ts";
-import { resolveTarget, RingBuffer, formatDuration } from "../cli.ts";
+import { resolveTarget, scriptParent, RingBuffer, formatDuration } from "../cli.ts";
 import { runHook } from "../hook.ts";
 import { peersText } from "../tools.ts";
 import { tmpRelay } from "./helpers.ts";
@@ -122,25 +122,6 @@ test("send from args and stdin, message shape, 64 KiB cut", () => {
   }
 });
 
-test("script message leaves hop/hopAt/hopReset untouched after delivery (markInjected with hop 0)", () => {
-  const { relay } = tmpRelay();
-  const a = relay.register({ kind: "claude", pid: 100, cwd: "/a", id: "aaaa1" });
-  relay.markInjected(a.id, 4);
-  const before = relay.get(a.id)!;
-  assert.equal(before.hop, 4);
-  assert.ok(before.hopAt);
-
-  relay.markInjected(a.id, 0);
-  const after0 = relay.get(a.id)!;
-  assert.equal(after0.hop, 4);
-  assert.equal(after0.hopAt, before.hopAt);
-
-  relay.markInjected(a.id, -1);
-  const afterNeg = relay.get(a.id)!;
-  assert.equal(afterNeg.hop, 4);
-  assert.equal(afterNeg.hopAt, before.hopAt);
-});
-
 test("formatMessage with and without reply, and the claude/agy hooks not calling markHuman on it", () => {
   const mNoReply: Message = {
     v: 1,
@@ -168,19 +149,20 @@ test("formatMessage with and without reply, and the claude/agy hooks not calling
   assert.equal(fmtReply, '[relay from script "asker"]\npick a or b\n(reply with relay_send to="s1234")');
 
   const { relay } = tmpRelay();
-  const claude = relay.register({ kind: "claude", pid: 200, cwd: "/c" });
-  relay.markInjected(claude.id, 3);
-  runHook("claude-prompt", JSON.stringify({ prompt: fmtNoReply }), relay, 200, {});
-  assert.equal(relay.get(claude.id)!.hopReset, undefined);
-  runHook("claude-prompt", JSON.stringify({ prompt: fmtReply }), relay, 200, {});
-  assert.equal(relay.get(claude.id)!.hopReset, undefined);
+  const claude = relay.register({ kind: "claude", pid: 200, cwd: "/c", id: "cccc2" });
+  const pi = relay.register({ kind: "pi", pid: 100, cwd: "/a", id: "aaaa1" });
+  relay.link(pi.id, claude.id);
+  const hop = () => relay.pending(claude.id).at(-1)!.hop;
 
-  const agy = relay.register({ kind: "agy", pid: 300, cwd: "/g" });
-  relay.markInjected(agy.id, 2);
-  runHook("agy-pre-invocation", JSON.stringify({ lastUserInput: fmtNoReply }), relay, 300, {});
-  assert.equal(relay.get(agy.id)!.hopReset, undefined);
-  runHook("agy-pre-invocation", JSON.stringify({ lastUserInput: fmtReply }), relay, 300, {});
-  assert.equal(relay.get(agy.id)!.hopReset, undefined);
+  relay.send(pi.id, claude.id, "one");
+  runHook("claude-prompt", JSON.stringify({ prompt: fmtNoReply }), relay, 200, {});
+  runHook("claude-prompt", JSON.stringify({ prompt: fmtReply }), relay, 200, {});
+  relay.send(pi.id, claude.id, "two");
+  assert.equal(hop(), 2);
+
+  runHook("claude-prompt", JSON.stringify({ prompt: "human prompt" }), relay, 200, {});
+  relay.send(pi.id, claude.id, "three");
+  assert.equal(hop(), 1);
 });
 
 test("ask: agent relay_send to the script ID works without a group, a third session cannot send to it, timeout exits 124, record removed afterwards", async () => {
@@ -197,7 +179,7 @@ test("ask: agent relay_send to the script ID works without a group, a third sess
   });
 
   const sent = relay.send(a.id, script.id, "approved", 10);
-  assert.deepEqual(sent, [script.id]);
+  assert.deepEqual(sent.targets, [script.id]);
   const scriptInbox = path.join(root, "inbox", script.id);
   const files = fs.readdirSync(scriptInbox).filter((f) => f.endsWith(".json"));
   assert.equal(files.length, 1);
@@ -259,6 +241,80 @@ test("ask: receives reply, prints it, and unregisters cleanly", async () => {
     assert.equal(stdout.trim(), "yes proceed");
 
     assert.equal(relay.get(scriptId), undefined);
+  } finally {
+    p.kill();
+    child.kill();
+  }
+});
+
+test("scriptParent finds the nearest registered non-script ancestor", () => {
+  const { relay } = tmpRelay();
+  const a = relay.register({ kind: "pi", pid: 100, cwd: "/a", id: "aaaa1" });
+  relay.register({ kind: "script", pid: 200, cwd: "/s", id: "ssss1" });
+  assert.equal(scriptParent(relay, 300, () => [300, 200, 100])?.id, a.id);
+  assert.equal(scriptParent(relay, 300, () => [300, 200]), undefined);
+  assert.equal(scriptParent(relay, 300, () => []), undefined);
+});
+
+test("send inside an agent speaks on its behalf and shares its budget", () => {
+  const { relay, root, alive } = tmpRelay();
+  const p = spawn("sleep", ["30"]);
+  alive.add(process.pid);
+  alive.add(p.pid!);
+  const me = relay.register({ kind: "pi", pid: process.pid, cwd: "/a", id: "aaaa1" });
+  const peer = relay.register({ kind: "claude", pid: p.pid!, cwd: "/b", id: "bbbb2" });
+  relay.link(me.id, peer.id);
+
+  try {
+    const res = runCliCmd(["send", "--to", "bbbb2", "--name", "make", "build ok"], { AGENT_RELAY_ROOT: root });
+    assert.equal(res.code, 0);
+    assert.equal(res.stdout.trim(), peer.id);
+    const [m] = relay.pending(peer.id);
+    assert.deepEqual(m.from.onBehalfOf, { id: me.id, kind: "pi" });
+    assert.equal(m.hop, 1);
+    assert.match(formatMessage(m), /^\[relay from script "make" on behalf of pi aaaa1, msg /);
+  } finally {
+    p.kill();
+  }
+});
+
+test("ask inside an agent speaks on its behalf but keeps its own reply id", async () => {
+  const { relay, root, alive } = tmpRelay();
+  alive.add(process.pid);
+  const me = relay.register({ kind: "pi", pid: process.pid, cwd: "/a", id: "aaaa1" });
+  const p = spawn("sleep", ["30"]);
+  alive.add(p.pid!);
+  const peer = relay.register({ kind: "claude", pid: p.pid!, cwd: "/b", id: "bbbb2" });
+  relay.link(me.id, peer.id);
+
+  const child = spawn(process.execPath, [cliPath, "ask", "--to", "bbbb2", "--timeout", "5", "question"], {
+    env: { ...process.env, AGENT_RELAY_ROOT: root },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  alive.add(child.pid!);
+
+  try {
+    let stdout = "";
+    child.stdout.on("data", (d) => (stdout += d.toString()));
+
+    // The script registers before it sends, so wait for the message as well as the record.
+    let scriptId = "";
+    let q: Message | undefined;
+    for (let i = 0; i < 50 && !q; i++) {
+      scriptId = relay.sessions().find((rec) => rec.kind === "script" && rec.agent?.awaiting === peer.id)?.id ?? "";
+      if (scriptId) q = relay.pending(peer.id).find((m) => m.reply && m.from.id === scriptId);
+      if (!q) await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok(scriptId, "script record should be registered");
+    assert.ok(q, "the question is queued");
+    assert.equal(q.from.id, scriptId);
+    assert.deepEqual(q.from.onBehalfOf, { id: me.id, kind: "pi" });
+    assert.match(formatMessage(q), new RegExp(`\\(reply with relay_send to="${scriptId}" in_reply_to="${q.short}"\\)$`));
+
+    relay.send(peer.id, scriptId, "yes", 10);
+    const exitCode = await new Promise<number>((resolve) => child.on("close", resolve));
+    assert.equal(exitCode, 0);
+    assert.equal(stdout.trim(), "yes");
   } finally {
     p.kill();
     child.kill();

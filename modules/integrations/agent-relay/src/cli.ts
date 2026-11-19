@@ -1,4 +1,4 @@
-import { Relay, RelayError, ancestors, describe, type Message, type Watcher } from "./core.ts";
+import { Relay, RelayError, ancestors, describe, type Message, type SessionRecord, type Watcher } from "./core.ts";
 
 const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
 const path = process.getBuiltinModule("node:path") as typeof import("node:path");
@@ -84,6 +84,15 @@ export function resolveTarget(
   const fromAncestor = relay.findByPid(ancestorsOf(pid), (s) => s.kind !== "script");
   if (fromAncestor) return fromAncestor.id;
   throw new RelayError("no target session found; specify --to or run from an agent session");
+}
+
+// A script speaks for the nearest agent that spawned it, so its sends share that agent's budget.
+export function scriptParent(
+  relay: Relay,
+  pid: number = process.pid,
+  ancestorsOf: (pid: number) => number[] = ancestors,
+): SessionRecord | undefined {
+  return relay.findByPid(ancestorsOf(pid).filter((p) => p !== pid), (s) => s.kind !== "script");
 }
 
 export function parseArgs(argv: string[]): {
@@ -178,7 +187,7 @@ export async function runCli(argv: string[], env = process.env, relay = new Rela
       const text = parsed.rest.length === 0 || (parsed.rest.length === 1 && parsed.rest[0] === "-")
         ? fs.readFileSync(0, "utf8")
         : parsed.rest.join(" ");
-      relay.sendScript(targetId, text, { name });
+      relay.sendScript(targetId, text, { name, onBehalfOf: scriptParent(relay)?.id });
       process.stdout.write(`${targetId}\n`);
       return 0;
     }
@@ -190,6 +199,7 @@ export async function runCli(argv: string[], env = process.env, relay = new Rela
         ? fs.readFileSync(0, "utf8")
         : parsed.rest.join(" ");
 
+      const behalf = scriptParent(relay)?.id;
       const scriptRec = relay.register({
         kind: "script",
         pid: process.pid,
@@ -215,7 +225,7 @@ export async function runCli(argv: string[], env = process.env, relay = new Rela
         process.exit(143);
       });
 
-      relay.sendScript(targetId, text, { fromId: scriptRec.id, name, reply: true });
+      relay.sendScript(targetId, text, { fromId: scriptRec.id, name, reply: true, onBehalfOf: behalf });
 
       return await new Promise<number>((resolve) => {
         let timer: NodeJS.Timeout | undefined;
@@ -268,6 +278,7 @@ export async function runCli(argv: string[], env = process.env, relay = new Rela
       const tailLimit = parsed.tail !== undefined ? parseInt(parsed.tail, 10) : 20;
       if (Number.isNaN(tailLimit)) throw new UsageError(`invalid --tail value: ${parsed.tail}`);
 
+      const behalf = scriptParent(relay)?.id;
       const ring = new RingBuffer(tailLimit);
       const startTime = Date.now();
 
@@ -311,7 +322,7 @@ export async function runCli(argv: string[], env = process.env, relay = new Rela
           const tail = ring.finish();
           const body = tail ? `${cmdStr} exited ${statusText} after ${duration}\n${tail}` : `${cmdStr} exited ${statusText} after ${duration}`;
           try {
-            relay.sendScript(targetId, body, { name });
+            relay.sendScript(targetId, body, { name, onBehalfOf: behalf });
           } catch (e) {
             process.stderr.write(`agent-relay: ${(e as Error).message}\n`);
           }
