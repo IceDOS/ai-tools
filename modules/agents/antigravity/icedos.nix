@@ -450,6 +450,12 @@
                       run ln -s "$CONFIG_GEMINI" "$SHARE_GEMINI/config"
                     fi
 
+                    # agy's own skills migration can leave a dangling link here, and HM's mkdir then fails
+                    SKILLS="$SHARE_GEMINI/antigravity-cli/skills"
+                    if [ -L "$SKILLS" ] && [ ! -e "$SKILLS" ]; then
+                      run rm "$SKILLS"
+                    fi
+
                     # Remove old HM store links inside moved config and skills dirs before HM checkLinkTargets
                     for d in "$CONFIG_GEMINI" "$SHARE_GEMINI/antigravity-cli/skills"; do
                       if [ -d "$d" ]; then
