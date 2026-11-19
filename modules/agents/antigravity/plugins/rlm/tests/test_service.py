@@ -27,13 +27,26 @@ def test_ipython_sets_user_prompt_and_runs(settings):
         s.shutdown()
 
 
-def test_rlm_child_and_children_line(settings):
+def test_rlm_child_and_children_table(settings):
     s = svc(settings)
     try:
         out = s.ipython("r = rlm('hello')\nr[:8]")
         assert "Out: 'echo[1]:'" in out and "[rlm children: 1" in out
         assert len(list((settings.data_dir / "children" / "conv1").glob("*.jsonl"))) == 1
-        assert "conv1" in s.children()
+        table = s.children()
+        assert "conv1: 1 total, 0 running" in table
+        assert "#1  ok" in table and "2t" in table and "15 tok" in table and '"hello"' in table
+    finally:
+        s.shutdown()
+
+
+def test_children_table_reports_failure(settings, monkeypatch):
+    monkeypatch.setenv("FAKE_AGY_MODE", "fail")
+    s = svc(settings)
+    try:
+        s.ipython("rlm('x')")
+        table = s.children()
+        assert "#1  failed" in table and "error: child exited without a result record fake agy: boom" in table
     finally:
         s.shutdown()
 

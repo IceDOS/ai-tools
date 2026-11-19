@@ -11,6 +11,8 @@ import sys
 import time
 from pathlib import Path
 
+import tool_state
+
 ALIMIT = os.environ.get("ANTIGRAVITY_ALIMIT", "alimit")
 CACHE_DIR = Path.home() / ".gemini/antigravity-cli/cache"
 QUOTA_CACHE = CACHE_DIR / "quota_cache.json"
@@ -151,20 +153,38 @@ def read_payload():
     return data if isinstance(data, dict) else {}
 
 
+def children_segment(payload, agy):
+    """`rlm 2 running` at this redraw; the bar only redraws on state changes, so it is a snapshot."""
+    data_dir = tool_state.rlm_data_dir()
+    if data_dir is None:
+        return ""
+    running = tool_state.ChildrenCounter(data_dir).count(payload.get("conversation_id"), agy)
+    return f"rlm {running} running" if running else ""
+
+
+def with_segment(bar, segment):
+    """Add segment to the bar's head line, which alimit renders first."""
+    if not segment or not bar:
+        return bar
+    head, newline, rest = bar.partition("\n")
+    return f"{head}  {segment}{newline}{rest}"
+
+
 def main(argv):
     if argv and argv[0] == "--fetch-quota":
         agy = argv[argv.index("--agy") + 1] if "--agy" in argv and len(argv) > argv.index("--agy") + 1 else None
         return fetch_quota(agy)
     payload = read_payload()
     maybe_refresh_quota(payload)
-    banner = None
+    banner = segment = None
     try:
         import terminal_title
 
         banner = terminal_title.update(payload, start_ticker="--title" in argv)
+        segment = children_segment(payload, terminal_title.find_agy())
     except Exception:  # noqa: BLE001, S110 - the title must never break the bar
         pass
-    bar = render(payload) if "--no-bar" not in argv else ""
+    bar = with_segment(render(payload), segment) if "--no-bar" not in argv else ""
     if banner and bar:
         print(f"{banner}\n{bar}")
     elif banner:

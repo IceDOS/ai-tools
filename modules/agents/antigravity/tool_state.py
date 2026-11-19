@@ -2,6 +2,7 @@
 
 agy redraws its status bar only on state changes, not during a tool call, so only the
 title's ticker can count: a PreToolUse hook records the call here and the ticker draws it.
+The rlm() children still running are counted from the child logs the plugin writes.
 """
 import json
 import os
@@ -70,3 +71,123 @@ def clear(conversation, call_id=None):
         record_path.unlink()
     except OSError:
         pass
+
+
+# The rlm plugin's data dir (icedos sets this to the dir it configures): unset means the
+# plugin is off, so no surface shows children. `children/<conversation>/<id>.jsonl` per child.
+RLM_DATA_ENV = "ANTIGRAVITY_RLM_DATA_DIR"
+# A scan lists the log dir at most this often, and reads only this much of a log's end.
+CHILD_SCAN = 1.0
+CHILD_TAIL = 1024
+
+
+def rlm_data_dir():
+    """The rlm plugin's data dir, or None while the plugin is off."""
+    value = os.environ.get(RLM_DATA_ENV)
+    return Path(value) if value else None
+
+
+def children_dir(data_dir, conversation):
+    """The dir the plugin logs one conversation's children in, or None without one."""
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", conversation or "")
+    return Path(data_dir) / "children" / name if name and data_dir else None
+
+
+def session_conversation(data_dir, agy):
+    """The conversation the rlm server logs under, from its <data_dir>/sessions/<agy>.json."""
+    if not data_dir or not agy:
+        return None
+    try:
+        record = json.loads((Path(data_dir) / "sessions" / f"{agy}.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return record.get("conversationId") if isinstance(record, dict) else None
+
+
+def pid_alive(pid):
+    """Whether that process still runs; a zombie keeps its /proc entry until it is reaped."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat[stat.rindex(")") + 2 :].split()[0] != "Z"
+
+
+def child_start(record_path):
+    """The record a child wrote when it started, or None when its log is unreadable."""
+    try:
+        with open(record_path, "rb") as log:
+            record = json.loads(log.readline())
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def child_running(record_path, pid=None):
+    """A child runs until its log ends it or the rlm server that started it is gone.
+
+    `pid` is the server's pid from the start record: a killed server or an interrupted cell
+    never writes the end record. Logs from before that field keep the record-only rule.
+    """
+    try:
+        size = Path(record_path).stat().st_size
+        with open(record_path, "rb") as log:
+            log.seek(max(0, size - CHILD_TAIL))
+            last = log.read().rstrip(b"\n").rsplit(b"\n", 1)[-1].lstrip()
+    except OSError:
+        return False
+    try:
+        ended = json.loads(last).get("type") == "rlm_child_end"
+    except (ValueError, AttributeError):
+        ended = False  # a half-written line: the child is still running
+    return not ended and (pid_alive(pid) if pid else True)
+
+
+class ChildrenCounter:
+    """The rlm() children of a conversation that still run, from their JSONL logs.
+
+    A child writes one log and never reopens it, so an ended log is remembered and skipped;
+    the rest are re-read a tail at a time, and no scan runs more often than `interval`.
+    A log whose start record names a dead server counts as ended: nothing will close it.
+    """
+
+    def __init__(self, data_dir=None, interval=CHILD_SCAN, clock=time.monotonic):
+        self.data_dir = data_dir
+        self.interval = interval
+        self.clock = clock
+        self.ended = set()
+        self.starts = {}
+        self.scans = {}
+
+    def count(self, conversation=None, agy=None):
+        """How many children of that conversation run right now (cached between scans)."""
+        if not self.data_dir:
+            return 0
+        now = self.clock()
+        if (cached := self.scans.get((conversation, agy))) and now - cached[0] < self.interval:
+            return cached[1]
+        running = self._scan(conversation, agy)
+        self.scans[(conversation, agy)] = (now, running)
+        return running
+
+    def _scan(self, conversation, agy):
+        ids = (conversation, session_conversation(self.data_dir, agy))
+        log_dir = next((d for i in ids if (d := children_dir(self.data_dir, i)) and d.is_dir()), None)
+        if log_dir is None:
+            return 0
+        try:
+            logs = [p for p in log_dir.iterdir() if p.name.endswith(".jsonl")]
+        except OSError:  # gc may prune the dir under us
+            return 0
+        running = 0
+        for path in logs:
+            if path in self.ended:
+                continue
+            if path not in self.starts:  # the start record's pid is read once per log
+                pid = (child_start(path) or {}).get("pid")
+                self.starts[path] = pid if isinstance(pid, int) else None
+            if child_running(path, self.starts[path]):
+                running += 1
+            else:
+                self.ended.add(path)
+        return running

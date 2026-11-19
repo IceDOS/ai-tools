@@ -4,7 +4,7 @@ import socket
 import threading
 from pathlib import Path
 
-from . import children, refine_run, session
+from . import child_log, children, refine_run, session
 from .config import Settings
 from .harness import global_path, load, local_path
 from .kernel_host import KernelHost
@@ -146,21 +146,7 @@ class RlmService:
         )
 
     def children(self) -> str:
-        log_dir = self._log_dir()
-        rows = []
-        for f in sorted(log_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime):
-            lines = f.read_text().splitlines()
-            start = json.loads(lines[0]) if lines else {}
-            end = json.loads(lines[-1]) if len(lines) > 1 else {}
-            state = (
-                "running"
-                if end.get("type") != "rlm_child_end"
-                else ("ok" if end.get("ok") else "failed")
-            )
-            rows.append(
-                f"{start.get('id')} parent={start.get('parent')} depth={start.get('depth')} {state} {f}"
-            )
-        return f"{log_dir}\n" + ("\n".join(rows) if rows else "no children logged")
+        return child_log.report(self._log_dir())
 
     def snapshot(self) -> None:
         if self.host is not None and self.host.running and self.host.snapshot_path is not None:

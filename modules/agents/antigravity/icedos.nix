@@ -164,6 +164,11 @@
               export ANTIGRAVITY_BIN=${agyBin}
               export ANTIGRAVITY_TITLE_IDLE_GLYPH=${lib.escapeShellArg terminal-title.idleGlyph}
               export ANTIGRAVITY_TITLE_WORKING_GLYPHS=${lib.escapeShellArg (lib.concatStringsSep " " terminal-title.workingGlyphs)}
+              ${lib.optionalString rlmCfg.enable ''
+                # The title counts the rlm() children still running from their logs here.
+                export ANTIGRAVITY_RLM_DATA_DIR="${rlmDataDir}"
+                [ -d "$ANTIGRAVITY_RLM_DATA_DIR" ] || export ANTIGRAVITY_RLM_DATA_DIR="$HOME/.local/share/icedos-rlm"
+              ''}
               exec ${pkgs.python3}/bin/python3 ${agentScripts}/statusline.py "$@"
             '';
           };

@@ -3,7 +3,7 @@
 agy's own `title` hook only reruns on state changes, so it cannot animate. The status line reruns on
 every state change instead: it saves the state and starts a detached ticker, which draws the glyph,
 animates it while the agent works, follows the conversation title, times the tool call that a
-PreToolUse hook recorded, and clears the title once agy exits.
+PreToolUse hook recorded, counts the rlm() children still running, and clears the title once agy exits.
 """
 from datetime import datetime
 import fcntl
@@ -68,6 +68,12 @@ def tool_timer(conversation, now=None):
         return ""
     elapsed = (time.time() if now is None else now) - record["start_ts"]
     return f"⏱ {short_tool(record['tool'])} {format_duration(elapsed, always_seconds=True)}"
+
+
+def children_text(counter, state):
+    """`2 rlm` while that conversation's rlm() children run, else ""."""
+    running = counter.count(state.get("conversation"), state.get("agy"))
+    return f"{running} rlm" if running else ""
 
 
 def proc_stat(pid):
@@ -199,6 +205,7 @@ def tick(tty):
         os.close(fd)
         return
     frame, text, shown, seen, refresh_at = 0, "", None, None, 0.0
+    counter = tool_state.ChildrenCounter(tool_state.rlm_data_dir())
     while True:
         state = load(tty)
         if not is_agy(state.get("agy", 0)):
@@ -209,6 +216,11 @@ def tick(tty):
             # agy can generate the conversation title mid-turn
             text, seen, refresh_at = title_text(state), state, now + TITLE_REFRESH
         timer = tool_timer(state.get("conversation"))
+        # The title is the only surface agy does not freeze during a tool call, so the
+        # children of the running cell are counted from their logs and shown here.
+        children = children_text(counter, state)
+        if children:
+            timer = f"{timer} · {children}" if timer else children
         # agy redraws its status line only on state changes and reports "idle" while a long
         # tool still runs, so a live record keeps the glyph moving and the timer counting.
         working = working or bool(timer)

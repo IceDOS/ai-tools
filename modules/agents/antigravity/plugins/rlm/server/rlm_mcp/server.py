@@ -58,7 +58,9 @@ def build_app(service: RlmService) -> FastMCP:
 
     @app.tool()
     async def rlm_children() -> str:
-        """List logged rlm() children of this conversation with parent, depth, state and log file path."""
+        """List this conversation's rlm() children as a table to print verbatim: state
+        (running, lost, ok, failed), depth, elapsed time, turns or stream steps, tokens, model, parent,
+        the last stream event while running, and a prompt preview, then each child's log file."""
         return service.children()
 
     return app
