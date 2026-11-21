@@ -8,10 +8,12 @@ const path = process.getBuiltinModule("node:path") as typeof import("node:path")
 
 function setup(limits?: Partial<Limits>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-msg-"));
+  const stateDir = path.join(root, "state");
   let t = Date.parse("2026-11-11T10:00:00Z");
   const clock = { tick: (ms = 1000) => (t += ms) };
   const relay = new Relay({
     root,
+    stateDir,
     limits,
     isAlive: (p) => p < 1000,
     now: () => new Date(t),
@@ -240,8 +242,9 @@ test("a script speaking for an agent says so and answers to the agent", () => {
 
 test("pruning a dead session marks its queued mail withheld for the senders", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-msg-"));
+  const stateDir = path.join(root, "state");
   const alive = new Set([100, 200]);
-  const relay = new Relay({ root, isAlive: (p) => alive.has(p), ancestorsOf: (p) => [p] });
+  const relay = new Relay({ root, stateDir, isAlive: (p) => alive.has(p), ancestorsOf: (p) => [p] });
   const a = relay.register({ kind: "pi", pid: 100, cwd: "/a", id: "aaaa1" });
   const b = relay.register({ kind: "claude", pid: 200, cwd: "/b", id: "bbbb2" });
   relay.link(a.id, b.id);

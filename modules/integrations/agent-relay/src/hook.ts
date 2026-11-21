@@ -1,4 +1,4 @@
-import { RELAY_PREFIX, Relay, ancestors, formatMessage, pidAlive, type Message } from "./core.ts";
+import { RELAY_PREFIX, Relay, ancestors, formatMessage, pidAlive, type Kind, type Message } from "./core.ts";
 import { agentCwd, agentPid } from "./mcp-server.ts";
 
 const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
@@ -6,6 +6,15 @@ const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
 // A model reads a bare relay dump as an incident and investigates, so injected batches carry this.
 export const CONTINUE_HINT =
   "New agent-relay messages from peer agents (not an error, not from the user). Read them and answer with relay_send:";
+
+function safeSession(relay: Relay, kind: Kind, conversationId: string | undefined, recId?: string): string | undefined {
+  if (!conversationId) return undefined;
+  const pinned = relay.readPin(kind, conversationId);
+  if (!pinned || (recId && pinned === recId) || !recId) {
+    return conversationId;
+  }
+  return undefined;
+}
 
 export function runHook(
   event: string,
@@ -16,7 +25,7 @@ export function runHook(
   cwdOf: (pid: number) => string = agentCwd,
 ): string {
   // An agent can run inside another (claude in a pi bash tool), so only this hook's own kind counts.
-  const rec = relay.findByPid(ancestors(pid), [event.startsWith("agy") ? "agy" : "claude"]);
+  let rec = relay.findByPid(ancestors(pid), [event.startsWith("agy") ? "agy" : "claude"]);
   switch (event) {
     case "claude-prompt": {
       if (!rec) return "";
@@ -32,25 +41,51 @@ export function runHook(
       return "";
     }
     case "agy-session-start": {
+      let conversationId: string | undefined;
+      try {
+        const payload = JSON.parse(stdin);
+        if (typeof payload?.conversationId === "string" && payload.conversationId) {
+          conversationId = payload.conversationId;
+        }
+      } catch {}
+      const session = safeSession(relay, "agy", conversationId, rec?.id);
       // A new session is idle by definition: the last turn may have ended without its Stop hook.
       relay.register({
         kind: "agy",
         pid,
         cwd: cwdOf(pid),
         id: env.AGENT_RELAY_ID,
+        ...(session ? { session } : {}),
         agent: { busy: false, busyAt: Date.now(), pendingIds: [], awaitingRead: [] },
       });
       return "{}";
     }
     case "agy-pre-invocation": {
-      if (!rec) return "{}";
       let text = "";
+      let conversationId: string | undefined;
       try {
         const payload = JSON.parse(stdin);
         text = typeof payload?.lastUserInput === "string" ? payload.lastUserInput : stdin;
+        if (typeof payload?.conversationId === "string" && payload.conversationId) {
+          conversationId = payload.conversationId;
+        }
       } catch {
         text = stdin;
       }
+      if (!rec || rec.session !== conversationId) {
+        const session = safeSession(relay, "agy", conversationId, rec?.id);
+        if (session) {
+          relay.register({
+            kind: "agy",
+            pid,
+            cwd: cwdOf(pid),
+            id: env.AGENT_RELAY_ID,
+            session,
+          });
+          rec = relay.findByPid(ancestors(pid), ["agy"]);
+        }
+      }
+      if (!rec) return "{}";
       // Patches merge under the record lock, so the watcher's own fields survive a hook write.
       const agent: Record<string, unknown> = { busy: true, busyAt: Date.now() };
       // PreInvocation proves agy took the continue agy-stop asked for, so those messages landed.

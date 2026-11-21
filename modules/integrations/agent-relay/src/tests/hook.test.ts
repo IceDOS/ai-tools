@@ -246,3 +246,69 @@ test("claude-prompt ignores a pi record further up the process chain", () => {
   runHook("claude-prompt", JSON.stringify({ prompt: "human" }), relay, process.pid, {});
   assert.equal(sendHop(relay, p.id, c.id), 3, "a claude hook must not reset the pi session's pairs");
 });
+
+test("agy-session-start and agy-pre-invocation pin conversationId", () => {
+  const { relay } = tmpRelay();
+  const convId = "conv-session-start-test";
+  runHook("agy-session-start", JSON.stringify({ conversationId: convId }), relay, 300, {}, () => "/c");
+  const rec = relay.findByPid([300], ["agy"]);
+  assert.ok(rec);
+  assert.equal(relay.readPin("agy", convId), rec.id);
+
+  // Running agy-pre-invocation with same conversationId keeps the pin
+  runHook("agy-pre-invocation", JSON.stringify({ conversationId: convId, lastUserInput: "test" }), relay, 300, {});
+  assert.equal(relay.readPin("agy", convId), rec.id);
+});
+
+test("hook does not clobber a different pin", () => {
+  const { relay } = tmpRelay();
+  const convId = "conv-protected-pin";
+  relay.writePin("agy", convId, "11111");
+
+  relay.register({ kind: "agy", pid: 300, cwd: "/c", id: "22222" });
+  const rec = relay.findByPid([300], ["agy"])!;
+  assert.equal(rec.id, "22222");
+
+  runHook("agy-session-start", JSON.stringify({ conversationId: convId }), relay, 300, {}, () => "/c");
+  assert.equal(relay.readPin("agy", convId), "11111");
+
+  runHook("agy-pre-invocation", JSON.stringify({ conversationId: convId, lastUserInput: "hi" }), relay, 300, {});
+  assert.equal(relay.readPin("agy", convId), "11111");
+});
+
+test("agy-pre-invocation fallback registers when no prior record existed", () => {
+  const { relay } = tmpRelay();
+  const convId = "conv-fallback-test";
+  relay.writePin("agy", convId, "55555");
+  assert.equal(relay.findByPid([300], ["agy"]), undefined);
+  runHook("agy-pre-invocation", JSON.stringify({ conversationId: convId, lastUserInput: "first prompt" }), relay, 300, {}, () => "/c");
+  const rec = relay.findByPid([300], ["agy"]);
+  assert.ok(rec);
+  assert.equal(rec.id, "55555");
+});
+
+test("agy-pre-invocation skips registration and pin write when already registered", () => {
+  const { relay } = tmpRelay();
+  const convId = "conv-skip-test";
+  runHook("agy-session-start", JSON.stringify({ conversationId: convId }), relay, 300, {}, () => "/c");
+  const rec = relay.findByPid([300], ["agy"]);
+  assert.ok(rec);
+  assert.equal(rec.session, convId);
+
+  let registerCalls = 0;
+  let pinWrites = 0;
+  const origRegister = relay.register.bind(relay);
+  const origWritePin = relay.writePin.bind(relay);
+  relay.register = (input) => {
+    registerCalls++;
+    return origRegister(input);
+  };
+  relay.writePin = (kind, key, id) => {
+    pinWrites++;
+    return origWritePin(kind, key, id);
+  };
+
+  runHook("agy-pre-invocation", JSON.stringify({ conversationId: convId, lastUserInput: "step 1" }), relay, 300, {});
+  assert.equal(registerCalls, 0, "should not call register when session already matches");
+  assert.equal(pinWrites, 0, "should not rewrite pin when session already matches");
+});

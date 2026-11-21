@@ -30,6 +30,41 @@ export function agentCwd(pid: number, readlink: (p: string) => string = (p) => f
   }
 }
 
+function defaultProcLinks(pid: number): string[] {
+  try {
+    const dir = `/proc/${pid}/fd`;
+    return fs.readdirSync(dir).map((f) => {
+      try {
+        return fs.readlinkSync(path.join(dir, f));
+      } catch {
+        return "";
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function agySessionId(pid: number, readLinks: (pid: number) => string[] = defaultProcLinks): string | undefined {
+  if (process.env.AGENT_RELAY_AGY_SESSION) return process.env.AGENT_RELAY_AGY_SESSION;
+  let targets: string[];
+  try {
+    targets = readLinks(pid);
+  } catch {
+    return undefined;
+  }
+  let dbFallback: string | undefined;
+  for (const t of targets) {
+    const lock = t.match(/\/presence\/([0-9a-fA-F-]{36})\.lock$/);
+    if (lock) return lock[1];
+    if (!dbFallback) {
+      const db = t.match(/\/conversations\/([0-9a-fA-F-]{36})\.db$/);
+      if (db) dbFallback = db[1];
+    }
+  }
+  return dbFallback;
+}
+
 function main(kind: Kind) {
   const relay = new Relay();
   const out = (line: string) => process.stdout.write(line + "\n");
@@ -73,11 +108,15 @@ function main(kind: Kind) {
   }
 
   const pid = agentPid(kind);
+  const session =
+    (kind === "claude" ? process.env.CLAUDE_CODE_SESSION_ID : kind === "agy" ? agySessionId(pid) : undefined) ||
+    undefined;
   const rec = relay.register({
     kind,
     pid,
     cwd: agentCwd(pid),
     id: process.env.AGENT_RELAY_ID,
+    session,
   });
   const injected: Message[] = [];
   const server = new McpServer({

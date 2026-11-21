@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Relay } from "../core.ts";
+import { agySessionId } from "../mcp-server.ts";
 
 const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
 const os = process.getBuiltinModule("node:os") as typeof import("node:os");
@@ -23,9 +24,9 @@ interface Server {
 }
 
 // Spawns the real stdio server, so the test sees exactly the lines Claude sees.
-function startServer(root: string, kind: "claude" | "agy" | "opencode"): Server {
+function startServer(root: string, kind: "claude" | "agy" | "opencode", extraEnv: Record<string, string> = {}): Server {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "relay-mcp-home-"));
-  const env = { ...process.env, AGENT_RELAY_ROOT: root, HOME: home, XDG_CONFIG_HOME: path.join(home, ".config") };
+  const env = { ...process.env, AGENT_RELAY_ROOT: root, HOME: home, XDG_CONFIG_HOME: path.join(home, ".config"), ...extraEnv };
   delete (env as Record<string, string | undefined>).AGENT_RELAY_ID;
   const proc = spawn(process.execPath, [serverPath, kind], { env, stdio: ["pipe", "pipe", "pipe"] });
   const queue: Line[] = [];
@@ -87,7 +88,7 @@ async function eventually<T>(read: () => T, ok: (v: T) => boolean, ms = 2000): P
     await sleep(25);
   }
 }
-const relayAt = (root: string) => new Relay({ root, isAlive: () => true, ancestorsOf: () => [] });
+const relayAt = (root: string) => new Relay({ root, stateDir: path.join(root, "state"), isAlive: () => true, ancestorsOf: () => [] });
 
 
 test("claude: one channel notification per message, ledger delivered, inbox empty, read on the next tool call", { timeout: 30_000 }, async () => {
@@ -204,6 +205,59 @@ test("opencode: resolves session per tool call via _meta sessionID or root map, 
     assert.match(callSub.result.content[0].text, /not linked to any session/);
   } finally {
     server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("agySessionId: parses presence lock and falls back to conversations db", () => {
+  const pid = 12345;
+  const id1 = agySessionId(pid, () => [
+    "/other/path/file.txt",
+    "/home/ice/.local/share/gemini/antigravity-cli/presence/2f0c248e-4d56-4f3c-8f34-69fd76ed2744.lock",
+  ]);
+  assert.equal(id1, "2f0c248e-4d56-4f3c-8f34-69fd76ed2744");
+
+  const id2 = agySessionId(pid, () => [
+    "/home/ice/.local/share/gemini/antigravity-cli/conversations/81c847e1-6473-4445-a5c4-ef085c9a44aa.db",
+  ]);
+  assert.equal(id2, "81c847e1-6473-4445-a5c4-ef085c9a44aa");
+
+  const id3 = agySessionId(pid, () => [
+    "/home/ice/.local/share/gemini/antigravity-cli/conversations/81c847e1-6473-4445-a5c4-ef085c9a44aa.db",
+    "/home/ice/.local/share/gemini/antigravity-cli/presence/2f0c248e-4d56-4f3c-8f34-69fd76ed2744.lock",
+  ]);
+  assert.equal(id3, "2f0c248e-4d56-4f3c-8f34-69fd76ed2744");
+
+  const id4 = agySessionId(pid, () => ["/random/path.log", "/etc/hosts"]);
+  assert.equal(id4, undefined);
+
+  const id5 = agySessionId(pid, () => {
+    throw new Error("ENOENT");
+  });
+  assert.equal(id5, undefined);
+});
+
+test("agy: pinned reuse via MCP server", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-mcp-"));
+  const stateDir = path.join(root, "state");
+  const sessionKey = "conv-pinned-reuse-1234";
+  const extraEnv = { AGENT_RELAY_STATE: stateDir, AGENT_RELAY_AGY_SESSION: sessionKey };
+  const s1 = startServer(root, "agy", extraEnv);
+  let id1: string;
+  try {
+    const init1 = await s1.request(1, "initialize");
+    id1 = /relay ID is ([0-9a-f]{5})/.exec(init1.result.instructions)![1];
+  } finally {
+    s1.close();
+  }
+
+  const s2 = startServer(root, "agy", extraEnv);
+  try {
+    const init2 = await s2.request(1, "initialize");
+    const id2 = /relay ID is ([0-9a-f]{5})/.exec(init2.result.instructions)![1];
+    assert.equal(id2, id1, "second server should reuse pinned id");
+  } finally {
+    s2.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

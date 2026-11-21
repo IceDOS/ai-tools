@@ -20,6 +20,7 @@ stdenvNoCC.mkDerivation {
 
   checkPhase = ''
     runHook preCheck
+    export AGENT_RELAY_STATE=$(mktemp -d)
     node --test tests/*.test.ts
     python3 tests/test_agy_pty.py
     runHook postCheck

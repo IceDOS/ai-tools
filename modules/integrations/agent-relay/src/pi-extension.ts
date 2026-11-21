@@ -171,6 +171,7 @@ export default function (
       cwd: ctx.sessionManager?.getCwd?.() ?? ctx.cwd ?? process.cwd(),
       id: process.env.AGENT_RELAY_ID,
       name: ctx.sessionManager?.getSessionName?.() || undefined,
+      session: ctx.sessionManager?.getSessionId?.() || undefined,
     });
     selfId = rec.id;
     watcher?.close();

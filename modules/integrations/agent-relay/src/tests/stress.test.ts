@@ -37,14 +37,16 @@ interface Root {
 
 function sandbox(limit?: number): Root {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-stress-"));
+  const stateDir = path.join(root, "state");
   const env = {
     AGENT_RELAY_ROOT: root,
+    AGENT_RELAY_STATE: stateDir,
     STRESS_GO: path.join(root, ".go"),
     STRESS_DONE: path.join(root, ".done"),
     STRESS_DONE2: path.join(root, ".done2"),
     ...(limit ? { STRESS_LIMIT: String(limit) } : {}),
   };
-  return { root, go: env.STRESS_GO!, done: env.STRESS_DONE!, done2: env.STRESS_DONE2!, env, relay: new Relay({ root }) };
+  return { root, go: env.STRESS_GO!, done: env.STRESS_DONE!, done2: env.STRESS_DONE2!, env, relay: new Relay({ root, stateDir }) };
 }
 
 function run(args: string[], env: Record<string, string>): { child: ChildProcess; done: Promise<Result> } {
@@ -198,7 +200,7 @@ test("a session write cannot drop a field another writer just set", () => {
     inject = undefined;
     relay.link(a.id, b.id);
   };
-  const slow = new Relay({ root, isAlive: () => (inject?.(), true), ancestorsOf: (p) => [p] });
+  const slow = new Relay({ root, stateDir: relay.stateDir, isAlive: () => (inject?.(), true), ancestorsOf: (p) => [p] });
   slow.update(a.id, { agent: { n: 1 } });
 
   const rec = relay.get(a.id)!;
@@ -232,11 +234,18 @@ test("pair counters reset to zero once the queue is drained", { timeout: 30_000 
   }
 });
 
-const groupsIn = (root: string): { id: string; members: string[] }[] =>
-  fs
-    .readdirSync(path.join(root, "groups"))
+const groupsIn = (root: string): { id: string; members: string[] }[] => {
+  const dir = fs.existsSync(path.join(root, "state", "groups"))
+    ? path.join(root, "state", "groups")
+    : fs.existsSync(path.join(root, "groups"))
+      ? path.join(root, "groups")
+      : "";
+  if (!dir) return [];
+  return fs
+    .readdirSync(dir)
     .filter((f) => f.endsWith(".json"))
-    .map((f) => JSON.parse(fs.readFileSync(path.join(root, "groups", f), "utf8")));
+    .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")));
+};
 
 // Register the driver and wait for the children, but let them do their own linking.
 async function meet(s: Root, ids: string[]): Promise<void> {

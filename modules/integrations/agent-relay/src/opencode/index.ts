@@ -28,9 +28,24 @@ export function createPlugin(
     setup: async (ctx: any) => {
       const relay = relayFactory();
       const rootsDir = path.join(relay.root, "opencode", "roots");
-      const pinsDir = path.join(relay.root, "opencode", "pins");
+      const legacyPinsDir = path.join(relay.root, "opencode", "pins");
       fs.mkdirSync(rootsDir, { recursive: true, mode: 0o700 });
-      fs.mkdirSync(pinsDir, { recursive: true, mode: 0o700 });
+
+      // Migrate legacy private pins into the core store.
+      if (fs.existsSync(legacyPinsDir)) {
+        for (const f of fs.readdirSync(legacyPinsDir)) {
+          if (!f.endsWith(".txt")) continue;
+          const sid = f.slice(0, -4);
+          try {
+            const legacyId = fs.readFileSync(path.join(legacyPinsDir, f), "utf8").trim();
+            if (ID_RE.test(legacyId) && !relay.readPin("opencode", sid)) {
+              relay.writePin("opencode", sid, legacyId);
+            }
+            fs.rmSync(path.join(legacyPinsDir, f), { force: true });
+          } catch {}
+        }
+        try { fs.rmdirSync(legacyPinsDir); } catch {}
+      }
 
       const rootSessions = new Map<string, RootEntry>();
       const rootCache = new Map<string, string>();
@@ -137,24 +152,13 @@ export function createPlugin(
           sessionDir = s?.location?.directory;
         } catch {}
 
-        const pinFile = path.join(pinsDir, `${rootSessionID}.txt`);
-        let pinnedId: string | undefined;
-        try {
-          const p = fs.readFileSync(pinFile, "utf8").trim();
-          if (ID_RE.test(p)) pinnedId = p;
-        } catch {}
-
         const rec = relay.register({
           kind: "opencode",
           pid: process.pid,
           cwd: sessionDir ?? ctx.location?.directory ?? process.cwd(),
           scope: rootSessionID,
-          id: pinnedId,
+          session: rootSessionID,
         });
-
-        if (pinnedId !== rec.id) {
-          writeAtomic(pinFile, rec.id);
-        }
 
         entry = {
           rootSessionID,
@@ -173,11 +177,12 @@ export function createPlugin(
       try {
         const list = await ctx.session.list();
         const validIds = new Set<string>(list.map((s: any) => s.id));
-        if (fs.existsSync(pinsDir)) {
-          for (const f of fs.readdirSync(pinsDir)) {
+        const opencodePinsDir = relay.pinDir("opencode");
+        if (fs.existsSync(opencodePinsDir)) {
+          for (const f of fs.readdirSync(opencodePinsDir)) {
             if (!f.endsWith(".txt")) continue;
             const sid = f.slice(0, -4);
-            if (!validIds.has(sid)) fs.rmSync(path.join(pinsDir, f), { force: true });
+            if (!validIds.has(sid)) relay.removePin("opencode", sid);
           }
         }
         if (fs.existsSync(rootsDir)) {
@@ -296,7 +301,7 @@ export function createPlugin(
                     rootSessions.delete(sid);
                   }
                   rootCache.delete(sid);
-                  fs.rmSync(path.join(pinsDir, `${sid}.txt`), { force: true });
+                  relay.removePin("opencode", sid);
                   fs.rmSync(path.join(rootsDir, `${sid}.json`), { force: true });
                   if (fs.existsSync(rootsDir)) {
                     for (const f of fs.readdirSync(rootsDir)) {

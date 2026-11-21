@@ -401,3 +401,19 @@ test("after every retry fails, a held message is the probe and a good answer reo
   assert.equal(t.sent.length, 2, "the model answered, so the next message flows at once");
   await t.fire("session_shutdown");
 });
+
+test("session_start registers with session id from sessionManager", async () => {
+  const { relay } = tmpRelay(new Set([process.pid]));
+  const f = fakePi();
+  f.ctx.sessionManager = {
+    getSessionName: () => "planner",
+    getCwd: () => "/proj",
+    getSessionId: () => "pi-session-abc",
+  };
+  ext(f.pi as any, () => relay);
+  await f.fire("session_start", {});
+  const me = relay.findByPid([process.pid])!;
+  assert.equal(me.session, "pi-session-abc");
+  assert.equal(relay.readPin("pi", "pi-session-abc"), me.id);
+  await f.fire("session_shutdown");
+});

@@ -373,7 +373,7 @@ test("session.deleted event retires session, closes watcher, cleans pin and root
   const rootRec = relay.sessions().find((s) => s.scope === "s-root-1")!;
   assert.ok(rootRec);
 
-  const pinPath = path.join(relay.root, "opencode", "pins", "s-root-1.txt");
+  const pinPath = relay.pinPath("opencode", "s-root-1");
   const rootMap = path.join(relay.root, "opencode", "roots", "s-child-1.json");
   assert.ok(fs.existsSync(pinPath));
   assert.ok(fs.existsSync(rootMap));
@@ -408,4 +408,23 @@ test("resume reuses pinned relay ID", async (t) => {
   await fake2.triggerHook("context", { sessionID: "s-root-1", system: [] });
   const rec2 = relay.sessions().find((s) => s.scope === "s-root-1")!;
   assert.equal(rec2.id, pinnedId);
+});
+
+test("opencode migration migrates legacy private pins into core store", async (t) => {
+  const { relay } = tmpRelay(new Set([process.pid]));
+  const legacyDir = path.join(relay.root, "opencode", "pins");
+  fs.mkdirSync(legacyDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(legacyDir, "s-legacy-1.txt"), "c001a\n");
+
+  const fake = fakeOpencode([{ id: "s-legacy-1", parentID: undefined }]);
+  const plugin = createPlugin(() => relay);
+  const cleanup = await plugin.setup(fake.ctx);
+  if (typeof cleanup === "function") t.after(() => cleanup());
+
+  assert.equal(fs.existsSync(path.join(legacyDir, "s-legacy-1.txt")), false);
+  assert.equal(relay.readPin("opencode", "s-legacy-1"), "c001a");
+
+  await fake.triggerHook("context", { sessionID: "s-legacy-1", system: [] });
+  const rec = relay.sessions().find((s) => s.scope === "s-legacy-1")!;
+  assert.equal(rec.id, "c001a");
 });

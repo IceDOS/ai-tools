@@ -13,6 +13,7 @@ export interface SessionRecord {
   name?: string;
   group?: string;
   started: string;
+  session?: string;
   agent?: Record<string, unknown>;
   // Nearest registered agent above this process, e.g. the pi that spawned an RLM child.
   parent?: ParentRef | null;
@@ -36,6 +37,7 @@ export interface RegisterInput {
   id?: string;
   scope?: string;
   name?: string;
+  session?: string;
   agent?: Record<string, unknown>;
 }
 
@@ -57,6 +59,7 @@ export const DEFAULT_LIMITS: Limits = {
 
 export interface RelayOptions {
   root?: string;
+  stateDir?: string;
   isAlive?: (pid: number) => boolean;
   now?: () => Date;
   ancestorsOf?: (pid: number) => number[];
@@ -70,6 +73,17 @@ export const ID_RE = /^[0-9a-f]{5}$/;
 export function defaultRoot(env: Record<string, string | undefined> = process.env): string {
   if (env.AGENT_RELAY_ROOT) return env.AGENT_RELAY_ROOT;
   return path.join(env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.() ?? 0}`, "agent-relay");
+}
+
+export function defaultStateDir(env: Record<string, string | undefined> = process.env): string {
+  if (env.AGENT_RELAY_STATE) return env.AGENT_RELAY_STATE;
+  const base = env.XDG_STATE_HOME ?? path.join(env.HOME ?? "", ".local", "state");
+  return path.join(base, "icedos", "agent-relay");
+}
+
+export function sanitizeSessionKey(key: string): string {
+  const safe = key.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return safe || "default";
 }
 
 function positive(v: unknown, fallback: number): number {
@@ -287,21 +301,193 @@ export function writeAtomic(file: string, data: unknown): void {
 
 export class Relay {
   readonly root: string;
+  readonly stateDir: string;
   readonly limits: Limits;
   protected isAlive: (pid: number) => boolean;
   protected now: () => Date;
   protected ancestorsOf: (pid: number) => number[];
   protected groupDepth = 0;
+  protected lastPinPrune = 0;
 
   constructor(o: RelayOptions = {}) {
     this.root = o.root ?? defaultRoot();
+    this.stateDir = o.stateDir ?? defaultStateDir();
     this.limits = { ...readConfig(), ...o.limits };
     this.isAlive = o.isAlive ?? pidAlive;
     this.now = o.now ?? (() => new Date());
     this.ancestorsOf = o.ancestorsOf ?? ancestors;
-    for (const d of ["sessions", "groups", "inbox", "outbox", "pairs", "shorts"]) {
+    for (const d of ["sessions", "inbox", "outbox", "pairs", "shorts"]) {
       fs.mkdirSync(path.join(this.root, d), { recursive: true, mode: 0o700 });
     }
+    const stateGroups = path.join(this.stateDir, "groups");
+    fs.mkdirSync(stateGroups, { recursive: true, mode: 0o700 });
+    const legacyGroups = path.join(this.root, "groups");
+    if (fs.existsSync(legacyGroups) && legacyGroups !== stateGroups) {
+      try {
+        for (const f of fs.readdirSync(legacyGroups)) {
+          if (!f.endsWith(".json")) continue;
+          const src = path.join(legacyGroups, f);
+          const dst = path.join(stateGroups, f);
+          try {
+            if (!fs.existsSync(dst)) fs.copyFileSync(src, dst);
+            fs.rmSync(src, { force: true });
+          } catch {}
+        }
+      } catch {}
+    }
+  }
+
+  pinDir(kind: Kind): string {
+    return path.join(this.stateDir, "pins", kind);
+  }
+
+  pinPath(kind: Kind, sessionKey: string): string {
+    return path.join(this.pinDir(kind), `${sanitizeSessionKey(sessionKey)}.txt`);
+  }
+
+  readPin(kind: Kind, sessionKey: string): string | undefined {
+    const file = this.pinPath(kind, sessionKey);
+    try {
+      const raw = fs.readFileSync(file, "utf8").trim();
+      if (!ID_RE.test(raw)) return undefined;
+      try {
+        const d = this.now();
+        fs.utimesSync(file, d, d);
+      } catch {}
+      return raw;
+    } catch {
+      return undefined;
+    }
+  }
+
+  writePin(kind: Kind, sessionKey: string, id: string): void {
+    const dir = this.pinDir(kind);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = this.pinPath(kind, sessionKey);
+    writeAtomic(file, id + "\n");
+    try {
+      const d = this.now();
+      fs.utimesSync(file, d, d);
+    } catch {}
+  }
+
+  removePin(kind: Kind, sessionKey: string): void {
+    try {
+      fs.rmSync(this.pinPath(kind, sessionKey), { force: true });
+    } catch {}
+  }
+
+  prunePins(maxAgeMs: number = 30 * 86_400_000): void {
+    const pinsRoot = path.join(this.stateDir, "pins");
+    if (!fs.existsSync(pinsRoot)) return;
+    const now = this.now().getTime();
+    try {
+      for (const kind of fs.readdirSync(pinsRoot)) {
+        const kdir = path.join(pinsRoot, kind);
+        try {
+          if (!fs.statSync(kdir).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        for (const f of fs.readdirSync(kdir)) {
+          if (!f.endsWith(".txt")) continue;
+          const p = path.join(kdir, f);
+          try {
+            if (now - fs.statSync(p).mtimeMs > maxAgeMs) fs.rmSync(p, { force: true });
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  groupPath(gid: string): string {
+    return path.join(this.stateDir, "groups", `${gid}.json`);
+  }
+
+  groupLockPath(): string {
+    return path.join(this.stateDir, "groups", "topology.lock");
+  }
+
+  groups(): Group[] {
+    const dir = path.join(this.stateDir, "groups");
+    if (!fs.existsSync(dir)) return [];
+    const out: Group[] = [];
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith(".json")) continue;
+      const g = this.readJson<Group>(path.join(dir, f));
+      if (g) out.push(g);
+    }
+    return out;
+  }
+
+  pruneGroups(maxAgeMs: number = 30 * 86_400_000): void {
+    const dir = path.join(this.stateDir, "groups");
+    if (!fs.existsSync(dir)) return;
+    const now = this.now().getTime();
+    const liveIds = new Set(this.sessions().map((s) => s.id));
+    const pinMtimes = new Map<string, number>();
+    const pinsRoot = path.join(this.stateDir, "pins");
+    if (fs.existsSync(pinsRoot)) {
+      try {
+        for (const kind of fs.readdirSync(pinsRoot)) {
+          const kdir = path.join(pinsRoot, kind);
+          try {
+            if (!fs.statSync(kdir).isDirectory()) continue;
+            for (const f of fs.readdirSync(kdir)) {
+              if (!f.endsWith(".txt")) continue;
+              const p = path.join(kdir, f);
+              try {
+                const id = fs.readFileSync(p, "utf8").trim();
+                if (ID_RE.test(id)) {
+                  const mtime = fs.statSync(p).mtimeMs;
+                  pinMtimes.set(id, Math.max(pinMtimes.get(id) ?? 0, mtime));
+                }
+              } catch {}
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+
+    for (const g of this.groups()) {
+      const surviving = g.members.filter((m) => {
+        if (liveIds.has(m)) return true;
+        const mt = pinMtimes.get(m);
+        return mt !== undefined && now - mt <= maxAgeMs;
+      });
+      if (surviving.length < 2) {
+        fs.rmSync(this.groupPath(g.id), { force: true });
+        for (const m of surviving) this.setGroup(m, undefined);
+      } else if (surviving.length !== g.members.length) {
+        this.saveGroup({ id: g.id, members: surviving });
+      }
+    }
+  }
+
+  pinnedIds(): Set<string> {
+    const ids = new Set<string>();
+    const root = path.join(this.stateDir, "pins");
+    if (!fs.existsSync(root)) return ids;
+    try {
+      for (const kind of fs.readdirSync(root)) {
+        const kdir = path.join(root, kind);
+        try {
+          if (!fs.statSync(kdir).isDirectory()) continue;
+          for (const f of fs.readdirSync(kdir)) {
+            if (!f.endsWith(".txt")) continue;
+            try {
+              const id = fs.readFileSync(path.join(kdir, f), "utf8").trim();
+              if (ID_RE.test(id)) ids.add(id);
+            } catch {}
+          }
+        } catch {}
+      }
+    } catch {}
+    return ids;
+  }
+
+  findGroupForMember(id: string): Group | undefined {
+    return this.groups().find((g) => g.members.includes(id));
   }
 
   protected p(...parts: string[]): string {
@@ -393,18 +579,35 @@ export class Relay {
       (s) => s.kind === input.kind && (input.scope ? s.scope === input.scope : s.pid === input.pid),
     );
     if (existing) {
+      if (input.session) this.writePin(input.kind, input.session, existing.id);
       return this.update(existing.id, {
         cwd: input.cwd,
         ...(input.scope ? { scope: input.scope } : {}),
         ...(input.name ? { name: input.name } : {}),
         ...(input.agent ? { agent: { ...existing.agent, ...input.agent } } : {}),
+        ...(input.session ? { session: input.session } : {}),
       });
     }
-    const taken = new Set(all.map((s) => s.id));
-    let id = input.id && ID_RE.test(input.id) && !taken.has(input.id) ? input.id : "";
-    while (!id || taken.has(id)) id = hex(5);
+    const liveIds = new Set(all.map((s) => s.id));
+    const pinnedId = input.session ? this.readPin(input.kind, input.session) : undefined;
+    let id = pinnedId && !liveIds.has(pinnedId) ? pinnedId : "";
+    if (!id) {
+      const taken = new Set<string>(liveIds);
+      for (const g of this.groups()) for (const m of g.members) taken.add(m);
+      for (const pid of this.pinnedIds()) taken.add(pid);
+      if (input.id && ID_RE.test(input.id) && !taken.has(input.id)) id = input.id;
+      while (!id || taken.has(id)) id = hex(5);
+    }
+    if (input.session) this.writePin(input.kind, input.session, id);
+    const nowMs = this.now().getTime();
+    if (nowMs - this.lastPinPrune > 3600_000) {
+      this.lastPinPrune = nowMs;
+      this.prunePins();
+      this.pruneGroups();
+    }
     const above = this.ancestorsOf(input.pid).filter((pid) => pid !== input.pid);
     const p = this.findByPid(above, (s) => s.kind !== "script");
+    const g = this.findGroupForMember(id);
     const rec: SessionRecord = {
       id,
       kind: input.kind,
@@ -412,8 +615,10 @@ export class Relay {
       cwd: input.cwd,
       started: this.iso(),
       parent: p ? { id: p.id, kind: p.kind, ...(p.name ? { name: p.name } : {}) } : null,
+      ...(g ? { group: g.id } : {}),
       ...(input.scope ? { scope: input.scope } : {}),
       ...(input.name ? { name: input.name } : {}),
+      ...(input.session ? { session: input.session } : {}),
       ...(input.agent ? { agent: input.agent } : {}),
     };
     fs.mkdirSync(this.p("inbox", id), { recursive: true, mode: 0o700 });
@@ -458,7 +663,7 @@ export class Relay {
     fs.rmSync(this.p("inbox", r.id), { recursive: true, force: true });
     // The outbox ledger and the burst counters outlive the session: a message it sent may still sit
     // in a live peer's inbox, and whoever settles it later must find the row rather than recreate it.
-    if (r.group) this.removeMember(r.group, r.id);
+    if (r.group && !r.session) this.removeMember(r.group, r.id);
   }
 
   // Mail still queued for a gone session would read "queued" forever, so the senders learn instead.
@@ -469,7 +674,7 @@ export class Relay {
   }
 
   group(gid: string): Group | undefined {
-    return this.readJson<Group>(this.p("groups", `${gid}.json`));
+    return this.readJson<Group>(this.groupPath(gid));
   }
 
   // Raw write without liveness checks; forget() calls this while pruning.
@@ -483,11 +688,11 @@ export class Relay {
 
   protected saveGroup(g: Group): void {
     if (g.members.length < 2) {
-      fs.rmSync(this.p("groups", `${g.id}.json`), { force: true });
+      fs.rmSync(this.groupPath(g.id), { force: true });
       for (const m of g.members) this.setGroup(m, undefined);
       return;
     }
-    this.write(this.p("groups", `${g.id}.json`), g);
+    this.write(this.groupPath(g.id), g);
     for (const m of g.members) this.setGroup(m, g.id);
   }
 
@@ -532,7 +737,7 @@ export class Relay {
         this.groupDepth--;
       }
     }
-    return this.lock(this.p("groups", "topology.lock"), () => {
+    return this.lock(this.groupLockPath(), () => {
       this.groupDepth++;
       try {
         return fn();
@@ -553,7 +758,7 @@ export class Relay {
       let g: Group;
       if (ga && gb) {
         g = { id: ga.id, members: [...new Set([...ga.members, ...gb.members])] };
-        fs.rmSync(this.p("groups", `${gb.id}.json`), { force: true });
+        fs.rmSync(this.groupPath(gb.id), { force: true });
       } else if (ga) {
         g = { id: ga.id, members: [...ga.members, other.id] };
       } else if (gb) {

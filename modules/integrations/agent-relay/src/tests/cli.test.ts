@@ -13,12 +13,17 @@ const path = process.getBuiltinModule("node:path") as typeof import("node:path")
 const cliPath = path.resolve(import.meta.dirname, "../cli.ts");
 
 function runCliCmd(args: string[], env: Record<string, string | undefined> = {}, stdinText?: string) {
+  const finalEnv = { ...process.env, ...env };
+  if (finalEnv.AGENT_RELAY_ROOT && !finalEnv.AGENT_RELAY_STATE) {
+    finalEnv.AGENT_RELAY_STATE = path.join(finalEnv.AGENT_RELAY_ROOT, "state");
+  }
   try {
     const stdout = execFileSync(process.execPath, [cliPath, ...args], {
-      env: { ...process.env, ...env },
+      env: finalEnv,
       input: stdinText,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
+      timeout: 10_000,
     });
     return { code: 0, stdout, stderr: "" };
   } catch (err: any) {
@@ -30,8 +35,8 @@ function runCliCmd(args: string[], env: Record<string, string | undefined> = {},
   }
 }
 
-test("target resolution order, ambiguous --to, no target exits 1", () => {
-  const { relay } = tmpRelay();
+test("target resolution order, ambiguous --to, no target exits 1", { timeout: 10_000 }, (t) => {
+  const { relay } = tmpRelay(undefined, undefined, t);
   const a = relay.register({ kind: "claude", pid: 100, cwd: "/a", id: "aaaa1", name: "auth" });
   relay.register({ kind: "claude", pid: 200, cwd: "/b", id: "aaaa2", name: "api" });
   const c = relay.register({ kind: "agy", pid: 300, cwd: "/c", id: "cccc3" });
@@ -51,8 +56,8 @@ test("target resolution order, ambiguous --to, no target exits 1", () => {
   assert.throws(() => resolveTarget(relay, undefined, {}, 999, (p) => [p]), /no target session found/);
 });
 
-test("CLI target lookup via binary exits 1 on ambiguous or missing target", () => {
-  const { relay, root, alive } = tmpRelay();
+test("CLI target lookup via binary exits 1 on ambiguous or missing target", { timeout: 10_000 }, (t) => {
+  const { relay, root, stateDir, alive } = tmpRelay(undefined, undefined, t);
   const p1 = spawn("sleep", ["30"]);
   const p2 = spawn("sleep", ["30"]);
   alive.add(p1.pid!);
@@ -61,15 +66,15 @@ test("CLI target lookup via binary exits 1 on ambiguous or missing target", () =
   relay.register({ kind: "claude", pid: p2.pid!, cwd: "/b", id: "aaaa2" });
 
   try {
-    const amb = runCliCmd(["id", "--to", "aaaa"], { AGENT_RELAY_ROOT: root });
+    const amb = runCliCmd(["id", "--to", "aaaa"], { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir });
     assert.equal(amb.code, 1);
     assert.match(amb.stderr, /ambiguous/);
 
-    const missing = runCliCmd(["id", "--to", "zzzz"], { AGENT_RELAY_ROOT: root });
+    const missing = runCliCmd(["id", "--to", "zzzz"], { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir });
     assert.equal(missing.code, 1);
     assert.match(missing.stderr, /no session matches/);
 
-    const noTarget = runCliCmd(["id"], { AGENT_RELAY_ROOT: root, AGENT_RELAY_TARGET: "" });
+    const noTarget = runCliCmd(["id"], { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir, AGENT_RELAY_TARGET: "" });
     assert.equal(noTarget.code, 1);
     assert.match(noTarget.stderr, /no target session found/);
   } finally {
@@ -78,14 +83,14 @@ test("CLI target lookup via binary exits 1 on ambiguous or missing target", () =
   }
 });
 
-test("send from args and stdin, message shape, 64 KiB cut", () => {
-  const { relay, root, alive } = tmpRelay();
+test("send from args and stdin, message shape, 64 KiB cut", { timeout: 10_000 }, (t) => {
+  const { relay, root, stateDir, alive } = tmpRelay(undefined, undefined, t);
   const p = spawn("sleep", ["30"]);
   alive.add(p.pid!);
   const a = relay.register({ kind: "claude", pid: p.pid!, cwd: "/a", id: "aaaa1" });
 
   try {
-    const res1 = runCliCmd(["send", "--to", "aaaa1", "--name", "my-job", "hello", "world"], { AGENT_RELAY_ROOT: root });
+    const res1 = runCliCmd(["send", "--to", "aaaa1", "--name", "my-job", "hello", "world"], { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir });
     assert.equal(res1.code, 0);
     assert.equal(res1.stdout.trim(), a.id);
 
@@ -102,7 +107,7 @@ test("send from args and stdin, message shape, 64 KiB cut", () => {
     assert.equal(msg1.reply, undefined);
     fs.rmSync(path.join(inboxA, files1[0]));
 
-    const res2 = runCliCmd(["send", "--to", "aaaa1", "-"], { AGENT_RELAY_ROOT: root }, "piped input");
+    const res2 = runCliCmd(["send", "--to", "aaaa1", "-"], { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir }, "piped input");
     assert.equal(res2.code, 0);
     const files2 = fs.readdirSync(inboxA).filter((f) => f.endsWith(".json"));
     assert.equal(files2.length, 1);
@@ -111,7 +116,7 @@ test("send from args and stdin, message shape, 64 KiB cut", () => {
     fs.rmSync(path.join(inboxA, files2[0]));
 
     const bigText = "x".repeat(70_000);
-    const res3 = runCliCmd(["send", "--to", "aaaa1", bigText], { AGENT_RELAY_ROOT: root });
+    const res3 = runCliCmd(["send", "--to", "aaaa1", bigText], { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir });
     assert.equal(res3.code, 0);
     const files3 = fs.readdirSync(inboxA).filter((f) => f.endsWith(".json"));
     const msg3 = JSON.parse(fs.readFileSync(path.join(inboxA, files3[0]), "utf8")) as Message;
@@ -122,7 +127,7 @@ test("send from args and stdin, message shape, 64 KiB cut", () => {
   }
 });
 
-test("formatMessage with and without reply, and the claude/agy hooks not calling markHuman on it", () => {
+test("formatMessage with and without reply, and the claude/agy hooks not calling markHuman on it", { timeout: 10_000 }, (t) => {
   const mNoReply: Message = {
     v: 1,
     id: "m1",
@@ -148,7 +153,7 @@ test("formatMessage with and without reply, and the claude/agy hooks not calling
   const fmtReply = formatMessage(mReply);
   assert.equal(fmtReply, '[relay from script "asker"]\npick a or b\n(reply with relay_send to="s1234")');
 
-  const { relay } = tmpRelay();
+  const { relay } = tmpRelay(undefined, undefined, t);
   const claude = relay.register({ kind: "claude", pid: 200, cwd: "/c", id: "cccc2" });
   const pi = relay.register({ kind: "pi", pid: 100, cwd: "/a", id: "aaaa1" });
   relay.link(pi.id, claude.id);
@@ -165,8 +170,8 @@ test("formatMessage with and without reply, and the claude/agy hooks not calling
   assert.equal(hop(), 1);
 });
 
-test("ask: agent relay_send to the script ID works without a group, a third session cannot send to it, timeout exits 124, record removed afterwards", async () => {
-  const { relay, root, alive } = tmpRelay();
+test("ask: agent relay_send to the script ID works without a group, a third session cannot send to it, timeout exits 124, record removed afterwards", { timeout: 10_000 }, async (t) => {
+  const { relay, root, stateDir, alive } = tmpRelay(undefined, undefined, t);
   const a = relay.register({ kind: "claude", pid: 100, cwd: "/a", id: "aaaa1" });
   const c = relay.register({ kind: "agy", pid: 300, cwd: "/c", id: "cccc3" });
 
@@ -197,7 +202,7 @@ test("ask: agent relay_send to the script ID works without a group, a third sess
   relay.register({ kind: "claude", pid: p.pid!, cwd: "/live", id: "11111" });
 
   try {
-    const timeoutRes = runCliCmd(["ask", "--to", "11111", "--timeout", "0.05", "quick question"], { AGENT_RELAY_ROOT: root });
+    const timeoutRes = runCliCmd(["ask", "--to", "11111", "--timeout", "0.05", "quick question"], { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir });
     assert.equal(timeoutRes.code, 124);
 
     const remainingScripts = relay.sessions().filter((s) => s.kind === "script");
@@ -207,14 +212,14 @@ test("ask: agent relay_send to the script ID works without a group, a third sess
   }
 });
 
-test("ask: receives reply, prints it, and unregisters cleanly", async () => {
-  const { relay, root, alive } = tmpRelay();
+test("ask: receives reply, prints it, and unregisters cleanly", { timeout: 10_000 }, async (t) => {
+  const { relay, root, stateDir, alive } = tmpRelay(undefined, undefined, t);
   const p = spawn("sleep", ["30"]);
   alive.add(p.pid!);
   const a = relay.register({ kind: "claude", pid: p.pid!, cwd: "/a", id: "aaaa1" });
 
   const child = spawn(process.execPath, [cliPath, "ask", "--to", "aaaa1", "--timeout", "5", "question"], {
-    env: { ...process.env, AGENT_RELAY_ROOT: root },
+    env: { ...process.env, AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir },
     stdio: ["pipe", "pipe", "pipe"],
   });
   alive.add(child.pid!);
@@ -247,8 +252,8 @@ test("ask: receives reply, prints it, and unregisters cleanly", async () => {
   }
 });
 
-test("scriptParent finds the nearest registered non-script ancestor", () => {
-  const { relay } = tmpRelay();
+test("scriptParent finds the nearest registered non-script ancestor", { timeout: 10_000 }, (t) => {
+  const { relay } = tmpRelay(undefined, undefined, t);
   const a = relay.register({ kind: "pi", pid: 100, cwd: "/a", id: "aaaa1" });
   relay.register({ kind: "script", pid: 200, cwd: "/s", id: "ssss1" });
   assert.equal(scriptParent(relay, 300, () => [300, 200, 100])?.id, a.id);
@@ -256,8 +261,8 @@ test("scriptParent finds the nearest registered non-script ancestor", () => {
   assert.equal(scriptParent(relay, 300, () => []), undefined);
 });
 
-test("send inside an agent speaks on its behalf and shares its budget", () => {
-  const { relay, root, alive } = tmpRelay();
+test("send inside an agent speaks on its behalf and shares its budget", { timeout: 10_000 }, (t) => {
+  const { relay, root, stateDir, alive } = tmpRelay(undefined, undefined, t);
   const p = spawn("sleep", ["30"]);
   alive.add(process.pid);
   alive.add(p.pid!);
@@ -266,7 +271,7 @@ test("send inside an agent speaks on its behalf and shares its budget", () => {
   relay.link(me.id, peer.id);
 
   try {
-    const res = runCliCmd(["send", "--to", "bbbb2", "--name", "make", "build ok"], { AGENT_RELAY_ROOT: root });
+    const res = runCliCmd(["send", "--to", "bbbb2", "--name", "make", "build ok"], { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir });
     assert.equal(res.code, 0);
     assert.equal(res.stdout.trim(), peer.id);
     const [m] = relay.pending(peer.id);
@@ -278,8 +283,8 @@ test("send inside an agent speaks on its behalf and shares its budget", () => {
   }
 });
 
-test("ask inside an agent speaks on its behalf but keeps its own reply id", async () => {
-  const { relay, root, alive } = tmpRelay();
+test("ask inside an agent speaks on its behalf but keeps its own reply id", { timeout: 10_000 }, async (t) => {
+  const { relay, root, stateDir, alive } = tmpRelay(undefined, undefined, t);
   alive.add(process.pid);
   const me = relay.register({ kind: "pi", pid: process.pid, cwd: "/a", id: "aaaa1" });
   const p = spawn("sleep", ["30"]);
@@ -287,8 +292,8 @@ test("ask inside an agent speaks on its behalf but keeps its own reply id", asyn
   const peer = relay.register({ kind: "claude", pid: p.pid!, cwd: "/b", id: "bbbb2" });
   relay.link(me.id, peer.id);
 
-  const child = spawn(process.execPath, [cliPath, "ask", "--to", "bbbb2", "--timeout", "5", "question"], {
-    env: { ...process.env, AGENT_RELAY_ROOT: root },
+  const child = spawn(process.execPath, [cliPath, "ask", "--to", peer.id, "--timeout", "5", "question"], {
+    env: { ...process.env, AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir },
     stdio: ["pipe", "pipe", "pipe"],
   });
   alive.add(child.pid!);
@@ -321,14 +326,14 @@ test("ask inside an agent speaks on its behalf but keeps its own reply id", asyn
   }
 });
 
-test("ask exits 1 when the target agent exits while waiting", async () => {
-  const { relay, root, alive } = tmpRelay();
+test("ask exits 1 when the target agent exits while waiting", { timeout: 10_000 }, async (t) => {
+  const { relay, root, stateDir, alive } = tmpRelay(undefined, undefined, t);
   const agentProc = spawn("sleep", ["30"]);
   alive.add(agentProc.pid!);
   const a = relay.register({ kind: "claude", pid: agentProc.pid!, cwd: "/a", id: "aaaa1" });
 
   const child = spawn(process.execPath, [cliPath, "ask", "--to", "aaaa1", "question"], {
-    env: { ...process.env, AGENT_RELAY_ROOT: root, AGENT_RELAY_POLL_MS: "50" },
+    env: { ...process.env, AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir, AGENT_RELAY_POLL_MS: "50" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   alive.add(child.pid!);
@@ -336,28 +341,33 @@ test("ask exits 1 when the target agent exits while waiting", async () => {
   let stderr = "";
   child.stderr.on("data", (d) => (stderr += d.toString()));
 
-  let scriptId = "";
-  for (let i = 0; i < 50; i++) {
-    const s = relay.sessions().find((rec) => rec.kind === "script" && rec.agent?.awaiting === a.id);
-    if (s) {
-      scriptId = s.id;
-      break;
+  try {
+    let scriptId = "";
+    for (let i = 0; i < 50; i++) {
+      const s = relay.sessions().find((rec) => rec.kind === "script" && rec.agent?.awaiting === a.id);
+      if (s) {
+        scriptId = s.id;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
     }
-    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(scriptId, "script record should be registered");
+
+    agentProc.kill("SIGKILL");
+    alive.delete(agentProc.pid!);
+
+    const exitCode = await new Promise<number>((resolve) => child.on("close", resolve));
+    assert.equal(exitCode, 1);
+    assert.match(stderr, /agent aaaa1 exited/);
+    assert.equal(relay.get(scriptId), undefined);
+  } finally {
+    agentProc.kill("SIGKILL");
+    child.kill("SIGKILL");
   }
-  assert.ok(scriptId, "script record should be registered");
-
-  agentProc.kill("SIGKILL");
-  alive.delete(agentProc.pid!);
-
-  const exitCode = await new Promise<number>((resolve) => child.on("close", resolve));
-  assert.equal(exitCode, 1);
-  assert.match(stderr, /agent aaaa1 exited/);
-  assert.equal(relay.get(scriptId), undefined);
 });
 
-test("run: exit code passthrough, signal code, tail content", () => {
-  const { relay, root, alive } = tmpRelay();
+test("run: exit code passthrough, signal code, tail content", { timeout: 10_000 }, (t) => {
+  const { relay, root, stateDir, alive } = tmpRelay(undefined, undefined, t);
   const p = spawn("sleep", ["30"]);
   alive.add(p.pid!);
   const a = relay.register({ kind: "claude", pid: p.pid!, cwd: "/a", id: "aaaa1" });
@@ -366,7 +376,7 @@ test("run: exit code passthrough, signal code, tail content", () => {
   try {
     const resCode = runCliCmd(
       ["run", "--to", "aaaa1", "--", process.execPath, "-e", "console.log('out line'); process.exit(3);"],
-      { AGENT_RELAY_ROOT: root },
+      { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir },
     );
     assert.equal(resCode.code, 3);
     let files = fs.readdirSync(inboxA).filter((f) => f.endsWith(".json"));
@@ -378,7 +388,7 @@ test("run: exit code passthrough, signal code, tail content", () => {
 
     const resSig = runCliCmd(
       ["run", "--to", "aaaa1", "--", process.execPath, "-e", "process.kill(process.pid, 'SIGTERM');"],
-      { AGENT_RELAY_ROOT: root },
+      { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir },
     );
     assert.equal(resSig.code, 128 + 15);
     files = fs.readdirSync(inboxA).filter((f) => f.endsWith(".json"));
@@ -390,7 +400,7 @@ test("run: exit code passthrough, signal code, tail content", () => {
     const scriptCode = "for(let i=1;i<=25;i++) console.log('line ' + i);";
     const resTail = runCliCmd(
       ["run", "--to", "aaaa1", "--tail", "5", "--", process.execPath, "-e", scriptCode],
-      { AGENT_RELAY_ROOT: root },
+      { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir },
     );
     assert.equal(resTail.code, 0);
     files = fs.readdirSync(inboxA).filter((f) => f.endsWith(".json"));
@@ -405,8 +415,8 @@ test("run: exit code passthrough, signal code, tail content", () => {
   }
 });
 
-test("run sends notification when the wrapper process receives a signal", async () => {
-  const { relay, root, alive } = tmpRelay();
+test("run sends notification when the wrapper process receives a signal", { timeout: 10_000 }, async (t) => {
+  const { relay, root, stateDir, alive } = tmpRelay(undefined, undefined, t);
   const p = spawn("sleep", ["30"]);
   alive.add(p.pid!);
   const a = relay.register({ kind: "claude", pid: p.pid!, cwd: "/a", id: "aaaa1" });
@@ -416,33 +426,40 @@ test("run sends notification when the wrapper process receives a signal", async 
     process.execPath,
     [cliPath, "run", "--to", "aaaa1", "--name", "sigtest", "--", process.execPath, "-e", "console.log('ready'); setInterval(()=>{}, 1000);"],
     {
-      env: { ...process.env, AGENT_RELAY_ROOT: root },
+      env: { ...process.env, AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir },
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
   alive.add(wrapper.pid!);
 
-  await new Promise<void>((resolve) => {
-    wrapper.stdout.on("data", (d) => {
-      if (d.toString().includes("ready")) resolve();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      wrapper.stdout.on("data", (d) => {
+        if (d.toString().includes("ready")) resolve();
+      });
+      wrapper.on("error", reject);
+      wrapper.on("close", (code) => {
+        reject(new Error(`wrapper exited early with code ${code}`));
+      });
     });
-  });
 
-  wrapper.kill("SIGTERM");
-  const exitCode = await new Promise<number>((resolve) => wrapper.on("close", resolve));
-  assert.equal(exitCode, 128 + 15);
+    wrapper.kill("SIGTERM");
+    const exitCode = await new Promise<number>((resolve) => wrapper.on("close", resolve));
+    assert.equal(exitCode, 128 + 15);
 
-  const files = fs.readdirSync(inboxA).filter((f) => f.endsWith(".json"));
-  assert.equal(files.length, 1);
-  const msg = JSON.parse(fs.readFileSync(path.join(inboxA, files[0]), "utf8")) as Message;
-  assert.match(msg.text, /exited SIGTERM after/);
-  assert.equal(msg.from.name, "sigtest");
-
-  p.kill();
+    const files = fs.readdirSync(inboxA).filter((f) => f.endsWith(".json"));
+    assert.equal(files.length, 1);
+    const msg = JSON.parse(fs.readFileSync(path.join(inboxA, files[0]), "utf8")) as Message;
+    assert.match(msg.text, /exited SIGTERM after/);
+    assert.equal(msg.from.name, "sigtest");
+  } finally {
+    p.kill("SIGKILL");
+    wrapper.kill("SIGKILL");
+  }
 });
 
-test("link and relay_peers ignore script records; nested send under an ask resolves the agent", () => {
-  const { relay } = tmpRelay();
+test("link and relay_peers ignore script records; nested send under an ask resolves the agent", { timeout: 10_000 }, (t) => {
+  const { relay, root, stateDir } = tmpRelay(undefined, undefined, t);
   const a = relay.register({ kind: "claude", pid: 100, cwd: "/a", id: "aaaa1", name: "planner" });
   const s = relay.register({ kind: "script", pid: 200, cwd: "/s", id: "ssss1" });
 
@@ -453,11 +470,11 @@ test("link and relay_peers ignore script records; nested send under an ask resol
   assert.ok(!peers.includes("ssss1"));
   assert.ok(peers.includes("not linked to any session"));
 
-  const targetFromNested = resolveTarget(relay, undefined, {}, 300, () => [300, 200, 100]);
+  const targetFromNested = resolveTarget(relay, undefined, { AGENT_RELAY_ROOT: root, AGENT_RELAY_STATE: stateDir }, 300, () => [300, 200, 100]);
   assert.equal(targetFromNested, a.id);
 });
 
-test("RingBuffer edge cases and formatDuration helper", () => {
+test("RingBuffer edge cases and formatDuration helper", { timeout: 10_000 }, () => {
   const r0 = new RingBuffer(0);
   r0.feed("abc\n");
   assert.equal(r0.finish(), "");

@@ -4,9 +4,10 @@ const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
 
 const [mode = "", ...args] = process.argv.slice(2);
 const root = process.env.AGENT_RELAY_ROOT ?? "";
+const stateDir = process.env.AGENT_RELAY_STATE;
 const limit = Number(process.env.STRESS_LIMIT ?? 1000);
 const mark = (name: string): string => process.env[name] ?? "";
-const relay = new Relay({ root, limits: { pairLimit: limit, rateLimit: 100_000 } });
+const relay = new Relay({ root, stateDir, limits: { pairLimit: limit, rateLimit: 100_000 } });
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 

@@ -10,9 +10,10 @@ const path = process.getBuiltinModule("node:path") as typeof import("node:path")
 
 function clocked(limits?: Partial<Limits>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-tools-"));
+  const stateDir = path.join(root, "state");
   let t = Date.parse("2026-11-11T10:00:00Z");
   const clock = { tick: (ms = 1000) => (t += ms) };
-  const relay = new Relay({ root, limits, isAlive: (p) => p < 1000, now: () => new Date(t), ancestorsOf: (p) => [p] });
+  const relay = new Relay({ root, stateDir, limits, isAlive: (p) => p < 1000, now: () => new Date(t), ancestorsOf: (p) => [p] });
   const a = relay.register({ kind: "pi", pid: 100, cwd: "/a", id: "aaaa1" });
   const b = relay.register({ kind: "claude", pid: 200, cwd: "/b", id: "bbbb2" });
   const c = relay.register({ kind: "agy", pid: 300, cwd: "/c", id: "cccc3" });
