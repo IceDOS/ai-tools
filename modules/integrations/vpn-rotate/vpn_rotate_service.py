@@ -112,8 +112,13 @@ async function probe() {
       signal: AbortSignal.timeout(5000),
     });
     process.stdout.write(String(res.status));
-    if (res.body) {
-      try { await res.body.cancel(); } catch {}
+    if (res.ok) {
+      try { await res.body?.cancel(); } catch {}
+    } else {
+      // Tab-separated detail so the service can log why the request failed.
+      let body = "";
+      try { body = (await res.text()).slice(0, 300); } catch {}
+      process.stdout.write("\\t" + JSON.stringify({ retryAfter: res.headers.get("retry-after"), body }));
     }
   } catch (err) {
     process.stdout.write("0");
@@ -152,6 +157,15 @@ def capture(argv, timeout, env=None):
         return 124, "timeout"
     except OSError as err:
         return 1, str(err)
+
+
+def retry_after(detail):
+    """Seconds until the provider says the limit resets, from the probe's detail JSON, or None."""
+    try:
+        value = int(json.loads(detail).get("retryAfter"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return value if value > 0 else None
 
 
 def probe_opencode(bun_bin="bun", model=None, env=None):
@@ -978,13 +992,17 @@ class VpnRotator:
         private_key = None
         success = None
 
-        def fail(entry, ip, country, reason, message):
+        def fail(entry, ip, country, reason, message, ttl=None):
             # A dead server is dead for every model; a 429 only counts against this model.
-            flagged = self.state.strike_server(
-                entry["server"], ip=ip, country=country, reason=reason,
-                model=model if reason == "rate_limit" else None,
-            )
-            self.log(f"{message}; {'flagged' if flagged else 'strike'}, trying next")
+            scope = model if reason == "rate_limit" else None
+            if ttl is not None:
+                # The provider named its reset, so flag until then instead of re-probing every 15 min.
+                self.state.flag_server(entry["server"], ip=ip, country=country, ttl=ttl, reason=reason, model=scope)
+                outcome = f"flagged for {ttl}s"
+            else:
+                flagged = self.state.strike_server(entry["server"], ip=ip, country=country, reason=reason, model=scope)
+                outcome = "flagged" if flagged else "strike"
+            self.log(f"{message}; {outcome}, trying next")
             failed_servers.add(entry["server"])
             # One server per country per pass spreads the attempts over more IPs.
             if not single_country_mode:
@@ -1040,24 +1058,25 @@ class VpnRotator:
             if probe_fn:
                 self.sleep(SETTLE_S)
                 p_res = probe_fn(self.proxy_env())
-                probe_status = str(p_res)
-                if p_res is True or p_res == "200":
+                probe_status, _, detail = str(p_res).partition("\t")
+                if p_res is True or probe_status == "200":
                     pass
-                elif p_res == "missing_bun":
+                elif probe_status == "missing_bun":
                     self.log("bun not found; skipping probe")
-                elif p_res == "skip":
+                elif probe_status == "skip":
                     self.log("no free-models module or cached catalog; skipping probe")
                 elif probe_status == "429" or p_res is False:
-                    fail(entry, egress_ip, target, "rate_limit", f"target {target} ({entry['server']}) probe returned 429")
+                    message = f"target {target} ({entry['server']}) probe returned 429 {detail}".rstrip()
+                    fail(entry, egress_ip, target, "rate_limit", message, ttl=retry_after(detail))
                     continue
                 elif probe_status in ("0", "timeout"):
                     fail(entry, egress_ip, target, "unreachable", f"target {target} ({entry['server']}) probe timed out")
                     continue
                 elif probe_status in ("401", "403"):
-                    self.log(f"target {target} ({entry['server']}) probe auth error {probe_status}; stopping")
+                    self.log(f"target {target} ({entry['server']}) probe auth error {probe_status} {detail}; stopping")
                     return {"ok": False, "reason": f"auth error {probe_status}"}
                 elif probe_status.startswith("5"):
-                    self.log(f"target {target} ({entry['server']}) probe server error {probe_status}; stopping")
+                    self.log(f"target {target} ({entry['server']}) probe server error {probe_status} {detail}; stopping")
                     return {"ok": False, "reason": f"server error {probe_status}"}
 
             success = {

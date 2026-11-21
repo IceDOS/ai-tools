@@ -261,7 +261,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   each agent keeps only `extensions.vpn-rotate.maxRetries` (pi also `providers`, opencode also the `fallback*` model options).
   - The daemon (`vpn-rotate-service`) listens on a Unix socket and persists server strikes and flags
     in `$XDG_STATE_HOME/vpn-rotate/state.json`. Each pass tries one random server in each random country;
-    a failure is a strike, and 3 strikes in 15 min flag the server (15 min, 5 min if unreachable).
+    a failure is a strike, and 3 strikes in 15 min flag the server (15 min, 5 min if unreachable). A probe 429 that carries `Retry-After` flags the server and its IP at once, until that reset (opencode free limits report about 24h); the probe logs the 429 body and `Retry-After`.
     429 strikes and flags count per server and model; unreachable ones cover every model. It never touches the host network: once the
     host IP is rate-limited it starts a private `wireproxy` tunnel (HTTP proxy on `127.0.0.1:proxyPort`),
     rotates Proton servers inside it, and goes direct again after `directRetrySeconds`. The key comes from

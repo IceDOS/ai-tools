@@ -314,6 +314,28 @@ def test_rotate_probe_receives_proxy_environment(tmp_path):
     assert seen[0]["http_proxy"] == seen[0]["HTTPS_PROXY"]
 
 
+def test_rotate_probe_429_flags_until_the_reported_reset(tmp_path):
+    answers = iter(['429\t{"retryAfter": "86000", "body": "Free usage limit reached"}', "200"])
+    rotator, state, _, _ = make_rotator(
+        tmp_path, probe=lambda env: next(answers), ips={"DE#1": "200.1.1.1", "NL#2": "200.1.1.2"}
+    )
+    res = rotator.rotate({"errorKind": "rate_limit", "model": "m"})
+    assert res["ok"] is True and res["server"] == "NL#2"
+    log = (tmp_path / "test.log").read_text()
+    assert 'probe returned 429 {"retryAfter": "86000", "body": "Free usage limit reached"}; flagged for 86000s' in log
+    assert state.rate_limited_servers["DE#1|m"]["ttl"] == 86000
+    assert state.rate_limited_ips["200.1.1.1|m"]["ttl"] == 86000
+    assert "DE#1|m" not in state.server_strikes
+
+
+def test_retry_after_reads_only_positive_seconds():
+    assert service.retry_after('{"retryAfter": "120"}') == 120
+    assert service.retry_after('{"retryAfter": null}') is None
+    assert service.retry_after('{"retryAfter": "Wed, 21 Oct 2026 07:28:00 GMT"}') is None
+    assert service.retry_after('{"retryAfter": "0"}') is None
+    assert service.retry_after("") is None
+
+
 def test_rotate_tunnel_to_tunnel_strikes_current_server(tmp_path):
     rotator, state, tunnel, _ = make_rotator(
         tmp_path, ips={"DE#1": "200.1.1.1", "NL#2": "200.1.1.2"}
