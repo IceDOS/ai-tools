@@ -1,3 +1,4 @@
+import pytest
 import json
 import threading
 
@@ -131,3 +132,59 @@ def test_service_ipython_with_image(settings, tmp_path):
     finally:
         s.shutdown()
 
+
+
+def test_multisession_kernel_isolation(settings):
+    s = svc(settings)
+    try:
+        out1 = s.ipython("var_a = 42", session_id="ses_alpha")
+        assert "Out: 42" in out1 or "(no output)" in out1
+        out2 = s.ipython("var_a = 100", session_id="ses_beta")
+        assert "Out: 100" in out2 or "(no output)" in out2
+
+        assert s.ipython("var_a", session_id="ses_alpha") == "Out: 42"
+        assert s.ipython("var_a", session_id="ses_beta") == "Out: 100"
+    finally:
+        s.shutdown()
+
+
+def test_mcp_server_session_context(settings):
+    import asyncio
+    from mcp.server.mcpserver import Context
+    from mcp.server.context import ServerRequestContext
+    from rlm_mcp.server import build_app
+
+    async def _test():
+        s = svc(settings)
+        app = build_app(s)
+        try:
+            req_ctx1 = ServerRequestContext(
+                session=None,
+                lifespan_context=None,
+                protocol_version="2024-11-05",
+                method="tools/call",
+                meta={"ai.opencode/sessionID": "session_one"},
+            )
+            ctx1 = Context(request_context=req_ctx1, mcp_server=app)
+
+            req_ctx2 = ServerRequestContext(
+                session=None,
+                lifespan_context=None,
+                protocol_version="2024-11-05",
+                method="tools/call",
+                meta={"ai.opencode/sessionID": "session_two"},
+            )
+            ctx2 = Context(request_context=req_ctx2, mcp_server=app)
+
+            await app.call_tool("ipython", {"code": "val = 'first'"}, context=ctx1)
+            await app.call_tool("ipython", {"code": "val = 'second'"}, context=ctx2)
+
+            res1 = await app.call_tool("ipython", {"code": "val"}, context=ctx1)
+            res2 = await app.call_tool("ipython", {"code": "val"}, context=ctx2)
+
+            assert "first" in str(res1.content[0].text)
+            assert "second" in str(res2.content[0].text)
+        finally:
+            s.shutdown()
+
+    asyncio.run(_test())

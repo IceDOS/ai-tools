@@ -17,6 +17,8 @@ class Settings:
     child_log: bool
     snapshots: bool
     self_cmd: list[str]
+    runner: str = "agy"
+    opencode: str = "opencode"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -37,4 +39,6 @@ class Settings:
             child_log=env.get("RLM_CHILD_LOG", "1") == "1",
             snapshots=env.get("RLM_SNAPSHOTS", "1") == "1",
             self_cmd=self_cmd,
+            runner=env.get("RLM_RUNNER", "agy"),
+            opencode=env.get("RLM_OPENCODE", "opencode"),
         )

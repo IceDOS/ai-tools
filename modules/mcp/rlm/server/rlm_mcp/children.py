@@ -1,28 +1,34 @@
 import json
 import os
+import select
 import subprocess
 import time
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Settings
+from .runner import ChildResult, get_runner
 
 TASK_FILE_THRESHOLD = 100_000
 PREVIEW_CHARS = 2_000
-MAX_OUTPUT_CHARS = 64_000
 STDERR_CAP = 8_192
 
 
-@dataclass
-class ChildResult:
-    ok: bool
-    output: str
-    error: str | None
-    usage: dict = field(default_factory=dict)
-    turns: int = 0
-    status: str = ""
+def parse_timeout(s: str) -> float:
+    s = s.strip().lower()
+    if s.endswith("s"):
+        return float(s[:-1])
+    if s.endswith("m"):
+        return float(s[:-1]) * 60
+    if s.endswith("h"):
+        return float(s[:-1]) * 3600
+    if s.endswith("d"):
+        return float(s[:-1]) * 86400
+    try:
+        return float(s)
+    except ValueError:
+        return 900.0
 
 
 def child_prompt(text: str, depth: int, max_depth: int, task_file: Path | None) -> str:
@@ -40,21 +46,7 @@ def child_prompt(text: str, depth: int, max_depth: int, task_file: Path | None) 
 
 
 def build_argv(settings: Settings, prompt: str, model: str | None) -> list[str]:
-    argv = [
-        settings.agy,
-        "-p",
-        prompt,
-        "--agent",
-        "rlm",
-        "--output-format",
-        "stream-json",
-        "--dangerously-skip-permissions",
-        "--print-timeout",
-        settings.child_timeout,
-    ]
-    if model:
-        argv += ["--model", model]
-    return argv
+    return get_runner(settings.runner).build_child_argv(settings, prompt, model)
 
 
 def add_usage(total: dict, usage: dict | None) -> None:
@@ -66,33 +58,7 @@ def add_usage(total: dict, usage: dict | None) -> None:
 
 
 def parse_stream(lines: Iterable[str]) -> ChildResult:
-    result = None
-    for line in lines:
-        try:
-            msg = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(msg, dict):
-            if msg.get("event") == "result" and isinstance(msg.get("result"), dict):
-                result = msg["result"]
-            elif msg.get("type") == "result":
-                result = msg
-    if result is None:
-        return ChildResult(False, "", "child exited without a result record")
-    status = str(result.get("status", ""))
-    ok = status == "SUCCESS"
-    output = str(result.get("response") or "")
-    if len(output) > MAX_OUTPUT_CHARS:
-        output = output[:MAX_OUTPUT_CHARS] + f"\n... [rlm output truncated at {MAX_OUTPUT_CHARS} chars]"
-    error = None if ok else str(result.get("error") or f"child status {status or 'unknown'}")
-    return ChildResult(
-        ok,
-        output,
-        error,
-        dict(result.get("usage") or {}),
-        int(result.get("num_turns") or 0),
-        status,
-    )
+    return get_runner().parse_child_stream(lines)
 
 
 def _log(file: Path | None, record) -> None:
@@ -144,9 +110,10 @@ def run_child(
         },
     )
     lines: list[str] = []
+    runner = get_runner(settings.runner)
     try:
         proc = subprocess.Popen(
-            build_argv(
+            runner.build_child_argv(
                 settings,
                 child_prompt(text, depth, settings.max_depth, task_file),
                 model,
@@ -159,18 +126,50 @@ def run_child(
             text=True,
         )
         assert proc.stdout is not None
-        for line in proc.stdout:
-            lines.append(line)
-            _log(log_file, line)
-        stderr = proc.stderr.read() if proc.stderr else ""
-        code = proc.wait()
-        result = parse_stream(lines)
-        if code != 0 and result.ok:
-            result.ok, result.error = False, f"child exited with code {code}"
-        if not result.ok:
-            result.error = f"{result.error}\n{stderr[-STDERR_CAP:]}".strip()
+        timeout_sec = parse_timeout(settings.child_timeout)
+        deadline = time.time() + timeout_sec if timeout_sec > 0 else None
+        timed_out = False
+
+        while True:
+            if deadline is not None:
+                rem = deadline - time.time()
+                if rem <= 0:
+                    timed_out = True
+                    break
+                rlist, _, _ = select.select([proc.stdout], [], [], min(rem, 0.2))
+            else:
+                rlist, _, _ = select.select([proc.stdout], [], [], 0.5)
+
+            if rlist:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                lines.append(line)
+                _log(log_file, line)
+            elif proc.poll() is not None:
+                for rem_line in proc.stdout:
+                    lines.append(rem_line)
+                    _log(log_file, rem_line)
+                break
+
+        if timed_out:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+            result = ChildResult(False, "", f"child timed out after {settings.child_timeout}")
+        else:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            code = proc.wait()
+            result = runner.parse_child_stream(lines)
+            if code != 0 and result.ok:
+                result.ok, result.error = False, f"child exited with code {code}"
+            if not result.ok:
+                result.error = f"{result.error}\n{stderr[-STDERR_CAP:]}".strip()
     except OSError as exc:
-        result = ChildResult(False, "", f"could not start agy: {exc}")
+        result = ChildResult(False, "", f"could not start child process: {exc}")
     finally:
         if task_file is not None:
             task_file.unlink(missing_ok=True)

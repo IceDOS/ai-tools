@@ -15,6 +15,9 @@ def main(argv: list[str] | None = None) -> int:
     hook.add_argument("event")
     run = sub.add_parser("refine-run")
     run.add_argument("--conversation", required=True)
+    ch = sub.add_parser("children")
+    ch.add_argument("--session", default=None)
+    ch.add_argument("child_id", nargs="?", default=None)
     args = parser.parse_args(argv)
     settings = Settings.from_env()
 
@@ -25,7 +28,18 @@ def main(argv: list[str] | None = None) -> int:
             payload = json.load(sys.stdin)
         except ValueError:
             payload = {}
-        print(json.dumps(handle(args.event, payload, settings, session.find_agy_pid())))
+        source = session.get_session_source(session.find_agy_pid(), runner=settings.runner)
+        print(json.dumps(handle(args.event, payload, settings, session_source=source)))
+        return 0
+
+    if args.cmd == "children":
+        from . import child_log
+
+        log_dir = settings.data_dir / "children" / (args.session or "unknown")
+        if args.child_id:
+            print(child_log.transcript(log_dir, args.child_id))
+        else:
+            print(child_log.report(log_dir))
         return 0
 
     if args.cmd == "refine-run":
@@ -34,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
                 json.loads(p.read_text())
                 for p in (settings.data_dir / "sessions").glob("*.json")
                 if json.loads(p.read_text()).get("conversationId") == args.conversation
+                or p.stem == args.conversation
             ),
             {},
         )
@@ -50,7 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     from .server import build_app
     from .service import RlmService
 
-    service = RlmService(settings, session.find_agy_pid())
+    source = session.get_session_source(session.find_agy_pid(), runner=settings.runner)
+    service = RlmService(settings, session_source=source)
     service.serve_control()
     signal.signal(signal.SIGTERM, lambda *_: (service.shutdown(), sys.exit(0)))
     try:

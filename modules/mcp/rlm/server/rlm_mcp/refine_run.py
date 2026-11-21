@@ -5,6 +5,7 @@ from pathlib import Path
 
 from . import harness
 from .config import Settings
+from .runner import get_runner
 
 TRANSCRIPT_CAP = 20_000
 
@@ -65,30 +66,17 @@ def run_refinement(
         harness.load(g) + harness.load(l),
         transcript_tail(transcript_path),
     )
-    argv = [
-        settings.agy,
-        "-p",
-        prompt,
-        "--output-format",
-        "json",
-        "--json-schema",
-        json.dumps(harness.PROPOSAL_SCHEMA),
-        "--print-timeout",
-        "5m",
-    ]
-    if model:
-        argv += ["--model", model]
+    runner = get_runner(settings.runner)
+    argv = runner.build_refine_argv(settings, prompt, harness.PROPOSAL_SCHEMA, model)
     proc = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    try:
-        envelope = json.loads(proc.stdout)
-        proposal = envelope["structured_output"]
-        edits = list(proposal.get("edits") or [])
-    except (ValueError, KeyError, TypeError, AttributeError):
+    proposal, err = runner.parse_refine_output(proc.stdout, proc.stderr)
+    if proposal is None or err is not None:
         return {
             "summary": "",
             "applied": [],
-            "errors": [f"refinement child failed: {proc.stderr[-2000:].strip()}"],
+            "errors": [err or f"refinement child failed: {proc.stderr[-2000:].strip()}"],
         }
+    edits = list(proposal.get("edits") or [])
     applied, errors = harness.apply_edits(edits, scope, g, l)
     return {"summary": str(proposal.get("summary", "")), "applied": applied, "errors": errors}
 

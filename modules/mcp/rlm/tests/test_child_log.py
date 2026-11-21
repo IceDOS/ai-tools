@@ -140,3 +140,140 @@ def test_read_skips_partial_trailing_line(tmp_path):
     (tmp_path / "zzz.jsonl").write_text('{"type": "rlm_child_start", "id": "zzz", "pid": 1}\n{"type": "res')
     [child] = child_log.read(tmp_path)
     assert child.id == "zzz" and child.state() == "running" and child.activity == ""
+
+
+def test_find_child_matching(tmp_path):
+    write(tmp_path, "c12345", [start(cid="c12345", ts=1000.0), end(cid="c12345", ts=1010.0)])
+    write(tmp_path, "c67890", [start(cid="c67890", ts=1020.0), end(cid="c67890", ts=1030.0)])
+    write(tmp_path, "c67999", [start(cid="c67999", ts=1025.0), end(cid="c67999", ts=1035.0)])
+    # Exact ID
+    assert child_log.find_child(tmp_path, "c12345").id == "c12345"
+    assert child_log.find_child(tmp_path, "c12345.jsonl").id == "c12345"
+    # Sequence numbers
+    assert child_log.find_child(tmp_path, "#1").id == "c12345"
+    assert child_log.find_child(tmp_path, "1").id == "c12345"
+    assert child_log.find_child(tmp_path, "#2").id == "c67890"
+    assert child_log.find_child(tmp_path, "2").id == "c67890"
+    # Unique prefix
+    assert child_log.find_child(tmp_path, "c12").id == "c12345"
+    # Ambiguous prefix
+    amb = child_log.find_child(tmp_path, "c67")
+    assert isinstance(amb, list) and len(amb) == 2
+    assert child_log.transcript(tmp_path, "c67") == "ambiguous: matches #2 (c67890), #3 (c67999)"
+    # Missing
+    assert child_log.find_child(tmp_path, "nonexistent") is None
+    assert child_log.find_child(tmp_path, "") is None
+
+
+def test_transcript_missing_and_empty(tmp_path):
+    assert child_log.transcript(tmp_path, "c1") == f"children in {tmp_path}: none logged"
+    write(tmp_path, "c1", [start(cid="c1", ts=1000.0), end(cid="c1", ts=1010.0)])
+    assert child_log.transcript(tmp_path, "c99") == f"child 'c99' not found in {tmp_path}"
+
+
+def test_transcript_opencode_flow(tmp_path):
+    write(tmp_path, "c1", [
+        start(cid="c1", prompt="compute the sum of 1 to 5", model="gpt-4o", ts=1000.0),
+        {
+            "type": "tool_use",
+            "part": {
+                "tool": "python_exec",
+                "state": {
+                    "status": "completed",
+                    "input": {"code": "sum(range(1, 6))"},
+                    "output": "15",
+                },
+            },
+        },
+        {"type": "text", "part": {"text": "The sum is 15."}},
+        end(cid="c1", ok=True, turns=2, ts=1010.0),
+    ])
+    text = child_log.transcript(tmp_path, "c1", now=1010.0)
+    assert "Child #1 [c1] · ok · d1 · 0:10 · 2t" in text
+    assert "Model: gpt-4o | Parent: -" in text
+    assert "--- Prompt ---\ncompute the sum of 1 to 5" in text
+    assert "--- Tool #1: python_exec ---" in text
+    assert "code: sum(range(1, 6))" in text
+    assert "Output:\n15" in text
+    assert "--- Answer ---\nThe sum is 15." in text
+    assert str(tmp_path / "c1.jsonl") in text
+
+
+def test_transcript_tool_error_and_failure(tmp_path):
+    write(tmp_path, "c_err", [
+        start(cid="c_err", prompt="run failing command", ts=1000.0),
+        {
+            "type": "tool_use",
+            "part": {
+                "tool": "bash",
+                "state": {
+                    "status": "error",
+                    "input": {"command": "exit 1"},
+                    "error": "command failed with status 1",
+                },
+            },
+        },
+        end(cid="c_err", ok=False, error="child process failed", turns=1, ts=1005.0),
+    ])
+    text = child_log.transcript(tmp_path, "#1", now=1005.0)
+    assert "Child #1 [c_err] · failed · d1 · 0:05 · 1t" in text
+    assert "--- Tool #1: bash (error) ---" in text
+    assert "Error:\ncommand failed with status 1" in text
+    assert "--- Error ---\nchild process failed" in text
+
+
+def test_transcript_agy_result(tmp_path):
+    write(tmp_path, "c_agy", [
+        start(cid="c_agy", prompt="simple prompt", ts=1000.0),
+        {"type": "init"},
+        {"type": "step_update"},
+        {"type": "result", "status": "SUCCESS", "response": "answer from agy", "usage": {"total_tokens": 100}, "num_turns": 1},
+        end(cid="c_agy", ok=True, usage={"total_tokens": 100}, turns=1, ts=1008.0),
+    ])
+    text = child_log.transcript(tmp_path, "c_agy", now=1008.0)
+    assert "--- Answer ---\nanswer from agy" in text
+    assert "100 tok" in text
+
+
+def test_transcript_clipping(tmp_path):
+    write(tmp_path, "c_clip", [
+        start(cid="c_clip", prompt="P" * 5000, ts=1000.0),
+        {
+            "type": "tool_use",
+            "part": {
+                "tool": "cat",
+                "state": {
+                    "status": "completed",
+                    "input": {"file": "dump.txt"},
+                    "output": "\n".join(f"line {i}" for i in range(100)),
+                },
+            },
+        },
+        {"type": "text", "part": {"text": "A" * 6000}},
+        end(cid="c_clip", ok=True, ts=1010.0),
+    ])
+    text = child_log.transcript(tmp_path, "c_clip", now=1010.0)
+    assert text.count("... [trimmed]") >= 3
+    assert text.endswith(str(tmp_path / "c_clip.jsonl"))
+
+
+def test_main_cli_children_and_transcript(tmp_path, capsys, monkeypatch):
+    from rlm_mcp import __main__
+    monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
+    children_dir = tmp_path / "children" / "ses_test"
+    write(children_dir, "c1", [
+        start(cid="c1", prompt="list files", ts=1000.0),
+        {"type": "text", "part": {"text": "file1.txt"}},
+        end(cid="c1", ok=True, turns=1, ts=1005.0),
+    ])
+
+    # Table report
+    assert __main__.main(["children", "--session", "ses_test"]) == 0
+    out = capsys.readouterr().out
+    assert "children in" in out and "#1" in out
+
+    # Transcript via positional
+    assert __main__.main(["children", "--session", "ses_test", "c1"]) == 0
+    out = capsys.readouterr().out
+    assert "--- Prompt ---\nlist files" in out
+    assert "--- Answer ---\nfile1.txt" in out

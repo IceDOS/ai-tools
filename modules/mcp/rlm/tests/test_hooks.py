@@ -100,12 +100,35 @@ def test_pre_invocation_rlm_children_needs_invocation_zero(settings):
 
 def test_pre_invocation_rlm_children_namespaced_forms(settings):
     write_child(settings)
-    for command in ("/rlm:rlm-children", "/rlm:rlm-children please", "/rlm:rlm children"):
+    for command in ("/rlm:rlm-children", "/rlm:rlm children"):
         out = hooks.handle(
             "PreInvocation", payload(lastUserInput=command, invocationNum=0), settings, 77
         )
         assert out["terminationBehavior"] == "terminate", command
         assert "1 total" in out["injectSteps"][0]["errorMessage"]["userMessage"], command
+
+
+def test_pre_invocation_rlm_children_transcript_with_id(settings):
+    write_child(settings, cid="c1", prompt="inspect this child")
+    for command in ("/rlm-children c1", "/rlm-children #1", "/rlm:rlm-children c1", "/rlm:rlm children c1"):
+        out = hooks.handle(
+            "PreInvocation", payload(lastUserInput=command, invocationNum=0), settings, 77
+        )
+        assert out["terminationBehavior"] == "terminate", command
+        assert "metadata" not in str(out)
+        msg = out["injectSteps"][0]["errorMessage"]["userMessage"]
+        assert "Child #1 [c1]" in msg, command
+        assert "--- Prompt ---\ninspect this child" in msg, command
+        assert str(child_log_dir(settings) / "c1.jsonl") in msg, command
+
+
+def test_pre_invocation_rlm_children_transcript_missing_id(settings):
+    write_child(settings, cid="c1")
+    out = hooks.handle(
+        "PreInvocation", payload(lastUserInput="/rlm-children nonexistent", invocationNum=0), settings, 77
+    )
+    assert out["terminationBehavior"] == "terminate"
+    assert "child 'nonexistent' not found" in out["injectSteps"][0]["errorMessage"]["userMessage"]
 
 
 def test_pre_invocation_other_input_still_passes_through(settings):

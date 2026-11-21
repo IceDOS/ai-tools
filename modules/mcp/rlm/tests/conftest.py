@@ -29,6 +29,14 @@ def fake_agy(tmp_path) -> Path:
 
 
 @pytest.fixture
+def fake_opencode(tmp_path) -> Path:
+    wrapper = tmp_path / "opencode"
+    wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {TESTS / 'fake_opencode.py'} \"$@\"\n")
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+    return wrapper
+
+
+@pytest.fixture
 def settings(tmp_path, fake_agy, kernel_path) -> Settings:
     return Settings.from_env({
         "RLM_AGY": str(fake_agy),
@@ -39,4 +47,20 @@ def settings(tmp_path, fake_agy, kernel_path) -> Settings:
         "RLM_CHILD_TIMEOUT": "1m",
         "RLM_CHILD_LOG": "1",
         "RLM_SNAPSHOTS": "1",
+        "RLM_RUNNER": "agy",
+    })
+
+
+@pytest.fixture
+def opencode_settings(tmp_path, fake_opencode, kernel_path) -> Settings:
+    return Settings.from_env({
+        "RLM_OPENCODE": str(fake_opencode),
+        "RLM_KERNEL": kernel_path,
+        "RLM_PYTHON": sys.executable,
+        "PLUGIN_DATA": str(tmp_path / "data"),
+        "RLM_MAX_DEPTH": "2",
+        "RLM_CHILD_TIMEOUT": "1m",
+        "RLM_CHILD_LOG": "1",
+        "RLM_SNAPSHOTS": "1",
+        "RLM_RUNNER": "opencode",
     })
