@@ -1,0 +1,134 @@
+diff -ru a/package/kernel/rlm_kernel.py b/package/kernel/rlm_kernel.py
+--- package/kernel/rlm_kernel.py	2026-11-21 03:42:08.143212615 +0200
++++ package/kernel/rlm_kernel.py	2026-11-21 03:42:27.311203389 +0200
+@@ -64,7 +64,7 @@
+ # Never pickle a single value larger than this.
+ SNAPSHOT_VALUE_CAP = 64 * 1024 * 1024
+ # Names injected by the host; never snapshotted.
+-_HOST_NAMES = frozenset(("rlm", "refine", "user_prompt"))
++_HOST_NAMES = frozenset(("rlm", "rlm_batch", "refine", "user_prompt"))
+ 
+ 
+ def _die(msg: str, code: int = 2) -> "None":
+@@ -131,6 +131,33 @@
+             # Anything else while waiting is unexpected; ignore it.
+ 
+ 
++# icedos pi-rlm-batch.patch v1: one request, the host runs the children in parallel.
++def rlm_batch(prompts, context=None):
++    """Run one recursive sub-LLM per prompt in parallel, like rlm() for each.
++
++    Returns the answers in prompt order; a failed child's slot holds a
++    RuntimeError instead of a string.
++    """
++    global _rlm_counter
++    texts = [str(p) for p in prompts]
++    if context is not None:
++        payload = context if isinstance(context, str) else json.dumps(context, ensure_ascii=False, default=str)
++        texts = [f"{t}\n\n{payload}" for t in texts]
++    if not texts:
++        return []
++    with _rlm_lock:
++        _rlm_counter += 1
++        rid = _rlm_counter
++        _send({"type": "rlm_batch_request", "id": rid, "prompts": texts, "depth": RLM_DEPTH + 1})
++        while True:
++            msg = _readline()
++            if msg.get("type") == "rlm_batch_response" and msg.get("id") == rid:
++                return [
++                    r.get("result", "") if r.get("ok") else RuntimeError(f"rlm() failed: {r.get('error', 'unknown error')}")
++                    for r in msg.get("results", [])
++                ]
++
++
+ def refine(instructions=None, global_=False):
+     """Schedule a harness refinement for when the current turn ends.
+ 
+@@ -188,7 +215,7 @@
+             self.write(line)
+ 
+ 
+-_NAMESPACE: dict = {"__name__": "__rlm__", "rlm": rlm, "refine": refine}
++_NAMESPACE: dict = {"__name__": "__rlm__", "rlm": rlm, "rlm_batch": rlm_batch, "refine": refine}
+ 
+ 
+ def _execute(exec_id: int, code: str) -> dict:
+diff -ru a/package/src/kernel.ts b/package/src/kernel.ts
+--- package/src/kernel.ts	2026-11-21 03:42:08.140212563 +0200
++++ package/src/kernel.ts	2026-11-21 03:42:36.298970097 +0200
+@@ -82,6 +82,31 @@
+ const INTERRUPT_GRACE_MS = 4_000;
+ const PYTHON_LOG_CAP = 4_000;
+ 
++// icedos pi-rlm-batch.patch v1: children one rlm_batch() call runs at once.
++export const maxParallel = () => Math.max(1, Number.parseInt(process.env.PI_RLM_MAX_PARALLEL ?? "", 10) || 4);
++
++// Runs fn over items with at most `limit` in flight; a throw becomes a failed reply in that slot.
++export async function runBatch(
++	items: string[],
++	limit: number,
++	fn: (item: string) => Promise<RlmReply>,
++): Promise<RlmReply[]> {
++	const out: RlmReply[] = new Array(items.length);
++	let next = 0;
++	const worker = async () => {
++		while (next < items.length) {
++			const i = next++;
++			try {
++				out[i] = await fn(items[i]);
++			} catch (err) {
++				out[i] = { ok: false, error: err instanceof Error ? err.message : String(err) };
++			}
++		}
++	};
++	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
++	return out;
++}
++
+ export class KernelProcess {
+ 	private opts: KernelOptions;
+ 	private server: Server | null = null;
+@@ -284,6 +309,16 @@
+ 					);
+ 				break;
+ 			}
++			case "rlm_batch_request": {
++				const m = msg as unknown as { id: number; prompts?: unknown[]; depth?: number };
++				const prompts = (m.prompts ?? []).map(String);
++				const depth = m.depth ?? this.opts.depth + 1;
++				this.rlmCount += prompts.length;
++				void runBatch(prompts, maxParallel(), (prompt) =>
++					this.opts.onRlmRequest({ id: m.id, prompt, depth }, this.activeSignal),
++				).then((results) => this.send({ type: "rlm_batch_response", id: m.id, results }));
++				break;
++			}
+ 			case "refine_request": {
+ 				const m = msg as unknown as RefineRequest;
+ 				this.opts
+diff -ru a/package/src/prompt.ts b/package/src/prompt.ts
+--- package/src/prompt.ts	2026-11-21 03:42:08.140212563 +0200
++++ package/src/prompt.ts	2026-11-21 03:42:27.311703296 +0200
+@@ -42,13 +42,14 @@
+ - Use it to delegate subtasks over your data: summarize chunks, extract from slices, classify, transform, verify hypotheses.
+ - Recursion is depth-limited (you are at depth ${depth}, maximum ${maxDepth}). When rlm() raises, stop recursing and solve the subtask yourself.
+ - rlm() results are plain Python values. They do NOT enter your context unless you print them — so you can fan out over far more text than fits in your own window.
++- \`rlm_batch(prompts: list[str], context=None) -> list\` runs one child per prompt in parallel and returns the answers in prompt order. A failed child's slot holds a RuntimeError instead of a string, so check \`isinstance(r, Exception)\`. Prefer it over a loop of rlm() calls whenever the subtasks are independent; plain rlm() calls run one at a time, even from threads. Children can call rlm_batch() too, down to the depth limit.
+ 
+ # Self-improvement
+ The kernel also provides \`refine(instructions=None, global_=False) -> dict\`: schedule a refinement of your persistent harness (memories and policies injected into your future system prompts). It returns immediately; the refinement runs when your turn ends. Use it after observing a repeated failure, a reusable tactic, or a behavior policy worth persisting.
+ 
+ # Working method
+ 1. Load and inspect data with code. When the task involves large content (files, documents, logs), read it with Python into variables — never paste large content into your messages.
+-2. Decompose: chunk large inputs, process chunks in a loop (calling rlm() per chunk when the chunk needs judgment), then aggregate programmatically.
++2. Decompose: chunk large inputs, process chunks with one rlm_batch() call (one prompt per chunk that needs judgment), then aggregate programmatically.
+ 3. Verify with code before answering: counts, lengths, spot checks, round-trips.
+ 4. Print only small, decisive values from your cells. Everything bulky stays in variables. Your tool results should be short — if a cell prints pages of output, you are doing it wrong.
+ 
+@@ -64,6 +65,7 @@
+ You have an \`ipython\` tool: a persistent Python 3 kernel. Variables and imports survive across calls, so it doubles as scratch memory. Its namespace provides:
+ 
+ - \`rlm(prompt, context=None) -> str\` — spawn a recursive sub-agent with a fresh context window and get its answer back as a Python string. The sub-agent sees only what you pass it. Use it to delegate chunk-level judgment over large data (summarize/extract/classify per chunk) without loading everything into your own context. Depth limit: ${info.maxDepth}.
++- \`rlm_batch(prompts, context=None) -> list\` — like rlm() for each prompt, run in parallel; answers come back in order, with a RuntimeError in a failed child's slot. Prefer it to a loop of rlm() calls for independent subtasks.
+ - \`refine(instructions=None, global_=False) -> dict\` — schedule a refinement of your persistent harness (memories/policies injected into future system prompts); runs when the turn ends.
+ - \`user_prompt\` — the current user request as a string.
+ - Data variables are pickled at session shutdown and restored on resume.

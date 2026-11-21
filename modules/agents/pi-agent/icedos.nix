@@ -105,6 +105,13 @@
               source = ./config.toml;
               default = e.vpn-rotate.maxRetries;
             } 0 100;
+
+            fallbackModels = mkStrListOption { default = e.vpn-rotate.fallbackModels; };
+            # "prompt", "stay" or a duration such as "15m"; the hook parses it.
+            fallbackReturn = lib.mkOption {
+              type = lib.types.strMatching "prompt|stay|[0-9]+[smh]";
+              default = e.vpn-rotate.fallbackReturn;
+            };
           };
 
           ghost-text = {
@@ -159,6 +166,12 @@
               source = ./config.toml;
               default = e.recursive-language-models.maxDepth;
             } 0 8;
+
+            maxParallel = mkIntBetweenOption {
+              path = "icedos.ai-tools.pi-agent.extensions.recursive-language-models.maxParallel";
+              source = ./config.toml;
+              default = e.recursive-language-models.maxParallel;
+            } 1 64;
           };
 
           meters = {
@@ -460,6 +473,8 @@
               path = substituteTs "rate-limit-hook.ts" ./extensions/rate-limit-hook.ts {
                 rateLimitHooks = builtins.toJSON rateLimitHooks;
                 maxRetries = if vpnOn then toString vpn.maxRetries else "3";
+                fallbackModels = builtins.toJSON (lib.optionals vpnOn vpn.fallbackModels);
+                fallbackReturn = vpn.fallbackReturn;
               };
             }
             ++ lib.optional ext.opencodeFree {
@@ -597,6 +612,11 @@
                 echo "warning: failed to apply pi-rlm-mode.patch to $dir" >&2
               fi
             fi
+            if [ -d "$dir" ] && ! ${pkgs.gnugrep}/bin/grep -q "pi-rlm-batch.patch v1" "$dir/src/kernel.ts" 2>/dev/null; then
+              if ! ${pkgs.patch}/bin/patch -p1 -d "$dir" --forward --no-backup-if-mismatch -r - < ${./patches/pi-rlm-batch.patch}; then
+                echo "warning: failed to apply pi-rlm-batch.patch to $dir" >&2
+              fi
+            fi
             # Applies on top of pi-rlm-child-extensions.patch; logs only when PI_RLM_CHILD_LOG_DIR is set.
             if [ -d "$dir" ] && ! ${pkgs.gnugrep}/bin/grep -q "pi-rlm-child-log.patch v1" "$dir/src/child.ts" 2>/dev/null; then
               if ! ${pkgs.patch}/bin/patch -p1 -d "$dir" --forward --no-backup-if-mismatch -r - < ${./patches/pi-rlm-child-log.patch}; then
@@ -646,6 +666,9 @@
             "--set-default"
             "PI_RLM_MAX_DEPTH"
             (toString rlm.maxDepth)
+            "--set-default"
+            "PI_RLM_MAX_PARALLEL"
+            (toString rlm.maxParallel)
             "--set-default"
             "PI_RLM_EXTENSIONS"
             (lib.concatStringsSep ":" rlmCoreExtensions)

@@ -261,3 +261,67 @@ test("other providers, other kinds and successes run nothing", async () => {
   assert.equal(await handlers.messageEnd({ message: { role: "assistant", stopReason: "stop" } }, ctx), undefined);
   assert.equal(runs, 0);
 });
+
+const model = (id: string, input = 0, provider = "opencode") => ({ provider, id, cost: { input, output: input } });
+function fallbackSetup(back = "prompt", models: string[] = []) {
+  const live = { model: model("m") as ReturnType<typeof model> | undefined };
+  const registry = [model("m"), model("paid", 3), model("a"), model("b"), model("x", 0, "other")];
+  const switched: string[] = [];
+  const fctx = {
+    ...ctx,
+    get model() { return live.model; },
+    modelRegistry: { getAvailable: () => registry },
+  };
+  const handlers = lib.createHandlers([entry({ errorKinds: ["rate_limit", "usage_limit"] })], async () => false, 0, {
+    models,
+    back,
+    switchModel: async (m) => {
+      switched.push(`${m.provider}/${m.id}`);
+      live.model = registry.find((r) => r.provider === m.provider && r.id === m.id);
+      return true;
+    },
+  });
+  return { live, fctx, handlers, switched };
+}
+
+test("failed hooks fall back to the next free model of the provider and retry", async () => {
+  const { isRetryableAssistantError } = await import(process.env.PI_AI_RETRY!);
+  const { fctx, handlers, switched } = fallbackSetup();
+  const result = await handlers.messageEnd({ message: failed("FreeUsageLimitError: free usage exceeded") }, fctx);
+  assert.deepEqual(switched, ["opencode/a"]);
+  assert.equal(isRetryableAssistantError(result!.message), true);
+  // a is limited too: b next, then nothing left this prompt.
+  await handlers.messageEnd({ message: { ...failed("429"), model: "a" } }, fctx);
+  assert.equal(await handlers.messageEnd({ message: { ...failed("429"), model: "b" } }, fctx), undefined);
+  assert.deepEqual(switched, ["opencode/a", "opencode/b"]);
+});
+
+test("fallback returns to the original model on the next prompt unless the user switched", async () => {
+  const s = fallbackSetup();
+  await s.handlers.messageEnd({ message: failed("429") }, s.fctx);
+  await s.handlers.input();
+  assert.deepEqual(s.switched, ["opencode/a", "opencode/m"]);
+
+  const u = fallbackSetup();
+  await u.handlers.messageEnd({ message: failed("429") }, u.fctx);
+  u.live.model = model("paid", 3);
+  await u.handlers.input();
+  assert.deepEqual(u.switched, ["opencode/a"]);
+});
+
+test("fallback with back=stay keeps the fallback model", async () => {
+  const { fctx, handlers, switched } = fallbackSetup("stay");
+  await handlers.messageEnd({ message: failed("429") }, fctx);
+  await handlers.input();
+  assert.deepEqual(switched, ["opencode/a"]);
+});
+
+test("an explicit fallback list keeps its order, takes provider/id or bare ids, and skips unknown models", () => {
+  const available = [model("a"), model("b"), model("x", 0, "other")];
+  assert.deepEqual(
+    lib.candidates(["other/x", "b", "missing"], "opencode", available).map((m) => `${m.provider}/${m.id}`),
+    ["other/x", "opencode/b"],
+  );
+  assert.equal(lib.returnAfter("15m"), 900_000);
+  assert.equal(lib.returnAfter("prompt"), undefined);
+});

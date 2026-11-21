@@ -88,6 +88,12 @@ percent = 30
 providers = ["opencode-free"]
 # Retries per prompt for rate-limit hooks; 0 means no limit.
 maxRetries = 0
+# Models tried in order once every rate-limit hook failed, e.g. ["opencode-free/minimax-m2.5-free"] or bare ids
+# of the failing provider; empty means that provider's free models.
+fallbackModels = []
+# When to go back to the selected model: "prompt" (next prompt), "stay" (until you pick another model),
+# or a duration such as "90s", "15m" or "2h" (picking another model also ends it).
+fallbackReturn = "prompt"
 
 [icedos.ai-tools.pi-agent.extensions.ghost-text]
 # pi-ghost-text-x: inline prompt suggestions; adds /suggest and /suggest-model.
@@ -148,6 +154,8 @@ autoload = false
 childViewer = true
 # rlm() recursion limit, exported as PI_RLM_MAX_DEPTH; 0 turns recursion off.
 maxDepth = 2
+# Children one rlm_batch() call runs at once; each nesting level has its own cap.
+maxParallel = 4
 
 [icedos.ai-tools.pi-agent.extensions.meters]
 # cost-footer: live session cost and token totals below the editor; /cost toggles it.

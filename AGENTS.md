@@ -175,14 +175,16 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   pi-rlm (`extensions.recursive-language-models`) are such packages, appended after `packages` and unpinned unless their
   `version` is set. New default packages get an `enable` and `version` option and an `optionPackages` entry. pi loads package extensions before the `extensions` list. With `steering = ""`
   the wrapper points `PI_CLM_STEERING` at the brief inside pi's npm dir, and pi-rlm gets
-  `PI_RLM_PYTHON` and `PI_RLM_MAX_DEPTH`. The wrapper and its npm shim patch the installed pi-rlm:
+  `PI_RLM_PYTHON`, `PI_RLM_MAX_DEPTH` and `PI_RLM_MAX_PARALLEL`. The wrapper and its npm shim patch the installed pi-rlm:
   `patches/pi-rlm-child-extensions.patch` loads `PI_RLM_EXTENSIONS` into `rlm()` children, and
   `patches/pi-rlm-mode.patch` reads `--rlm` at session start, starts in RLM mode when `PI_RLM_AUTOLOAD=1` (`recursive-language-models.autoload`), and in RLM mode swaps only pi's built-in coding tools for ipython, keeping extension and MCP tools, their guidelines, pi-clm's guidance and pi's skills list (pi drops it when read and bash are inactive).
   `patches/pi-rlm-child-log.patch` (after the child-extensions one) appends each `rlm()` child's JSONL stream, framed by
   `rlm_child_start`/`rlm_child_end` records, to `$PI_RLM_CHILD_LOG_DIR/<id>.jsonl`; nested children inherit the dir and record
   their parent through `PI_RLM_CHILD_ID`. The shipped `rlm-children.ts` (`recursive-language-models.childViewer`) sets that dir
   to `<dataDir>/pi-rlm/children/<session id>`, shows running children below the editor and opens transcripts with `/rlm-children`.
-  Bump its `v<N>` marker on every change; the wrapper removes an older patched copy so pi reinstalls it.
+  `patches/pi-rlm-batch.patch` adds `rlm_batch(prompts)` to the kernel: one `rlm_batch_request` that `kernel.ts` fans out to
+  at most `recursive-language-models.maxParallel` children at once (upstream `rlm()` stays serial), the same call agy and opencode get.
+  Bump each patch's `v<N>` marker on every change; the wrapper removes an older patched copy so pi reinstalls it.
   The shipped `view-image.ts` (`extensions.viewImage`, on by default) adds a `view_image` tool that runs pi's read on image
   files only. RLM mode drops only pi's built-in tools, and `rlmCoreExtensions` passes the tool to `rlm()` children, so vision
   models can view local images in every mode; it rejects text files so RLM mode still reads them through ipython. Prefer an upstream pi package in `packages` over a new
@@ -194,7 +196,10 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   `extensions.vpn-rotate.providers`, only opencode-free's bun child rides the tunnel (from `mode`/`proxy` in
   `$XDG_RUNTIME_DIR/vpn-rotate.json`), and pi-agent adds `PI_CODING_AGENT_DIR` to the daemon unit so its
   probe finds the cached catalog. `extensions.vpn-rotate.maxRetries` sets the retries per prompt for
-  rate-limit hooks; 0, the default, means no limit.
+  rate-limit hooks; 0, the default, means no limit. When every matching hook fails, the hook switches to the next of
+  `extensions.vpn-rotate.fallbackModels` (empty: the failing provider's free models), skipping models this prompt already
+  tried, and pi retries on it; `fallbackReturn` (`prompt`, `stay` or a duration) decides when it switches back, and only while
+  the session is still on the fallback.
   `skills.codeReview` ships `skills/code-review` when pi-rlm is on, and `skills.opencodeFreeReview` adds
   `skills/opencode-free-review` when code-review and opencode-free are on too. `meters.speed` adds the tok/s readout to the cost
   footer. `includeInIcedosGc` prunes `sessions/*/*.jsonl` and pi-rlm snapshots older than `sessionRetentionDays`.

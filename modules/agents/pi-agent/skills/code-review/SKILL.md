@@ -7,7 +7,7 @@ description: Review the current diff, or a pull request number, branch, commit r
 
 Two passes. Reviewer children read the change along separate dimensions. A verify pass then attacks each finding and assigns a verdict, and only findings that survive reach the user.
 
-Run the whole flow from the `ipython` tool. `rlm(prompt)` blocks until the child finishes and returns its final answer as a string. The kernel serializes `rlm()` calls, so children run one after another, even from threads. Collect results through files: give each child an output path and read the file after the call returns.
+Run the whole flow from the `ipython` tool. `rlm(prompt)` blocks until the child finishes and returns its final answer as a string. Plain `rlm()` calls run one after another, even from threads; `rlm_batch(prompts)` runs one child per prompt in parallel and returns their answers in order, with a RuntimeError in a failed child's slot. Collect results through files: give each child an output path and read the file after the call returns.
 
 Keep the review out of the conversation. Spawn one orchestrator child that owns steps 1 through 6, writes `report.md` into the work directory, and returns that path. The parent then prints the file. Only the report reaches the main context, not the diff, the per-dimension findings, or the verify transcripts. Skip the orchestrator and run the steps directly only when the user asks to watch it happen, or when a `--fix` run needs to edit the tree the user is working in right now.
 
@@ -115,15 +115,19 @@ Write [] when you find nothing. Do not report outside your dimension.
 Answer with the single word done.
 """
 
-for dim in DIMENSIONS:
-    out = work / f"{dim['name']}.json"
-    rlm(TEMPLATE.format(out=out, patch=patch, root=root, agents=agents,
-                        declined=declined or "nothing yet", **dim))
+results = rlm_batch([
+    TEMPLATE.format(out=work / f"{dim['name']}.json", patch=patch, root=root, agents=agents,
+                    declined=declined or "nothing yet", **dim)
+    for dim in DIMENSIONS
+])
+failed = [d["name"] for d, r in zip(DIMENSIONS, results) if isinstance(r, Exception)]
 ```
+
+Retry each dimension in `failed` once with `rlm()`, and name the ones that fail again in the report.
 
 ## 4. Verify pass
 
-Load every findings file and drop duplicates that name the same file, line, and claim. Then spawn one verify child per finding whose job is to disprove it, not to agree with it.
+Load every findings file and drop duplicates that name the same file, line, and claim. Then spawn one verify child per finding, all in one `rlm_batch()` call, whose job is to disprove it, not to agree with it.
 
 Give each verify child the finding, the patch path, and the instruction files, have it write its verdict to a file, and require one of three verdicts:
 
