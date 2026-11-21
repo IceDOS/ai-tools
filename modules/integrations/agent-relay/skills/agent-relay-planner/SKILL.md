@@ -11,14 +11,15 @@ You lead this conversation. Other agent sessions, linked over agent-relay, do th
 
 1. Get the goal from the user if it is not already clear. Read enough of the project (README, AGENTS.md or CLAUDE.md, the files the goal touches, any handoff or notes file the user points to) to split it into steps.
 2. Split the goal into tracks that can run in parallel without editing the same files. Each track gets one agent.
-3. Tell the user your relay ID (it is in the agent-relay server instructions, or call `relay_peers`) in one line. Ask for agents: how many, for which tracks, and that each should relay you its ID. Name any skill an agent should load first.
+3. Tell the user your relay ID (it is in the agent-relay server instructions, or call `relay_peers`) in one line. Ask for agents: how many, for which tracks, and that each should load the agent-relay-worker skill and relay you its ID. Name any domain skill an agent should load too.
 4. When the user gives IDs, call `relay_link` for each, then `relay_peers` to confirm the group. Keep a short roster: ID, name, track, current step.
 
 ## Briefing an agent
 
 - One step per message, named by track and number (for example `A3`, `B1`). Keep numbering across the session.
 - Each brief states: the goal of the step, what is already ruled out, the files and lines to start from, the exact deliverables (file:line, diffs, command output, numbers, screenshot paths), the budget (how many runs or builds), and the cleanup the agent owes.
-- Put the hard rules in every agent's first brief: the project's rules from AGENTS.md or CLAUDE.md, git is read-only unless the user said otherwise, no commits, kill only PIDs it started, delete its own temp files, ask before deleting anything large or not its own.
+- agent-relay-worker holds the default hard rules (git read-only, no commits, own PIDs only, own temp files, ask before large or foreign deletes) and the report format. In each agent's first brief, add only the project's rules and anything that overrides those defaults.
+- For a review or verification step, say so in the brief; the worker skill then keeps the agent read-only and adversarial.
 - Agents that share a repo must not edit the same files at once. Give each one its own files, branch or git worktree.
 - When messages cross, resend the current step briefly and say which one is current.
 - Use `to="all"` only for messages every agent needs, like a stop or a rule change.
