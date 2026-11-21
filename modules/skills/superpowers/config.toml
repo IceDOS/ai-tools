@@ -1,0 +1,28 @@
+[icedos.ai-tools.skills.superpowers]
+# GitHub source of the superpowers skills (obra/superpowers).
+owner = "obra"
+repo = "superpowers"
+rev = "main"
+hash = "sha256-rP5YsyGuPd9YSW/Fj3aukrq1bLuV+nwwQMK4JaZQgkI="
+
+# Skills read from the repo's skills/ dir into the shared icedos.ai-tools.skills.pool.
+skills = [
+  "brainstorming",
+  "diagnosing-superpowers",
+  "dispatching-parallel-agents",
+  "executing-plans",
+  "finishing-a-development-branch",
+  "receiving-code-review",
+  "requesting-code-review",
+  "subagent-driven-development",
+  "systematic-debugging",
+  "test-driven-development",
+  "using-git-worktrees",
+  "using-superpowers",
+  "verification-before-completion",
+  "writing-plans",
+  "writing-skills",
+]
+
+# Skills loaded at session start: each gets a <name>-autoload rule in icedos.ai-tools.rules.
+autoload = []

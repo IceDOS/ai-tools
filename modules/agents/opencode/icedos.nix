@@ -70,11 +70,6 @@ in
     codeReview = mkBoolOption { default = defaults.codeReview; };
     freeReview = mkBoolOption { default = defaults.freeReview; };
 
-    superpowers = {
-      enable = mkBoolOption { default = defaults.superpowers.enable; };
-      rev = mkStrOption { default = defaults.superpowers.rev; };
-    };
-
     includeInIcedosGc = mkBoolOption { default = defaults.includeInIcedosGc; };
     sessionRetentionDays = mkIntBetweenOption {
       path = "icedos.ai-tools.opencode.sessionRetentionDays";
@@ -235,11 +230,6 @@ in
               ) npmExtensions
             );
 
-          superpowersEntry = optional cfg.superpowers.enable (
-            "superpowers@git+https://github.com/obra/superpowers.git"
-            + lib.optionalString (cfg.superpowers.rev != "") "#${cfg.superpowers.rev}"
-          );
-
           tuiPlugins =
             optional
               (
@@ -315,7 +305,6 @@ in
 
                 mergedPlugins =
                   cfg.plugins
-                  ++ superpowersEntry
                   ++ vpnPlugin
                   ++ npmEntries false
                   ++ (clm.pluginEntry cfg.extensions.context-language-models)

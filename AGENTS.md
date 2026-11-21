@@ -228,8 +228,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   `${XDG_DATA_HOME:-~/.local/share}/icedos-rlm`, shared with antigravity's rlm (disjoint session ids).
   `/rlm-children` lists children and `/rlm-children <id>` (or `#seq` or a unique prefix) posts a child transcript, as plugin commands, and `/refine` harness notes are injected through the `context` hook.
   `codeReview` ships the `code-review` skill (needs RLM) and `freeReview` its loop on `opencode/*-free`
-  children started with `opencode run --agent build`. `superpowers.{enable,rev}` adds obra/superpowers'
-  git plugin. npm extension `power` (`npmExtensions` in
+  children started with `opencode run --agent build`. npm extension `power` (`npmExtensions` in
   `icedos.nix`) takes `{enable,version,options}`; TUI-only packages go to `cli.plugins`, the rest to
   `settings.plugins` (tok/s is native: `cli.session.tps`). OpenCode 2.3 accepts an `lsp` key but has no LSP client, so the module sets none.
   With the `vpn-rotate` module enabled, the `plugins/vpn-rotate` server plugin runs
@@ -327,9 +326,9 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   - The probe imports pi-agent's `extensions/free-models.ts` (`VPN_ROTATE_OPENCODE_FREE_MODULE`) for opencode
     Zen's URL, user-agent and cached models, probes the request's free model, and skips when it has none.
   - `cooldownSeconds` and `maxPerHour` treat 0 as no limit.
-- `skills` category (`ponytail`, `unslop`, options at `icedos.ai-tools.skills.<name>`) — each fetches a GitHub repo (`owner`/`repo`/`rev`/`hash`)
 - `agent-relay` — owns `icedos.ai-tools.agent-relay`. Core pins at `${XDG_STATE_HOME:-~/.local/state}/icedos/agent-relay/pins/<kind>/<session>.txt` keep an agent's relay ID across restarts, keyed by `CLAUDE_CODE_SESSION_ID` (Claude), `getSessionId()` (pi), `rootSessionID` (opencode), and `conversationId` (Antigravity, from `/proc/<pid>/fd` presence lock at MCP start with hook fallback); a pin beats launcher `AGENT_RELAY_ID`. Groups live in the state dir (`groups/<gid>.json`), kept across restarts and reboots, and pruned after 30d; legacy runtime groups are moved on first start.
   - `opencode`: the plugin dir `$out/lib/agent-relay/opencode` (via `icedos.ai-tools.opencode.plugins`), and `agent-relay-mcp opencode` via `opencode.extra-mcp-servers`. opencode runs one shared server for all windows, so identity is per ROOT session: each root session registers lazily with scope = `rootSessionID`, and its ID is pinned in core pins across resumes. The MCP server resolves the caller from `_meta["ai.opencode/sessionID"]`; subagents map to their root via `opencode/roots/<id>.json`, and an unmapped caller gets an error. Delivery uses `ctx.session.synthetic` steer after tool calls and on `experimental.idle`. The relay ID is injected into the system prompt. `session.deleted` retires the ID. Limit: agent-launch's `AGENT_RELAY_ID` can't choose the opencode relay ID.
+- `skills` category (`ponytail`, `superpowers`, `unslop`, options at `icedos.ai-tools.skills.<name>`) — each fetches a GitHub repo (`owner`/`repo`/`rev`/`hash`)
   and reads the `skills` it lists from the repo's `skills/` dir into the shared pool through
   `mcp/lib/upstream-skills.nix`. Each name in `autoload` adds a `<name>-autoload` rule telling agents
   to load that skill at session start. Both repos are also Claude Code plugins, which bring their hooks

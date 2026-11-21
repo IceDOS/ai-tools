@@ -129,12 +129,6 @@ includeInIcedosGc = true
 # Stale snapshot and child log retention in days.
 retentionDays = 30
 
-# obra/superpowers through its OpenCode 2 plugin, which registers its skills.
-[icedos.ai-tools.opencode.superpowers]
-enable = false
-# Git ref to install, e.g. a tag or commit; "" tracks the default branch.
-rev = ""
-
 # npm plugins: version "" installs the newest release once; options go to the plugin entry as is.
 # @log0u7/opencode-watt: electricity use and cost of local LLM inference.
 [icedos.ai-tools.opencode.extensions.power]
