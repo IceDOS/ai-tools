@@ -3,15 +3,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const TICK_MS = 1000;
 const ANSI_ALL = /\u001b\[[0-9;]*m/g;
 
-/** Duration as pi's own tool rows print it: `4.2s`, `1m 30s`, `2h 3m 4s`. */
-export function formatToolDuration(ms: number): string {
-  const seconds = Math.max(0, ms) / 1000;
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const total = Math.floor(seconds);
-  const minutes = Math.floor(total / 60);
-  if (minutes < 60) return `${minutes}m ${total % 60}s`;
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${total % 60}s`;
-}
+import { formatToolDuration } from "./tool-format.ts";
+
+export { formatToolDuration };
 
 /** Columns a rendered line occupies, ignoring colour codes. */
 export function visibleLength(text: string): number {

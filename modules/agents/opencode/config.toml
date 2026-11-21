@@ -18,7 +18,7 @@
 # Whether OpenCode manages the terminal window title via the icedos-status TUI plugin.
 enable = true
 # Idle glyph displayed in the terminal window title.
-idleGlyph = "▣"
+idleGlyph = "◫"
 # Animation glyphs displayed in the terminal window title while OpenCode is working.
 workingGlyphs = ["◰", "◳", "◲", "◱"]
 

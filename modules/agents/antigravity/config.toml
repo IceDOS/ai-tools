@@ -34,8 +34,8 @@ statusLineStackWithDefault = false
 # The title is the conversation's name, else its generated title, else "Antigravity".
 [icedos.ai-tools.antigravity.terminal-title]
 enable = true
-idleGlyph = "▲"
-workingGlyphs = ["▖", "▘", "▝", "▗"]
+idleGlyph = "△"
+workingGlyphs = ["▲", "▶", "▼", "◀"]
 
 [icedos.ai-tools.antigravity.extensions.recursive-language-models]
 # rlm plugin: ipython MCP tool whose rlm(prompt, context) runs a child agy; adds /rlm and /refine skills.

@@ -493,6 +493,11 @@
                 idleGlyph = title.idleGlyph;
               };
             }
+            ++ lib.optional (title.enable || ext.toolTimer) {
+              name = "tool-format.ts";
+              path = ./extensions/tool-format.ts;
+              load = false;
+            }
             ++ lib.optional ext.toolTimer {
               name = "tool-timer.ts";
               path = ./extensions/tool-timer.ts;

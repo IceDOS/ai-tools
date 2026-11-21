@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib" / "terminal-title"))
 """The rlm() children the title counts and the bar shows, from the plugin's child logs."""
 import io
 import json
@@ -241,23 +244,23 @@ class TestTitleChildren(unittest.TestCase):
 
     def test_the_title_counts_the_running_children(self):
         titles = tick_once(self.tty, {"agy": 7, "name": "Task", "conversation": CONV, "working": True})
-        self.assertEqual(titles, ["\u2596 Task \u00b7 1 rlm d1:1", "\u2598 Task \u00b7 1 rlm d1:1", "\u259d Task \u00b7 1 rlm d1:1", ""])
+        self.assertEqual(titles, ["\u25b2 Task \u00b7 1 rlm d1:1", "\u25b6 Task \u00b7 1 rlm d1:1", "\u25bc Task \u00b7 1 rlm d1:1", ""])
 
     def test_the_title_keeps_the_tool_timer_and_appends_the_children(self):
         with mock.patch.object(tool_state, "time", FakeTime(100.0)):
             tool_state.save(CONV, "mcp__kernel__ipython", started=92.0)  # 8s, on both clocks
             titles = tick_once(self.tty, {"agy": 7, "name": "Task", "conversation": CONV, "working": False})
-        self.assertEqual(titles[0], "\u2596 Task \u00b7 \u23f1 ipython 8s \u00b7 1 rlm d1:1")
+        self.assertEqual(titles[0], "\u25b2 Task \u00b7 \u23f1 ipython 8s \u00b7 1 rlm d1:1")
 
     def test_no_children_leaves_the_title_alone(self):
         (tool_state.children_dir(self.data_dir, CONV) / "a.jsonl").write_text(start("a") + "\n" + end("a") + "\n")
         titles = tick_once(self.tty, {"agy": 7, "name": "Task", "conversation": CONV, "working": False})
-        self.assertEqual(titles, ["\u25b2 Task", ""])
+        self.assertEqual(titles, ["\u25b3 Task", ""])
 
     def test_the_count_is_off_without_the_plugin(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             titles = tick_once(self.tty, {"agy": 7, "name": "Task", "conversation": CONV, "working": False})
-        self.assertEqual(titles, ["\u25b2 Task", ""])
+        self.assertEqual(titles, ["\u25b3 Task", ""])
 
 
 class FakeTime:

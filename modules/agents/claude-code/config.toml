@@ -10,6 +10,12 @@ extraArgs = []
 # Shared skills Claude Code skips, e.g. ones an installed plugin already ships.
 excludeSkills = []
 
+# Terminal title "<glyph> <title>"; idle glyph ✳, working frames ["◐", "◑"].
+[icedos.ai-tools.claude-code.terminal-title]
+enable = true
+idleGlyph = "✳"
+workingGlyphs = ["✶", "✷", "✸", "✹"]
+
 [[icedos.ai-tools.claude-code.users.username.marketplaces]]
 name = ""
 source = ""

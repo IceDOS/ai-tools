@@ -1,7 +1,7 @@
 // Pure helpers for icedos-status plugin: time formatting, title composition, glyph selection.
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 
-export const DEFAULT_IDLE_GLYPH = "▣";
+export const DEFAULT_IDLE_GLYPH = "◫";
 export const DEFAULT_WORKING_GLYPHS = ["◰", "◳", "◲", "◱"];
 export const DEFAULT_FALLBACK_TITLE = "OpenCode";
 
@@ -146,11 +146,24 @@ export function pickGlyph(
 export function composeTitle(
   glyph: string,
   title?: string,
-  fallback = DEFAULT_FALLBACK_TITLE,
+  fallbackOrTimer = DEFAULT_FALLBACK_TITLE,
+  timer?: string,
 ): string {
-  const cleanTitle = title ? stripControlChars(clipTitle(title)) : "";
-  const effective = cleanTitle.length > 0 ? cleanTitle : fallback;
-  return `${glyph} ${effective}`.trim();
+  let fallback = DEFAULT_FALLBACK_TITLE;
+  let activeTimer = timer;
+  if (timer === undefined && fallbackOrTimer.startsWith("⏱")) {
+    activeTimer = fallbackOrTimer;
+  } else {
+    fallback = fallbackOrTimer || DEFAULT_FALLBACK_TITLE;
+  }
+  const cleanTitle = title ? stripControlChars(title) : "";
+  const effective = cleanTitle.trim().length > 0 ? cleanTitle : fallback;
+  const suffix = activeTimer ? ` · ${activeTimer}` : "";
+  const prefix = glyph ? `${glyph} ` : "";
+  const room = 80 - prefix.length - suffix.length;
+  if (room <= 0) return `${prefix}${effective}`.trim();
+  const clipped = clipTitle(effective, room);
+  return `${prefix}${clipped}${suffix}`.trim();
 }
 
 // Status row from the VPN rotation service's state file, as pi's vpn-row shows it.

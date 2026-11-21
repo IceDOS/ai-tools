@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib" / "terminal-title"))
 import json
 import os
 import sqlite3
@@ -170,17 +173,17 @@ class TestTerminalTitle(unittest.TestCase):
     def test_emit_writes_an_osc_zero_sequence(self):
         path = self.dir / "osc"
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOCTTY)
-        terminal_title.emit(fd, "\u25b2 Antigravity")
+        terminal_title.emit(fd, "\u25b3 Antigravity")
         os.close(fd)
-        self.assertEqual(path.read_bytes(), "\033]0;\u25b2 Antigravity\007".encode())
+        self.assertEqual(path.read_bytes(), "\033]0;\u25b3 Antigravity\007".encode())
 
     def test_tick_cycles_the_working_glyphs(self):
         titles = self.tick({"agy": 7, "name": "Task", "working": True})
-        self.assertEqual(titles, ["\u2596 Task", "\u2598 Task", "\u259d Task", ""])
+        self.assertEqual(titles, ["\u25b2 Task", "\u25b6 Task", "\u25bc Task", ""])
 
     def test_tick_shows_the_idle_glyph_once_and_clears_on_exit(self):
         titles = self.tick({"agy": 7, "name": "Task", "working": False})
-        self.assertEqual(titles, ["\u25b2 Task", ""])
+        self.assertEqual(titles, ["\u25b3 Task", ""])
 
     def test_tick_keeps_the_timer_while_agy_reports_idle_mid_call(self):
         # agy redraws its status line only on state changes and reports "idle" while a long
@@ -192,9 +195,9 @@ class TestTerminalTitle(unittest.TestCase):
         self.assertEqual(
             titles,
             [
-                "\u2596 Task \u00b7 \u23f1 run_command 7s",
-                "\u2598 Task \u00b7 \u23f1 run_command 7s",
-                "\u259d Task \u00b7 \u23f1 run_command 7s",
+                "\u25b2 Task \u00b7 \u23f1 run_command 7s",
+                "\u25b6 Task \u00b7 \u23f1 run_command 7s",
+                "\u25bc Task \u00b7 \u23f1 run_command 7s",
                 "",
             ],
         )
@@ -442,12 +445,12 @@ class TestToolTimer(unittest.TestCase):
         self.assertEqual(terminal_title.tool_timer("c2", now=BASE + 240), "")
 
     def test_compose_title_keeps_the_timer_visible(self):
-        self.assertEqual(terminal_title.compose_title("\u25b2", "Task"), "\u25b2 Task")
+        self.assertEqual(terminal_title.compose_title("\u25b3", "Task"), "\u25b3 Task")
         self.assertEqual(
-            terminal_title.compose_title("\u2596", "Task", "\u23f1 run_command 46s"),
-            "\u2596 Task \u00b7 \u23f1 run_command 46s",
+            terminal_title.compose_title("\u25b2", "Task", "\u23f1 run_command 46s"),
+            "\u25b2 Task \u00b7 \u23f1 run_command 46s",
         )
-        long = terminal_title.compose_title("\u2596", "x" * 200, "\u23f1 run_command 4m 0s")
+        long = terminal_title.compose_title("\u25b2", "x" * 200, "\u23f1 run_command 4m 0s")
         self.assertEqual(len(long), terminal_title.TITLE_MAX)
         self.assertTrue(long.endswith("\u00b7 \u23f1 run_command 4m 0s"))
         self.assertIn("\u2026", long)
@@ -458,9 +461,9 @@ class TestToolTimer(unittest.TestCase):
         self.assertEqual(
             titles,
             [
-                "\u2596 Task \u00b7 \u23f1 run_command 8s",
-                "\u2598 Task \u00b7 \u23f1 run_command 8s",
-                "\u259d Task \u00b7 \u23f1 run_command 8s",
+                "\u25b2 Task \u00b7 \u23f1 run_command 8s",
+                "\u25b6 Task \u00b7 \u23f1 run_command 8s",
+                "\u25bc Task \u00b7 \u23f1 run_command 8s",
                 "",
             ],
         )
@@ -471,7 +474,7 @@ class TestToolTimer(unittest.TestCase):
         titles = _tick_once(
             {"agy": 7, "name": "Task", "conversation": "c1", "working": True}, alive=2
         )
-        self.assertEqual(titles, ["\u2596 Task", "\u2598 Task", ""])
+        self.assertEqual(titles, ["\u25b2 Task", "\u25b6 Task", ""])
 
 
 class TestStatuslineOutput(unittest.TestCase):

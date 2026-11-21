@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Substituted at build time; the literal keeps the unbuilt source runnable.
 const IDLE_RAW = "@idleGlyph@";
-const IDLE = IDLE_RAW.startsWith("@") ? "○" : IDLE_RAW;
+const IDLE = IDLE_RAW.startsWith("@") ? "◍" : IDLE_RAW;
 
 function formatDuration(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));

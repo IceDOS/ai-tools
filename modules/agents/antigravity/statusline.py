@@ -11,6 +11,10 @@ import sys
 import time
 from pathlib import Path
 
+# Fallback path when running from the repo tree instead of nix store.
+_LIB = Path(__file__).resolve().parent.parent / "lib" / "terminal-title"
+if _LIB.is_dir() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
 import tool_state
 
 ALIMIT = os.environ.get("ANTIGRAVITY_ALIMIT", "alimit")

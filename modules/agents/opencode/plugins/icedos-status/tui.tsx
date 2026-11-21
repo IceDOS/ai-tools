@@ -79,14 +79,21 @@ export default Plugin.define({
         const route = context.ui.router.current();
         const sessionID = route.type === "session" ? route.sessionID : undefined;
         const session = sessionID ? context.data.session.get(sessionID) : undefined;
+        const oldest = sessionID ? getOldestRunningTool(tracker, sessionID) : undefined;
         const isRunning = sessionID
           ? runningSessions.has(sessionID) ||
             context.data.session.status(sessionID) === "running" ||
-            Boolean(getOldestRunningTool(tracker, sessionID))
+            Boolean(oldest)
           : runningSessions.size > 0 || Object.keys(tracker.running).length > 0;
         const glyph = pickGlyph(isRunning, tickCount++, idleGlyph, workingGlyphs);
         const titleText = session?.title || DEFAULT_FALLBACK_TITLE;
-        const nextTitle = composeTitle(glyph, route.type === "home" ? DEFAULT_FALLBACK_TITLE : titleText);
+        const timer = oldest ? composeToolTimer(oldest.tool, Date.now() - oldest.start) : undefined;
+        const nextTitle = composeTitle(
+          glyph,
+          route.type === "home" ? DEFAULT_FALLBACK_TITLE : titleText,
+          DEFAULT_FALLBACK_TITLE,
+          timer,
+        );
         if (nextTitle !== lastTitle) {
           lastTitle = nextTitle;
           context.renderer.setTerminalTitle(nextTitle);

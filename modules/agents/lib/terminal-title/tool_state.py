@@ -1,31 +1,23 @@
-"""The tool call agy is running, per conversation, for the terminal title.
-
-agy redraws its status bar only on state changes, not during a tool call, so only the
-title's ticker can count: a PreToolUse hook records the call here and the ticker draws it.
-The rlm() children still running are counted from the child logs the plugin writes.
-"""
 import json
 import os
 import re
 import time
 from pathlib import Path
 
-# The runtime dir the title ticker already uses; the hook and the ticker are
-# separate processes, so this path is their only shared state.
-STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/antigravity-title-{os.getuid()}") / "antigravity-title"
-# A call whose PostToolUse never ran (agy killed mid-turn) must not count forever; 15 minutes is
-# above the 10 minute longest normal tool timeout.
+# Shared runtime directory for hook and ticker processes.
+STATE_DIR = Path(
+    os.environ.get("AGENT_TITLE_STATE_DIR")
+    or (Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/antigravity-title-{os.getuid()}") / "antigravity-title")
+)
 MAX_AGE = 900.0
 
 
 def path(conversation):
-    """The state file for a conversation, or None without one."""
     name = re.sub(r"[^A-Za-z0-9_.-]", "_", conversation or "")
     return STATE_DIR / "tools" / f"{name}.json" if name else None
 
 
 def save(conversation, tool, call_id=None, step=None, started=None):
-    """Record the call that just started; a tool call with no name records nothing."""
     record_path = path(conversation)
     if record_path is None or not tool:
         return
@@ -35,14 +27,13 @@ def save(conversation, tool, call_id=None, step=None, started=None):
         record["id"] = call_id
     if step is not None:
         record["step"] = step
-    # Atomic: the ticker reads this file every quarter second.
+    # Atomic replace to prevent partial reads by the ticker.
     tmp = record_path.with_name(f"{record_path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(record))
     os.replace(tmp, record_path)
 
 
 def load(conversation):
-    """The running call, or None once it ended, went stale, or was never written."""
     record_path = path(conversation)
     if record_path is None:
         return None
@@ -59,7 +50,6 @@ def load(conversation):
 
 
 def clear(conversation, call_id=None):
-    """Drop the record; with a call id, only while it still describes that call."""
     record_path = path(conversation)
     if record_path is None:
         return
@@ -73,28 +63,22 @@ def clear(conversation, call_id=None):
         pass
 
 
-# The rlm plugin's data dir (icedos sets this to the dir it configures): unset means the
-# plugin is off, so no surface shows children. `children/<conversation>/<id>.jsonl` per child.
 RLM_DATA_ENV = "ANTIGRAVITY_RLM_DATA_DIR"
-# A scan lists the log dir at most this often, and reads only this much of a log's end.
 CHILD_SCAN = 1.0
 CHILD_TAIL = 1024
 
 
 def rlm_data_dir():
-    """The rlm plugin's data dir, or None while the plugin is off."""
     value = os.environ.get(RLM_DATA_ENV)
     return Path(value) if value else None
 
 
 def children_dir(data_dir, conversation):
-    """The dir the plugin logs one conversation's children in, or None without one."""
     name = re.sub(r"[^A-Za-z0-9_.-]", "_", conversation or "")
     return Path(data_dir) / "children" / name if name and data_dir else None
 
 
 def session_conversation(data_dir, agy):
-    """The conversation the rlm server logs under, from its <data_dir>/sessions/<agy>.json."""
     if not data_dir or not agy:
         return None
     try:
@@ -105,7 +89,6 @@ def session_conversation(data_dir, agy):
 
 
 def pid_alive(pid):
-    """Whether that process still runs; a zombie keeps its /proc entry until it is reaped."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
@@ -114,7 +97,6 @@ def pid_alive(pid):
 
 
 def child_start(record_path):
-    """The record a child wrote when it started, or None when its log is unreadable."""
     try:
         with open(record_path, "rb") as log:
             record = json.loads(log.readline())
@@ -124,11 +106,6 @@ def child_start(record_path):
 
 
 def child_running(record_path, pid=None):
-    """A child runs until its log ends it or the rlm server that started it is gone.
-
-    `pid` is the server's pid from the start record: a killed server or an interrupted cell
-    never writes the end record. Logs from before that field keep the record-only rule.
-    """
     try:
         size = Path(record_path).stat().st_size
         with open(record_path, "rb") as log:
@@ -139,18 +116,11 @@ def child_running(record_path, pid=None):
     try:
         ended = json.loads(last).get("type") == "rlm_child_end"
     except (ValueError, AttributeError):
-        ended = False  # a half-written line: the child is still running
+        ended = False
     return not ended and (pid_alive(pid) if pid else True)
 
 
 class ChildrenCounter:
-    """The rlm() children of a conversation that still run, from their JSONL logs.
-
-    A child writes one log and never reopens it, so an ended log is remembered and skipped;
-    the rest are re-read a tail at a time, and no scan runs more often than `interval`.
-    A log whose start record names a dead server counts as ended: nothing will close it.
-    """
-
     def __init__(self, data_dir=None, interval=CHILD_SCAN, clock=time.monotonic):
         self.data_dir = data_dir
         self.interval = interval
@@ -160,11 +130,9 @@ class ChildrenCounter:
         self.scans = {}
 
     def count(self, conversation=None, agy=None):
-        """How many children of that conversation run right now (cached between scans)."""
         return sum(self.by_depth(conversation, agy).values())
 
     def by_depth(self, conversation=None, agy=None):
-        """{depth: running children} for that conversation (cached between scans)."""
         if not self.data_dir:
             return {}
         now = self.clock()
@@ -181,13 +149,13 @@ class ChildrenCounter:
             return {}
         try:
             logs = [p for p in log_dir.iterdir() if p.name.endswith(".jsonl")]
-        except OSError:  # gc may prune the dir under us
+        except OSError:
             return {}
         running = {}
         for path in logs:
             if path in self.ended:
                 continue
-            if path not in self.starts:  # the start record is read once per log
+            if path not in self.starts:
                 record = child_start(path) or {}
                 pid, depth = record.get("pid"), record.get("depth")
                 self.starts[path] = (pid if isinstance(pid, int) else None, depth if isinstance(depth, int) else 1)

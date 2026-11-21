@@ -112,6 +112,17 @@ test("composeTitle combines glyph and title with fallback", () => {
   assert.equal(composeTitle("▲", "My Session"), "▲ My Session");
   assert.equal(composeTitle("▲", "", "OpenCode"), "▲ OpenCode");
   assert.equal(composeTitle("▲", undefined, "OpenCode"), "▲ OpenCode");
+  assert.equal(composeTitle("▲", "My Session", undefined, "⏱ bash 12s"), "▲ My Session · ⏱ bash 12s");
+  assert.equal(composeTitle("▲", "My Session", "OpenCode", "⏱ bash 1.2s"), "▲ My Session · ⏱ bash 1.2s");
+  assert.equal(composeTitle("▲", "", "OpenCode", "⏱ read 0.5s"), "▲ OpenCode · ⏱ read 0.5s");
+});
+
+test("composeTitle clips long title keeping tool timer within 80 chars", () => {
+  const longTitle = "a".repeat(100);
+  const title = composeTitle("▲", longTitle, "OpenCode", "⏱ bash 12s");
+  assert.equal(title.length, 80);
+  assert.ok(title.endsWith("… · ⏱ bash 12s"));
+  assert.ok(title.startsWith("▲ aaaa"));
 });
 
 test("turn execution duration calculation", () => {

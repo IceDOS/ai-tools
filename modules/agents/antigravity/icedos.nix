@@ -156,8 +156,8 @@
           agentScripts = pkgs.runCommand "antigravity-agent-scripts" { } ''
             mkdir -p $out
             cp ${./statusline.py} $out/statusline.py
-            cp ${./terminal_title.py} $out/terminal_title.py
-            cp ${./tool_state.py} $out/tool_state.py
+            cp ${../lib/terminal-title/terminal_title.py} $out/terminal_title.py
+            cp ${../lib/terminal-title/tool_state.py} $out/tool_state.py
             cp ${./tool_timer.py} $out/tool_timer.py
           '';
 

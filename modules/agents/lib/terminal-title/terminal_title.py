@@ -1,10 +1,3 @@
-"""Antigravity CLI terminal title, "<glyph> <title>" over OSC 0.
-
-agy's own `title` hook only reruns on state changes, so it cannot animate. The status line reruns on
-every state change instead: it saves the state and starts a detached ticker, which draws the glyph,
-animates it while the agent works, follows the conversation title, times the tool call that a
-PreToolUse hook recorded, counts the rlm() children still running, and clears the title once agy exits.
-"""
 from datetime import datetime
 import fcntl
 import json
@@ -17,21 +10,21 @@ from pathlib import Path
 
 import tool_state
 
-IDLE_GLYPH = os.environ.get("ANTIGRAVITY_TITLE_IDLE_GLYPH") or "▲"
-WORKING_FRAMES = os.environ.get("ANTIGRAVITY_TITLE_WORKING_GLYPHS", "").split() or ["▖", "▘", "▝", "▗"]
+IDLE_GLYPH = os.environ.get("ANTIGRAVITY_TITLE_IDLE_GLYPH") or "△"
+WORKING_FRAMES = (
+    os.environ.get("ANTIGRAVITY_TITLE_WORKING_GLYPHS", "").split()
+    or ["▲", "▶", "▼", "◀"]
+)
 TICK = 0.25
 TITLE_MAX = 80
-# agy writes a conversation's generated title a few seconds into its first turn.
 TITLE_REFRESH = 2.0
 FALLBACK = "Antigravity"
-
 SUMMARIES = Path.home() / ".gemini/antigravity-cli/conversation_summaries.db"
-# The hook writes the running tool call into this dir, so both scripts share one path.
 STATE_DIR = tool_state.STATE_DIR
+DEFAULT_PROCESS_NAMES = ["agy"]
 
 
 def format_duration(seconds, always_seconds=False):
-    """`42s`, `1m 17s`, `4m`, `1h 2m`; always_seconds keeps the seconds (`4m 0s`, `1h 2m 5s`)."""
     total = max(0, int(seconds))
     if total < 60:
         return f"{total}s"
@@ -57,12 +50,10 @@ def compose_banner(elapsed, dt=None, glyph=IDLE_GLYPH):
 
 
 def short_tool(name):
-    """`mcp__server__tool` as `tool`: the tool row already names the server."""
     return name.rsplit("__", 1)[-1] if name.startswith("mcp__") else name
 
 
 def tool_timer(conversation, now=None):
-    """`⏱ run_command 46s` while a tool runs in that conversation, else ""."""
     record = tool_state.load(conversation)
     if record is None:
         return ""
@@ -71,46 +62,53 @@ def tool_timer(conversation, now=None):
 
 
 def children_text(counter, state):
-    """`3 rlm d1:2 d2:1` while that conversation's rlm() children run, else ""."""
-    depths = counter.by_depth(state.get("conversation"), state.get("agy"))
+    agent_id = state.get("agent", state.get("agy"))
+    depths = counter.by_depth(state.get("conversation"), agent_id)
     if not depths:
         return ""
     return f"{sum(depths.values())} rlm " + " ".join(f"d{d}:{n}" for d, n in sorted(depths.items()))
 
 
 def proc_stat(pid):
-    """(comm, ppid) of pid, or None once it is gone."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
         return None
     state, ppid = stat[stat.rindex(")") + 2 :].split()[:2]
-    # A zombie keeps its comm until agy_pty reaps it, which it may never do.
     if state == "Z":
         return None
     return stat[stat.index("(") + 1 : stat.rindex(")")], int(ppid)
 
 
-def is_agy(pid):
+def is_agent(pid, comm_names=None):
     stat = proc_stat(pid)
-    return bool(stat) and stat[0] == "agy"
+    names = comm_names or DEFAULT_PROCESS_NAMES
+    return bool(stat) and stat[0] in names
 
 
-def find_agy():
-    """The agy process running this status line (it may sit under an `sh -c`)."""
+def find_agent(comm_names=None):
+    names = comm_names or DEFAULT_PROCESS_NAMES
     pid = os.getppid()
     while pid > 1 and (stat := proc_stat(pid)):
-        if stat[0] == "agy":
+        if stat[0] in names:
             return pid
         pid = stat[1]
     return None
 
 
-def tty_path(agy_pid):
-    """agy's terminal device; the detached ticker has no /dev/tty to open."""
+# Backward-compatibility aliases for antigravity
+def is_agy(pid):
+    return is_agent(pid, ["agy"])
+
+
+def find_agy():
+    return find_agent(["agy"])
+
+
+def tty_path(agent_pid):
     for fd in (0, 1, 2):
         try:
-            path = os.readlink(f"/proc/{agy_pid}/fd/{fd}")
+            path = os.readlink(f"/proc/{agent_pid}/fd/{fd}")
         except OSError:
             continue
         if path.startswith("/dev/pts/") or (path.startswith("/dev/tty") and path[8:].isdigit()):
@@ -119,38 +117,81 @@ def tty_path(agy_pid):
 
 
 def emit(fd, title):
-    """Set the title in one write, so agy's own frames never split the sequence."""
     try:
         os.write(fd, f"\033]0;{title}\007".encode())
     except OSError:
         pass
 
 
-def conversation_title(conversation):
-    """The title agy generated for the conversation, else its first prompt."""
+def emit_to_tty(tty, title=""):
+    try:
+        fd = os.open(tty, os.O_WRONLY | os.O_NOCTTY)
+        emit(fd, title)
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def read_transcript_title(transcript_path):
+    if not transcript_path:
+        return ""
+    p = Path(transcript_path)
+    if not p.is_file():
+        return ""
+    try:
+        custom, ai = "", ""
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"custom-title"' in line:
+                    try:
+                        data = json.loads(line)
+                        if data.get("type") == "custom-title" and data.get("customTitle"):
+                            custom = data["customTitle"]
+                    except Exception:
+                        pass
+                elif '"ai-title"' in line:
+                    try:
+                        data = json.loads(line)
+                        if data.get("type") == "ai-title" and data.get("aiTitle"):
+                            ai = data["aiTitle"]
+                    except Exception:
+                        pass
+        return custom or ai or ""
+    except Exception:
+        return ""
+
+
+def conversation_title(conversation, transcript_path=None):
+    if transcript_path:
+        title = read_transcript_title(transcript_path)
+        if title:
+            return title
     if not conversation:
         return ""
     try:
-        with sqlite3.connect(f"file:{SUMMARIES}?mode=ro", uri=True, timeout=0.5) as db:
-            row = db.execute(
-                "select title, preview from conversation_summaries where conversation_id = ?",
-                (conversation,),
-            ).fetchone()
+        if SUMMARIES.exists():
+            with sqlite3.connect(f"file:{SUMMARIES}?mode=ro", uri=True, timeout=0.5) as db:
+                row = db.execute(
+                    "select title, preview from conversation_summaries where conversation_id = ?",
+                    (conversation,),
+                ).fetchone()
+                return next((t for t in row or () if t and t.strip()), "")
     except sqlite3.Error:
-        return ""
-    return next((t for t in row or () if t and t.strip()), "")
+        pass
+    return ""
 
 
-def title_text(state):
-    """A name the user gave the conversation, else agy's title, else the agent name."""
-    text = " ".join((state.get("name") or conversation_title(state.get("conversation")) or "").split())
+def title_text(state, fallback=None):
+    name = state.get("name")
+    if not name and (state.get("conversation") or state.get("transcript_path")):
+        name = conversation_title(state.get("conversation"), state.get("transcript_path"))
+    text = " ".join((name or "").split())
     if not text:
-        return FALLBACK
+        text = fallback or state.get("fallback") or FALLBACK
     return text if len(text) <= TITLE_MAX else text[: TITLE_MAX - 1] + "…"
 
 
 def compose_title(glyph, text, timer=""):
-    """One title line, keeping the timer inside TITLE_MAX even when the name must shrink."""
     suffix = f" · {timer}" if timer else ""
     room = TITLE_MAX - len(glyph) - 1 - len(suffix)
     if room <= 0:
@@ -160,7 +201,6 @@ def compose_title(glyph, text, timer=""):
     return f"{glyph} {text}{suffix}"
 
 
-# ---------- per-terminal state ----------
 def state_file(tty, suffix):
     return STATE_DIR / (tty.strip("/").replace("/", "-") + suffix)
 
@@ -184,7 +224,6 @@ def save(tty, state):
 
 
 def ticker_lock(tty):
-    """This terminal's ticker lock, or None while a ticker holds it."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     fd = os.open(state_file(tty, ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
     try:
@@ -195,42 +234,54 @@ def ticker_lock(tty):
     return fd
 
 
-# ---------- the two entry points ----------
+def start_ticker(tty):
+    if (lock := ticker_lock(tty)) is not None:
+        os.close(lock)
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "tick", tty],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True, start_new_session=True,
+        )
+
+
 def tick(tty):
-    """Draw the title until agy exits, then hand the title back to the shell."""
     try:
         fd = os.open(tty, os.O_WRONLY | os.O_NOCTTY)
     except OSError:
         return
     lock = ticker_lock(tty)
-    if lock is None:  # another ticker owns this terminal
+    if lock is None:
         os.close(fd)
         return
     frame, text, shown, seen, refresh_at = 0, "", None, None, 0.0
     counter = tool_state.ChildrenCounter(tool_state.rlm_data_dir())
     while True:
         state = load(tty)
-        if not is_agy(state.get("agy", 0)):
-            emit(fd, "")  # agy is gone, so drop our title
+        pid = state.get("agent", state.get("agy", 0))
+        comm_names = state.get("comm_names") or DEFAULT_PROCESS_NAMES
+        if isinstance(comm_names, str):
+            comm_names = comm_names.split() or DEFAULT_PROCESS_NAMES
+        if not is_agent(pid, comm_names=comm_names):
+            emit(fd, "")
             break
         now, working = time.monotonic(), state.get("working")
         if state != seen or now >= refresh_at:
-            # agy can generate the conversation title mid-turn
-            text, seen, refresh_at = title_text(state), state, now + TITLE_REFRESH
+            text, seen, refresh_at = title_text(state, fallback=state.get("fallback")), state, now + TITLE_REFRESH
         timer = tool_timer(state.get("conversation"))
-        # The title is the only surface agy does not freeze during a tool call, so the
-        # children of the running cell are counted from their logs and shown here.
         children = children_text(counter, state)
         if children:
             timer = f"{timer} · {children}" if timer else children
-        # agy redraws its status line only on state changes and reports "idle" while a long
-        # tool still runs, so a live record keeps the glyph moving and the timer counting.
         working = working or bool(timer)
-        glyph = WORKING_FRAMES[frame % len(WORKING_FRAMES)] if working else IDLE_GLYPH
-        if (title := compose_title(glyph, text, timer)) != shown:
+        frames = state.get("working_frames") or WORKING_FRAMES
+        if isinstance(frames, str):
+            frames = frames.split() or WORKING_FRAMES
+        idle = state.get("idle_glyph") or IDLE_GLYPH
+        glyph = frames[frame % len(frames)] if working else idle
+        suffix = timer if working else ""
+        if (title := compose_title(glyph, text, suffix)) != shown:
             shown = title
             emit(fd, title)
-        if working:  # only the working glyph animates
+        if working:
             frame += 1
         time.sleep(TICK)
     os.close(lock)
@@ -238,7 +289,6 @@ def tick(tty):
 
 
 def update(payload, start_ticker=True):
-    """Save state and turn timer, start ticker if requested, return current banner."""
     agy = find_agy()
     if agy is None or not (tty := tty_path(agy)):
         return None
@@ -265,8 +315,7 @@ def update(payload, start_ticker=True):
         "banner": banner,
     })
     if start_ticker and (lock := ticker_lock(tty)) is not None:
-        os.close(lock)  # hand the lock to the ticker
-        # no inherited fds: agy reads the status line until its stdout closes
+        os.close(lock)
         subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), "tick", tty],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

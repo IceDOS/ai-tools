@@ -52,9 +52,9 @@ extra = {}
 # "<glyph> <title>", like Claude Code: a fixed glyph while pi waits for you, a spinner while it works.
 enable = true
 # Shown while pi waits for input, including while a question or approval prompt is open.
-idleGlyph = "○"
+idleGlyph = "◍"
 # Cycled every 250ms while pi works; each entry is one frame.
-workingGlyphs = ["◜", "◝", "◞", "◟"]
+workingGlyphs = ["◴", "◷", "◶", "◵"]
 
 [icedos.ai-tools.pi-agent.hooks]
 # Commands run when a listed provider fails; exit 0 makes pi retry the request. Each entry:

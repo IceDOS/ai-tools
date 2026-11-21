@@ -42,7 +42,7 @@ test("the topic models stay on the provider the user picked, cheapest first", ()
 });
 
 test("compose puts one space between glyph and title", () => {
-  assert.equal(lib.compose("○", "pi"), "○ pi");
+  assert.equal(lib.compose("◍", "pi"), "◍ pi");
   assert.equal(lib.compose("", "pi"), "pi");
 });
 
@@ -123,29 +123,29 @@ test("the title follows the agent state and the spinner frames", () => {
   try {
     const { emit, titles } = harness();
     emit("session_start", { reason: "startup" });
-    assert.equal(titles.at(-1), "○ pi");
+    assert.equal(titles.at(-1), "◍ pi");
     assert.equal(timers.live(), 0, "an idle title needs no timer");
 
     emit("agent_start");
-    assert.equal(titles.at(-1), "◜ pi");
+    assert.equal(titles.at(-1), "◴ pi");
     assert.equal(timers.live(), 1);
     mock.timers.tick(250);
-    assert.equal(titles.at(-1), "◝ pi");
+    assert.equal(titles.at(-1), "◷ pi");
 
     // A blocking prompt means pi waits on the user, so the spinner stops.
     emit("ui_prompt_start", { kind: "confirm" });
-    assert.equal(titles.at(-1), "○ pi");
+    assert.equal(titles.at(-1), "◍ pi");
     assert.equal(timers.live(), 0);
     mock.timers.tick(1000);
-    assert.equal(titles.at(-1), "○ pi");
+    assert.equal(titles.at(-1), "◍ pi");
 
     emit("ui_prompt_end", { kind: "confirm" });
     assert.equal(timers.live(), 1);
     mock.timers.tick(250);
-    assert.equal(titles.at(-1), "◞ pi");
+    assert.equal(titles.at(-1), "◶ pi");
 
     emit("agent_settled", { aborted: false });
-    assert.equal(titles.at(-1), "○ pi");
+    assert.equal(titles.at(-1), "◍ pi");
     assert.equal(timers.live(), 0);
 
     emit("session_shutdown", { reason: "quit" });
@@ -170,7 +170,7 @@ test("an unchanged idle title is not written again", () => {
     emit("session_info_changed", {});
     mock.timers.tick(4000);
     assert.equal(titles.length, written);
-    assert.equal(titles.filter((title) => title === "○ pi").length, 1);
+    assert.equal(titles.filter((title) => title === "◍ pi").length, 1);
 
     emit("agent_settled", { aborted: false });
     assert.equal(titles.length, written);
@@ -189,7 +189,7 @@ test("a session name wins over a generated topic and the first prompt", async ()
   emit("before_agent_start", { messageType: "user", prompt: "please fix the terminal title" });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(streamed.at(-1)?.provider, "b");
-  assert.equal(titles.at(-1), "○ Name the session");
+  assert.equal(titles.at(-1), "◍ Name the session");
 
   const renamed = harness({ models: [free], model: free, reply: "ignored" });
   renamed.emit("session_start", { reason: "startup" });
@@ -197,7 +197,7 @@ test("a session name wins over a generated topic and the first prompt", async ()
   renamed.pi.setSessionName("my session");
   renamed.emit("session_info_changed", { name: "my session" });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(renamed.titles.at(-1), "○ my session");
+  assert.equal(renamed.titles.at(-1), "◍ my session");
 });
 
 test("promptText reads typed prompts and extension messages", () => {
@@ -217,12 +217,12 @@ test("a relay turn titles the session even though it never emits an input event"
   // pi starts a relay or extension turn straight from sendMessage(..., { triggerTurn: true }).
   emit("before_agent_start", { messageType: "custom", message: { content: "[relay from planner] fix the title" } });
   emit("agent_start");
-  assert.equal(titles.at(-1), "◜ [relay from planner] fix the title");
+  assert.equal(titles.at(-1), "◴ [relay from planner] fix the title");
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(streamed.length, 1);
   assert.ok(titles.at(-1)?.includes("Die Wurzel des Titels"), titles.at(-1));
   emit("agent_settled", { aborted: false });
-  assert.equal(titles.at(-1), "○ Die Wurzel des Titels");
+  assert.equal(titles.at(-1), "◍ Die Wurzel des Titels");
 });
 
 test("the topic request turns reasoning off so the reply holds text", async () => {
@@ -260,10 +260,10 @@ test("a resumed session titles itself from the history before any turn", async (
   const { emit, streamed, titles } = harness({ models: [free], model: free, reply: "Stuck Terminal Title", history });
   emit("session_start", { reason: "resume" });
   // Seeded right away, before pi starts a run.
-  assert.equal(titles.at(-1), "○ why does the title stay stuck");
+  assert.equal(titles.at(-1), "◍ why does the title stay stuck");
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(streamed.length, 1, "a resume gets one topic call");
-  assert.equal(titles.at(-1), "○ Stuck Terminal Title");
+  assert.equal(titles.at(-1), "◍ Stuck Terminal Title");
 });
 
 test("a resumed session with a name keeps the name and skips the topic call", async () => {
@@ -272,6 +272,46 @@ test("a resumed session with a name keeps the name and skips the topic call", as
   const { emit, streamed, titles } = harness({ name: "my session", models: [free], model: free, history });
   emit("session_start", { reason: "resume" });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(titles.at(-1), "○ my session");
+  assert.equal(titles.at(-1), "◍ my session");
   assert.equal(streamed.length, 0);
+});
+
+test("compose includes tool timer and clips to MAX_CHARS keeping suffix", () => {
+  assert.equal(lib.compose("◍", "pi", "⏱ bash 1.2s"), "◍ pi · ⏱ bash 1.2s");
+  assert.equal(lib.compose("", "pi", "⏱ bash 1.2s"), "pi · ⏱ bash 1.2s");
+  const longTitle = "a".repeat(100);
+  const titled = lib.compose("◍", longTitle, "⏱ bash 1.2s");
+  assert.equal(titled.length, 80);
+  assert.ok(titled.endsWith("… · ⏱ bash 1.2s"));
+});
+
+test("the title shows tool timer while a tool runs and reverts when done", () => {
+  mock.timers.enable({ apis: ["setInterval", "Date"] });
+  const timers = liveTimers();
+  try {
+    const { emit, titles } = harness();
+    emit("session_start", { reason: "startup" });
+    assert.equal(titles.at(-1), "◍ pi");
+
+    emit("agent_start");
+    assert.equal(titles.at(-1), "◴ pi");
+
+    emit("tool_execution_start", { toolCallId: "call-1", toolName: "bash" });
+    assert.equal(titles.at(-1), "◴ pi · ⏱ bash 0.0s");
+
+    mock.timers.tick(250);
+    assert.equal(titles.at(-1), "◷ pi · ⏱ bash 0.3s");
+
+    mock.timers.tick(1000);
+    assert.equal(titles.at(-1), "◷ pi · ⏱ bash 1.3s");
+
+    emit("tool_execution_end", { toolCallId: "call-1", toolName: "bash" });
+    assert.equal(titles.at(-1), "◷ pi");
+
+    emit("agent_settled");
+    assert.equal(titles.at(-1), "◍ pi");
+  } finally {
+    timers.restore();
+    mock.timers.reset();
+  }
 });

@@ -1,12 +1,13 @@
 // Terminal title: "<glyph> <title>", an idle glyph and a working spinner, like Claude Code.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { composeToolTimer } from "./tool-format.ts";
 
 // Substituted at build time; the literals keep the unbuilt source runnable.
 const IDLE_RAW = "@idleGlyph@";
-const IDLE = IDLE_RAW.startsWith("@") ? "○" : IDLE_RAW;
+const IDLE = IDLE_RAW.startsWith("@") ? "◍" : IDLE_RAW;
 const WORKING_RAW = "@workingGlyphs@";
-const WORKING: string[] = WORKING_RAW.startsWith("@") ? ["◜", "◝", "◞", "◟"] : JSON.parse(WORKING_RAW);
+const WORKING: string[] = WORKING_RAW.startsWith("@") ? ["◴", "◷", "◶", "◵"] : JSON.parse(WORKING_RAW);
 
 const TICK_MS = 250;
 const MAX_CHARS = 80;
@@ -89,8 +90,13 @@ function firstUserPrompt(entries: readonly HistoryEntry[]): string | undefined {
   return undefined;
 }
 
-function compose(glyph: string, title: string): string {
-  return glyph ? `${glyph} ${title}` : title;
+function compose(glyph: string, title: string, timer?: string): string {
+  const suffix = timer ? ` · ${timer}` : "";
+  const prefix = glyph ? `${glyph} ` : "";
+  const room = MAX_CHARS - prefix.length - suffix.length;
+  if (room <= 0) return `${prefix}${title}`.trim();
+  const text = clip(title, room);
+  return `${prefix}${text}${suffix}`.trim();
 }
 
 export const lib = { clip, compose, firstUserPrompt, normalizeTopic, promptText, textOf, topicModels };
@@ -119,10 +125,21 @@ export default function terminalTitle(pi: ExtensionAPI) {
   }
 
   // pi's own title writer is blanked at build time, so this is the only caller of setTitle.
+  const runningTools = new Map<string, { tool: string; start: number }>();
+
+  function activeTimer(): string | undefined {
+    let oldest: { tool: string; start: number } | undefined;
+    for (const entry of runningTools.values()) {
+      if (!oldest || entry.start < oldest.start) oldest = entry;
+    }
+    return oldest ? composeToolTimer(oldest.tool, Math.max(0, Date.now() - oldest.start)) : undefined;
+  }
+
   function render() {
     if (!ctx || ctx.mode !== "tui") return;
     const frame = working() ? (WORKING[tick % WORKING.length] || IDLE) : IDLE;
-    const next = compose(frame, title());
+    const timerText = working() ? activeTimer() : undefined;
+    const next = compose(frame, title(), timerText);
     if (next === shown) return;
     try {
       ctx.ui.setTitle(next);
@@ -156,6 +173,7 @@ export default function terminalTitle(pi: ExtensionAPI) {
     firstPrompt = "";
     topic = undefined;
     shown = undefined;
+    runningTools.clear();
     generation++;
   }
 
@@ -222,7 +240,18 @@ export default function terminalTitle(pi: ExtensionAPI) {
     ctx = context;
     running = false;
     prompts = 0;
+    runningTools.clear();
     sync();
+  });
+
+  pi.on("tool_execution_start", (event: any) => {
+    runningTools.set(event.toolCallId, { tool: event.toolName, start: Date.now() });
+    render();
+  });
+
+  pi.on("tool_execution_end", (event: any) => {
+    runningTools.delete(event.toolCallId);
+    render();
   });
 
   // A blocking prompt means pi is waiting on the user, so show the idle glyph.
