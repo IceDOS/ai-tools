@@ -55,6 +55,13 @@ class TestToolTimerHook(unittest.TestCase):
             {"tool": "run_command", "start_ts": BASE, "id": "toolu_01", "step": 19},
         )
 
+    def test_an_mcp_call_is_named_server_slash_tool(self):
+        args = {"ServerName": '"rlm_kernel"', "ToolName": '"ipython"', "Arguments": '{"code": "1"}'}
+        self.run_hook("PreToolUse", {"conversationId": "c1", "toolCall": {"name": "call_mcp_tool", "args": args}})
+        self.assertEqual(tool_state.load("c1")["tool"], "rlm_kernel/ipython")
+        self.run_hook("PreToolUse", {"conversationId": "c2", "toolCall": {"name": "call_mcp_tool", "args": {}}})
+        self.assertEqual(tool_state.load("c2")["tool"], "call_mcp_tool")
+
     def test_the_event_also_comes_from_the_payload(self):
         code, _ = self.run_hook(
             None,

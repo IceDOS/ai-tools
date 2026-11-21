@@ -71,9 +71,11 @@ def tool_timer(conversation, now=None):
 
 
 def children_text(counter, state):
-    """`2 rlm` while that conversation's rlm() children run, else ""."""
-    running = counter.count(state.get("conversation"), state.get("agy"))
-    return f"{running} rlm" if running else ""
+    """`3 rlm d1:2 d2:1` while that conversation's rlm() children run, else ""."""
+    depths = counter.by_depth(state.get("conversation"), state.get("agy"))
+    if not depths:
+        return ""
+    return f"{sum(depths.values())} rlm " + " ".join(f"d{d}:{n}" for d, n in sorted(depths.items()))
 
 
 def proc_stat(pid):

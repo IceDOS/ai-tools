@@ -161,8 +161,12 @@ class ChildrenCounter:
 
     def count(self, conversation=None, agy=None):
         """How many children of that conversation run right now (cached between scans)."""
+        return sum(self.by_depth(conversation, agy).values())
+
+    def by_depth(self, conversation=None, agy=None):
+        """{depth: running children} for that conversation (cached between scans)."""
         if not self.data_dir:
-            return 0
+            return {}
         now = self.clock()
         if (cached := self.scans.get((conversation, agy))) and now - cached[0] < self.interval:
             return cached[1]
@@ -174,20 +178,22 @@ class ChildrenCounter:
         ids = (conversation, session_conversation(self.data_dir, agy))
         log_dir = next((d for i in ids if (d := children_dir(self.data_dir, i)) and d.is_dir()), None)
         if log_dir is None:
-            return 0
+            return {}
         try:
             logs = [p for p in log_dir.iterdir() if p.name.endswith(".jsonl")]
         except OSError:  # gc may prune the dir under us
-            return 0
-        running = 0
+            return {}
+        running = {}
         for path in logs:
             if path in self.ended:
                 continue
-            if path not in self.starts:  # the start record's pid is read once per log
-                pid = (child_start(path) or {}).get("pid")
-                self.starts[path] = pid if isinstance(pid, int) else None
-            if child_running(path, self.starts[path]):
-                running += 1
+            if path not in self.starts:  # the start record is read once per log
+                record = child_start(path) or {}
+                pid, depth = record.get("pid"), record.get("depth")
+                self.starts[path] = (pid if isinstance(pid, int) else None, depth if isinstance(depth, int) else 1)
+            pid, depth = self.starts[path]
+            if child_running(path, pid):
+                running[depth] = running.get(depth, 0) + 1
             else:
                 self.ended.add(path)
         return running

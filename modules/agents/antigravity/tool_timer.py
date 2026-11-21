@@ -20,6 +20,28 @@ def read_payload():
     return payload if isinstance(payload, dict) else {}
 
 
+def arg(args, key):
+    """One call_mcp_tool argument; agy JSON-encodes each value, so a server name arrives quoted."""
+    value = args.get(key) if isinstance(args, dict) else None
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return value
+        return decoded if isinstance(decoded, str) else value
+    return ""
+
+
+def tool_name(call):
+    """The tool agy runs; an MCP call is named `server/tool`, the way agy's own tool row shows it."""
+    name = call.get("name") or ""
+    if name == "call_mcp_tool":
+        server, tool = arg(call.get("args"), "ServerName"), arg(call.get("args"), "ToolName")
+        if server and tool:
+            return f"{server}/{tool}"
+    return name
+
+
 def main(argv):
     event = (argv[0] if argv else "").strip()
     payload = read_payload()
@@ -27,7 +49,7 @@ def main(argv):
     conversation = payload.get("conversationId")
     call = payload.get("toolCall") or {}
     if event == "PreToolUse":
-        tool_state.save(conversation, call.get("name") or "", call.get("id"), payload.get("stepIdx"))
+        tool_state.save(conversation, tool_name(call), call.get("id"), payload.get("stepIdx"))
         print(json.dumps(DECISION))
         return 0
     if event == "PostToolUse":

@@ -171,6 +171,7 @@ class TestChildLogs(unittest.TestCase):
         self.log("d", start("d", parent="a", depth=2))
         counter = tool_state.ChildrenCounter(self.data_dir)
         self.assertEqual(counter.count(CONV), 3)
+        self.assertEqual(counter.by_depth(CONV), {1: 2, 2: 1})
 
     def test_nothing_to_count_is_zero(self):
         self.assertEqual(tool_state.ChildrenCounter(self.data_dir).count(CONV), 0)
@@ -240,13 +241,13 @@ class TestTitleChildren(unittest.TestCase):
 
     def test_the_title_counts_the_running_children(self):
         titles = tick_once(self.tty, {"agy": 7, "name": "Task", "conversation": CONV, "working": True})
-        self.assertEqual(titles, ["\u2596 Task \u00b7 1 rlm", "\u2598 Task \u00b7 1 rlm", "\u259d Task \u00b7 1 rlm", ""])
+        self.assertEqual(titles, ["\u2596 Task \u00b7 1 rlm d1:1", "\u2598 Task \u00b7 1 rlm d1:1", "\u259d Task \u00b7 1 rlm d1:1", ""])
 
     def test_the_title_keeps_the_tool_timer_and_appends_the_children(self):
         with mock.patch.object(tool_state, "time", FakeTime(100.0)):
             tool_state.save(CONV, "mcp__kernel__ipython", started=92.0)  # 8s, on both clocks
             titles = tick_once(self.tty, {"agy": 7, "name": "Task", "conversation": CONV, "working": False})
-        self.assertEqual(titles[0], "\u2596 Task \u00b7 \u23f1 ipython 8s \u00b7 1 rlm")
+        self.assertEqual(titles[0], "\u2596 Task \u00b7 \u23f1 ipython 8s \u00b7 1 rlm d1:1")
 
     def test_no_children_leaves_the_title_alone(self):
         (tool_state.children_dir(self.data_dir, CONV) / "a.jsonl").write_text(start("a") + "\n" + end("a") + "\n")
