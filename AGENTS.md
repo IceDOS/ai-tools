@@ -43,12 +43,25 @@ shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-
   antigravity writes `~/.config/gemini/rules/<name>.md`, `claude-code` sets
   `programs.claude-code.rules` (mkDefault per entry), and opencode concatenates them into
   `programs.opencode.context`.
-- `icedos.ai-tools.skills.pool` — name = full SKILL.md. Same fan-out: antigravity
-  `~/.local/share/gemini/antigravity-cli/skills/`, Claude Code `programs.claude-code.skills`,
-  opencode `programs.opencode.skills`. pi-agent builds them into a store dir that its
-  settings.json lists under skills.
-- Per-agent options of the same name win over the shared entry
-  (`antigravity.{rules,skills}`, `pi-agent.{rules,skills.extra-builtin}`).
+- `icedos.ai-tools.skills.pool` — name = full SKILL.md. Lands in the shared on-disk tree at
+  `${config.xdg.dataHome}/icedos/agents` (`~/.local/share/icedos/agents`) containing `global/`,
+  `per-agent/<agent>/` and `view/<agent>/skills/` (merged global + per-agent, per-agent wins,
+  minus that agent's `excludeSkills`). The whole root is one store derivation (`agents-dir`)
+  linked by one Home Manager `xdg.dataFile."icedos/agents"` entry, so rebuilds swap it
+  atomically and removed entries vanish. Fan-out: antigravity, Claude Code and opencode link
+  per entry into `view/<agent>/skills/<name>` (never a whole-dir link; user-installed skills
+  live in `~/.claude/skills`), while pi-agent lists `view/pi-agent/skills` in `settings.json`.
+  Claude marketplace plugins stay per user in HM scope.
+- `icedos.ai-tools.plugins.pool` — name = store path. Global plugin storage, not auto-loaded;
+  agents load only the global plugins listed in `per-agent.<agent>.globalPlugins`.
+- `icedos.ai-tools.per-agent.<agent>` — `{ skills, plugins, globalPlugins, excludeSkills }`
+  for `claude-code`, `antigravity`, `opencode`, and `pi-agent`. Agent options feed into them
+  (`claude-code.{skills,excludeSkills}`, `antigravity.{skills,excludeSkills}`,
+  `opencode.{skills,excludeSkills}`, `pi-agent.skills.{extra-builtin,exclude}`). Skill modules
+  (`superpowers`, `ponytail`, `unslop`) set `per-agent.<agent>.{globalPlugins,excludeSkills}` under
+  `lib.mkIf (has ...)` inside one `per-agent` attrset (a shallow `//` across agents drops all but the
+  last). `icedos.ai-tools.agent-views.<agent>.skills` (internal read-only) exposes the computed list of
+  view skill names for agent modules to link per entry.
 - Non-agent modules (`llamacpp`, `ollama` and the `mcp` modules) have a `skills`
   option that adds to `icedos.ai-tools.skills.pool`, so a skill ships with the module it documents.
 - `icedos.ai-tools.mcp-servers` — name = `programs.mcp.servers` entry. `default` gives every hm
@@ -146,8 +159,8 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   Extensions are store paths listed in the managed `settings.json` `extensions` key, in order:
   `extensions.builtin` (pi's examples, by name), the shipped cost-footer (behind `meters.cost`), context-cap
   (behind `context-window-cap.enable`), rate-limit-hook (when `hooks.rateLimit` or `vpn-rotate` is set), opencode-free (behind `extensions.opencodeFree`), view-image (behind `extensions.viewImage`), vpn-row (with the `vpn-rotate` module, which also adds a `hooks.rateLimit` entry) and terminal-title (behind `terminal-title.enable`), then `extensions.inline` by name. terminal-title owns the terminal title, so `patches/pi-terminal-title-noop.mjs` blanks pi's own `updateTerminalTitle` in the package (there is no setting for it) and the extension writes only on change.
-  The shipped ones are copied into one `pi-agent-extensions` store directory and those inner paths are what
-  `settings.json` lists: they import each other by relative path, so a per-file store path would break them.
+  The shipped ones live in `per-agent/pi-agent/plugins/pi-agent-extensions` and `settings.json` lists
+  those by stable path: they import each other by relative path, so a per-file store path would break them.
   `lib/extensions.nix` holds the `bundleScript`/`bundlePaths` helpers that build and address the directory; an
   entry with `load = false` is copied but left out of `settings.json`. `extensions/free-models.ts`, which
   the others import, is such an entry.
@@ -243,7 +256,8 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   such as `15m` (`s`/`m`/`h`); it only switches back while the session still uses the fallback. `icedos-status` shows the state as a footer row (`vpnRow`), and with agent-relay enabled the session's relay ID next to it. The module also turns off Stylix's
   opencode target, which only writes the `tui.json` OpenCode 2 ignores.
   Interactive invocations prepend `launchWrapper` and append `extraArgs`; `desktopEntry` installs a
-  `.desktop` file for the launcher. Background web service `web.{enable,extraArgs}` runs `opencode serve`
+  `.desktop` file for the launcher. The package wrapper sets `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1`
+  so opencode skips `~/.claude/skills`. Background web service `web.{enable,extraArgs}` runs `opencode serve`
   under a systemd user unit. `ai-accounts` isolates credentials and session history under
   `~/.local/state/icedos/ai-accounts/opencode/<account>/` (`OPENCODE_CONFIG_DIR` seeded with
   `opencode.json`, `OPENCODE_DB` pointing to `opencode.db`); provider `opencode-go`, login

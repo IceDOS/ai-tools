@@ -41,12 +41,12 @@ in
   };
 
   pluginEntry =
-    cfg: pkgs:
+    cfg: pkgs: dataHome:
     let
       bin = "${(getRlmBase pkgs).rlm-mcp}/bin/rlm-mcp";
     in
     lib.optional cfg.enable {
-      package = "${pluginDir}";
+      package = "${dataHome}/icedos/agents/per-agent/opencode/plugins/rlm";
       options = {
         rlmMcp = bin;
       };

@@ -11,6 +11,34 @@
 # skill of the same name wins.
 [icedos.ai-tools.skills.pool]
 
+# Global plugin storage: name = store path. Agents load ones listed in per-agent.<agent>.globalPlugins.
+[icedos.ai-tools.plugins.pool]
+
+# Per-agent overrides: skills, plugins, globalPlugins, and excluded skill names.
+[icedos.ai-tools.per-agent.claude-code]
+excludeSkills = []
+globalPlugins = []
+skills = {}
+plugins = {}
+
+[icedos.ai-tools.per-agent.antigravity]
+excludeSkills = []
+globalPlugins = []
+skills = {}
+plugins = {}
+
+[icedos.ai-tools.per-agent.opencode]
+excludeSkills = []
+globalPlugins = []
+skills = {}
+plugins = {}
+
+[icedos.ai-tools.per-agent.pi-agent]
+excludeSkills = []
+globalPlugins = []
+skills = {}
+plugins = {}
+
 # Shared MCP server registry: name = server entry (command/args/env or url).
 # Each MCP module adds its own. Every hm user gets them in programs.mcp.servers,
 # which all agent modules read, and /etc/mcp/servers.json lists them for agents

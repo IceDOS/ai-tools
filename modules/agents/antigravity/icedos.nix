@@ -15,6 +15,7 @@
       inherit ((importTOML ./config.toml).icedos.ai-tools.antigravity)
         desktopEntry
         enableMcpIntegration
+        excludeSkills
         extensions
         extra-mcp-servers
         launchWrapper
@@ -33,6 +34,9 @@
       # Whether to wire Home Manager's shared programs.mcp.servers registry
       # into ~/.config/gemini/mcp_config.json for Antigravity.
       enableMcpIntegration = mkBoolOption { default = enableMcpIntegration; };
+
+      # Shared skills Antigravity skips.
+      excludeSkills = mkStrListOption { default = excludeSkills; };
 
       # Additional MCP servers registered exclusively for Antigravity.
       extra-mcp-servers = mkAttrsOfOption { default = extra-mcp-servers; } lib.types.anything;
@@ -130,7 +134,9 @@
           # Shared icedos.ai-tools entries first, so a same-named antigravity entry wins.
           rules = config.icedos.ai-tools.rules // config.icedos.ai-tools.antigravity.rules;
 
-          skills = config.icedos.ai-tools.skills.pool // config.icedos.ai-tools.antigravity.skills;
+          antigravityViewSkills = config.icedos.ai-tools.agent-views.antigravity.skills;
+          antigravityGlobalPlugins = config.icedos.ai-tools.per-agent.antigravity.globalPlugins;
+          antigravityPerAgentPlugins = config.icedos.ai-tools.per-agent.antigravity.plugins;
 
           inherit (lib)
             filterAttrs
@@ -283,6 +289,18 @@
             ];
         in
         {
+          icedos.ai-tools.per-agent.antigravity = {
+            skills = config.icedos.ai-tools.antigravity.skills;
+            excludeSkills = config.icedos.ai-tools.antigravity.excludeSkills;
+            plugins =
+              (lib.optionalAttrs rlmCfg.enable {
+                rlm = rlm.plugin;
+              })
+              // (lib.optionalAttrs terminal-title.enable {
+                tool-timer = toolTimerPlugin;
+              });
+          };
+
           icedos.ai-tools.agent-launch.agents.antigravity = {
             # agy is not on PATH; this module only wires its config.
             command = lib.mkDefault agyCommand;
@@ -357,6 +375,18 @@
                   mcpServers = mapAttrs (_: transformServer) enabledServers;
                 };
 
+                antigravityPlugins =
+                  (lib.genAttrs antigravityGlobalPlugins (
+                    name: "${config.xdg.dataHome}/icedos/agents/global/plugins/${name}"
+                  ))
+                  // (lib.mapAttrs (
+                    name: _: "${config.xdg.dataHome}/icedos/agents/per-agent/antigravity/plugins/${name}"
+                  ) antigravityPerAgentPlugins);
+
+                antigravitySkills = lib.genAttrs antigravityViewSkills (
+                  name: "${config.xdg.dataHome}/icedos/agents/view/antigravity/skills/${name}"
+                );
+
               in
               {
                 # The managed block for agy's settings.json; null clears a key.
@@ -389,16 +419,19 @@
                   // mapAttrs' (
                     name: text: nameValuePair "gemini/rules/${name}.md" { text = withTrigger text; }
                   ) rules
-                  // lib.optionalAttrs rlmCfg.enable {
-                    "gemini/plugins/rlm".source = rlm.plugin;
-                  }
-                  // lib.optionalAttrs terminal-title.enable {
-                    "gemini/plugins/tool-timer".source = toolTimerPlugin;
-                  };
+                  // lib.mapAttrs' (
+                    name: target:
+                    nameValuePair "gemini/plugins/${name}" {
+                      source = config.lib.file.mkOutOfStoreSymlink target;
+                    }
+                  ) antigravityPlugins;
 
-                  xdg.dataFile = mapAttrs' (
-                    name: text: nameValuePair "gemini/antigravity-cli/skills/${name}/SKILL.md" { inherit text; }
-                  ) skills;
+                  xdg.dataFile = lib.mapAttrs' (
+                    name: target:
+                    nameValuePair "gemini/antigravity-cli/skills/${name}" {
+                      source = config.lib.file.mkOutOfStoreSymlink target;
+                    }
+                  ) antigravitySkills;
 
                   # Terminal=true: the desktop environment launches the user's default terminal.
                   xdg.desktopEntries.antigravity-cli = mkIf desktopEntry {
@@ -474,6 +507,7 @@
                         done
                       fi
                     done
+                    find "$SHARE_GEMINI/antigravity-cli/skills" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
 
                     # 3. Move ai-accounts state to ~/.local/state/icedos/ai-accounts
                     OLD_STATE="${config.home.homeDirectory}/.local/state/ai-accounts"

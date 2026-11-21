@@ -12,6 +12,9 @@ extraArgs = []
 # Shared skills Claude Code skips, e.g. ones an installed plugin already ships.
 excludeSkills = []
 
+# Custom skills specific to Claude Code (name = SKILL.md).
+[icedos.ai-tools.claude-code.skills]
+
 # Terminal title "<glyph> <title>" with a tool timer; glyphs must share one width in the title font.
 [icedos.ai-tools.claude-code.terminal-title]
 enable = true

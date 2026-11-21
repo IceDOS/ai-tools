@@ -60,20 +60,21 @@ in
                 '';
               }) cfg.autoload
             );
-          }
-          // lib.optionalAttrs (has "claude-code") {
-            claude-code.excludeSkills = cfg.skills;
-          }
-          // lib.optionalAttrs (has "pi-agent") {
-            pi-agent = {
-              packages = [ "${src}" ];
-              skills.exclude = cfg.skills;
-            };
-          }
-          // lib.optionalAttrs (has "opencode") {
-            opencode = {
-              plugins = [ "${src}" ];
-              excludeSkills = cfg.skills;
+
+            plugins.pool.ponytail = src;
+
+            per-agent = {
+              claude-code = lib.mkIf (has "claude-code") {
+                excludeSkills = cfg.skills;
+              };
+              pi-agent = lib.mkIf (has "pi-agent") {
+                globalPlugins = [ "ponytail" ];
+                excludeSkills = cfg.skills;
+              };
+              opencode = lib.mkIf (has "opencode") {
+                globalPlugins = [ "ponytail" ];
+                excludeSkills = cfg.skills;
+              };
             };
           };
         }

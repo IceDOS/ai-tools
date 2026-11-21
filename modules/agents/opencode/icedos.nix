@@ -146,18 +146,6 @@ in
           }
           // cfg.extensions.vpn-rotate;
 
-          vpnPlugin = optional vpn.enable {
-            package = "${./plugins/vpn-rotate}";
-            options = {
-              command = [ "${pkgs.vpn-rotate}/bin/vpn-rotate" ];
-              inherit (vpn)
-                maxRetries
-                fallbackModels
-                fallbackReturn
-                ;
-            };
-          };
-
           # Concatenate shared and per-agent rules sorted by name into AGENTS.md context
           allRules =
             config.icedos.ai-tools.rules
@@ -170,22 +158,22 @@ in
 
 " (map (name: allRules.${name}) sortedRuleNames);
 
-          # Filter shared skills pool minus excludeSkills plus per-agent and RLM skills
           # The bundled review drives rlm() children, so it needs the RLM extension.
           reviewOn = cfg.extensions.recursive-language-models.enable && cfg.codeReview;
-          skills = removeAttrs (
-            config.icedos.ai-tools.skills.pool
-            // optionalAttrs reviewOn { code-review = builtins.readFile ./skills/code-review/SKILL.md; }
+          perAgentSkills =
+            optionalAttrs reviewOn { code-review = builtins.readFile ./skills/code-review/SKILL.md; }
             // optionalAttrs (reviewOn && cfg.freeReview) {
               free-review = builtins.readFile ./skills/free-review/SKILL.md;
             }
             // cfg.skills
-            // (rlm.skills cfg.extensions.recursive-language-models)
-          ) cfg.excludeSkills;
+            // (rlm.skills cfg.extensions.recursive-language-models);
 
           opencodeCommand = cfg.launchWrapper ++ [ "opencode" ];
 
           # Prune stale OpenCode logs and old sessions via CLI when not running
+          opencodeViewSkills = config.icedos.ai-tools.agent-views.opencode.skills;
+          opencodeGlobalPlugins = config.icedos.ai-tools.per-agent.opencode.globalPlugins;
+
           opencodeGcHook = ''
             O="''${HOME}/.local/share/opencode"
             [ -d "''${O}" ] || exit 0
@@ -230,28 +218,18 @@ in
               ) npmExtensions
             );
 
-          tuiPlugins =
-            optional
-              (
-                cfg.terminal-title.enable
-                || cfg.turnEndMessage
-                || cfg.toolTimer
-                || vpn.enable
-                || cfg.extensions.recursive-language-models.enable
-              )
-              {
-                package = "${./plugins/icedos-status}";
-                options = {
-                  inherit (cfg.terminal-title) idleGlyph workingGlyphs;
-                  terminalTitle = cfg.terminal-title.enable;
-                  turnEnd = cfg.turnEndMessage;
-                  inherit (cfg) toolTimer;
-                  vpnRow = vpn.enable;
-                  rlmRow = cfg.extensions.recursive-language-models.enable;
-                };
-              };
         in
         {
+          icedos.ai-tools.per-agent.opencode = {
+            skills = perAgentSkills;
+            plugins = {
+              vpn-rotate = ./plugins/vpn-rotate;
+              icedos-status = ./plugins/icedos-status;
+              rlm = ./rlm/plugin;
+            };
+            excludeSkills = cfg.excludeSkills;
+          };
+
           icedos.ai-tools.agent-launch.agents.opencode = {
             command = mkDefault opencodeCommand;
             resumeArgs = mkDefault [
@@ -287,28 +265,66 @@ in
                   else
                     pkgs.opencode;
 
-                wrappedPackage =
-                  if cfg.extraArgs == [ ] then
-                    basePackage
-                  else
-                    pkgs.symlinkJoin {
-                      name = "opencode-extra-args";
-                      version = basePackage.version;
-                      paths = [ basePackage ];
-                      nativeBuildInputs = [ pkgs.makeWrapper ];
-                      postBuild = ''
-                        rm "$out/bin/opencode"
-                        makeWrapper ${basePackage}/bin/opencode "$out/bin/opencode"                           --add-flags ${lib.escapeShellArg (lib.concatStringsSep " " cfg.extraArgs)}
-                      '';
-                      meta.mainProgram = "opencode";
+                wrappedPackage = pkgs.symlinkJoin {
+                  name = "opencode-wrapped";
+                  version = basePackage.version;
+                  paths = [ basePackage ];
+                  nativeBuildInputs = [ pkgs.makeWrapper ];
+                  postBuild = ''
+                    rm "$out/bin/opencode"
+                    makeWrapper ${basePackage}/bin/opencode "$out/bin/opencode" \
+                      --set OPENCODE_DISABLE_CLAUDE_CODE_SKILLS 1 \
+                      ${lib.optionalString (
+                        cfg.extraArgs != [ ]
+                      ) "--add-flags ${lib.escapeShellArg (lib.concatStringsSep " " cfg.extraArgs)}"}
+                  '';
+                  meta.mainProgram = "opencode";
+                };
+
+                globalPlugins = map (
+                  name: "${config.xdg.dataHome}/icedos/agents/global/plugins/${name}"
+                ) opencodeGlobalPlugins;
+
+                vpnPlugin = optional vpn.enable {
+                  package = "${config.xdg.dataHome}/icedos/agents/per-agent/opencode/plugins/vpn-rotate";
+                  options = {
+                    command = [ "${pkgs.vpn-rotate}/bin/vpn-rotate" ];
+                    inherit (vpn)
+                      maxRetries
+                      fallbackModels
+                      fallbackReturn
+                      ;
+                  };
+                };
+
+                tuiPlugins =
+                  optional
+                    (
+                      cfg.terminal-title.enable
+                      || cfg.turnEndMessage
+                      || cfg.toolTimer
+                      || vpn.enable
+                      || cfg.extensions.recursive-language-models.enable
+                    )
+                    {
+                      package = "${config.xdg.dataHome}/icedos/agents/per-agent/opencode/plugins/icedos-status";
+                      options = {
+                        inherit (cfg.terminal-title) idleGlyph workingGlyphs;
+                        terminalTitle = cfg.terminal-title.enable;
+                        turnEnd = cfg.turnEndMessage;
+                        inherit (cfg) toolTimer;
+                        vpnRow = vpn.enable;
+                        rlmRow = cfg.extensions.recursive-language-models.enable;
+                      };
                     };
 
                 mergedPlugins =
-                  cfg.plugins
+                  globalPlugins
+                  ++ cfg.plugins
                   ++ vpnPlugin
                   ++ npmEntries false
                   ++ (clm.pluginEntry cfg.extensions.context-language-models)
-                  ++ (rlm.pluginEntry cfg.extensions.recursive-language-models pkgs)
+                  ++ (rlm.pluginEntry cfg.extensions.recursive-language-models pkgs config.xdg.dataHome)
                   ++ (cfg.settings.plugins or [ ]);
                 mergedMcp = cfg.extra-mcp-servers // (cfg.settings.mcp or { });
 
@@ -322,16 +338,31 @@ in
                 };
 
                 config = {
+                  xdg.configFile =
+                    let
+                      userSkills =
+                        if builtins.isAttrs (config.programs.opencode.skills or null) then
+                          config.programs.opencode.skills
+                        else
+                          { };
+                      managedSkills = lib.filter (name: !(userSkills ? ${name})) opencodeViewSkills;
+                    in
+                    lib.listToAttrs (
+                      map (name: {
+                        name = "opencode/skills/${name}";
+                        value.source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.dataHome}/icedos/agents/view/opencode/skills/${name}";
+                      }) managedSkills
+                    );
+
                   programs.opencode = {
                     enable = mkDefault true;
-                    package = mkIf (cfg.extraArgs != [ ] || (aiAccountsOn && hasAccounts "opencode")) wrappedPackage;
+                    package = wrappedPackage;
                     enableMcpIntegration = cfg.enableMcpIntegration;
 
                     agents = rlm.agents cfg.extensions.recursive-language-models (
                       attrNames ((optionalAttrs cfg.enableMcpIntegration config.programs.mcp.servers) // mergedMcp)
                     );
                     context = mkDefault renderedContext;
-                    skills = mapAttrs (_: mkDefault) skills;
 
                     settings =
                       lib.recursiveUpdate

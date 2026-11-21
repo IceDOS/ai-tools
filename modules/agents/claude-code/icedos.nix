@@ -4,6 +4,7 @@ let
   inherit (lib) attrNames head importTOML;
 
   inherit (icedosLib)
+    mkAttrsOfOption
     mkBoolOption
     mkEnumOption
     mkIntBetweenOption
@@ -62,6 +63,9 @@ in
     desktopEntry = mkBoolOption { default = gcDefaults.desktopEntry; };
 
     extraArgs = mkStrListOption { default = gcDefaults.extraArgs; };
+
+    # Custom skills specific to Claude Code (name = SKILL.md content).
+    skills = mkAttrsOfOption { default = { }; } lib.types.lines;
 
     # Shared skills Claude Code skips, e.g. ones an installed plugin already ships.
     excludeSkills = mkStrListOption { default = gcDefaults.excludeSkills; };
@@ -153,7 +157,10 @@ in
           titleCfg = config.icedos.ai-tools.claude-code.terminal-title;
           claudeAiMcpServers = config.icedos.ai-tools.claude-code.claudeAiMcpServers;
           inherit (config.icedos.ai-tools) rules;
-          skills = removeAttrs config.icedos.ai-tools.skills.pool config.icedos.ai-tools.claude-code.excludeSkills;
+
+          claudeViewSkills = config.icedos.ai-tools.agent-views.claude-code.skills;
+          claudeGlobalPlugins = config.icedos.ai-tools.per-agent.claude-code.globalPlugins;
+          claudePerAgentPlugins = config.icedos.ai-tools.per-agent.claude-code.plugins;
 
           # Prune stale claude session data during `icedos gc` in nh clean style.
           claudeGcHook = ''
@@ -319,6 +326,11 @@ in
             inherit (config.icedos) users;
           };
 
+          icedos.ai-tools.per-agent.claude-code = {
+            excludeSkills = config.icedos.ai-tools.claude-code.excludeSkills;
+            skills = config.icedos.ai-tools.claude-code.skills;
+          };
+
           icedos.ai-tools.agent-launch.agents.claude = {
             command = lib.mkDefault [ "claude" ];
             resumeArgs = lib.mkDefault [
@@ -413,6 +425,24 @@ in
                     command = "${pkgs.python3}/bin/python3 ${claudeScripts}/tool_timer.py ${event} --idle-glyph ${lib.escapeShellArg titleCfg.idleGlyph} --working-glyphs ${lib.escapeShellArg (lib.concatStringsSep " " titleCfg.workingGlyphs)} --fallback ${lib.escapeShellArg "Claude Code"} --comm-names ${lib.escapeShellArg "claude .claude-wrapped"}";
                   }
                 ];
+
+                claudePlugins =
+                  (lib.genAttrs claudeGlobalPlugins (
+                    name: "${config.xdg.dataHome}/icedos/agents/global/plugins/${name}"
+                  ))
+                  // (lib.mapAttrs (
+                    name: _: "${config.xdg.dataHome}/icedos/agents/per-agent/claude-code/plugins/${name}"
+                  ) claudePerAgentPlugins);
+
+                claudeSkills = lib.genAttrs claudeViewSkills (
+                  name: "${config.xdg.dataHome}/icedos/agents/view/claude-code/skills/${name}"
+                );
+
+                userHMEntries =
+                  (lib.attrNames (config.programs.claude-code.skills or { }))
+                  ++ (lib.attrNames (config.programs.claude-code.plugins or { }));
+
+                claudeSkillDirEntries = removeAttrs (claudeSkills // claudePlugins) userHMEntries;
               in
               {
                 options.icedos.managed-settings.claude = icedosLib.mkAttrsOption {
@@ -454,10 +484,6 @@ in
                     enableMcpIntegration = true;
                     # Shared icedos.ai-tools entries; mkDefault lets a same-named programs.claude-code entry win.
                     rules = lib.mapAttrs (_: lib.mkDefault) rules;
-                    # A managed plugin of the same name already ships that skill; HM rejects the clash.
-                    skills = lib.mapAttrs (_: lib.mkDefault) (
-                      removeAttrs skills (lib.attrNames config.programs.claude-code.plugins)
-                    );
                     settings = {
                       remoteControlAtStartup = lib.mkDefault false;
                       autoCompactWindow = lib.mkDefault 300000;
@@ -501,6 +527,29 @@ in
                       };
                     };
                   };
+
+                  home.file = lib.mapAttrs' (
+                    name: target:
+                    lib.nameValuePair "${config.programs.claude-code.configDir}/skills/${name}" {
+                      source = config.lib.file.mkOutOfStoreSymlink target;
+                    }
+                  ) claudeSkillDirEntries;
+
+                  home.activation.icedosClaudeCodeSkillsLayout = lib.hm.dag.entryBefore [ "checkLinkTargets" ] ''
+                    CLAUDE_SKILLS="${config.programs.claude-code.configDir}/skills"
+                    if [ -d "$CLAUDE_SKILLS" ]; then
+                      find "$CLAUDE_SKILLS" -type l -print0 | while IFS= read -r -d "" link; do
+                        target=$(readlink "$link" || true)
+                        case "$target" in
+                          /nix/store/*-home-manager-files/*)
+                            run rm "$link"
+                            ;;
+                        esac
+                      done
+                      find "$CLAUDE_SKILLS" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
+                    fi
+                  '';
+
                   # Terminal=true: the desktop environment launches the user's default terminal.
                   xdg.desktopEntries."claude-code" = lib.mkIf (desktopEntry && config.programs.claude-code.enable) {
                     name = "Claude Code";

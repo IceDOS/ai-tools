@@ -222,7 +222,7 @@
             }
             // cfg.rules;
           # The bundled review drives rlm() children, so it needs pi-rlm.
-          skills =
+          perAgentSkills =
             lib.optionalAttrs (rlm.enable && cfg.skills.codeReview) {
               code-review = builtins.readFile ./skills/code-review/SKILL.md;
             }
@@ -232,20 +232,16 @@
                 {
                   opencode-free-review = builtins.readFile ./skills/opencode-free-review/SKILL.md;
                 }
-            // removeAttrs config.icedos.ai-tools.skills.pool cfg.skills.exclude
             // cfg.skills.extra-builtin;
 
           skillName = import ./lib/skill-name.nix { inherit lib; };
-          invalidSkillNames = skillName.invalidSkillNames (lib.attrNames skills);
-
-          skillsDir = pkgs.linkFarm "pi-agent-skills" (
-            lib.mapAttrsToList (name: content: {
-              name = "${name}/SKILL.md";
-              path = pkgs.writeText "${name}-SKILL.md" content;
-            }) skills
+          invalidSkillNames = skillName.invalidSkillNames (
+            lib.attrNames (config.icedos.ai-tools.skills.pool // perAgentSkills)
           );
 
           dataDirLib = import ./lib/data-dir.nix { inherit lib; };
+          piAgentGlobalPlugins = config.icedos.ai-tools.per-agent.pi-agent.globalPlugins;
+
           # The wrapper exports PI_CODING_AGENT_DIR; the fallback covers scripts run outside it.
           agentDirSh = "\${PI_CODING_AGENT_DIR:-${dataDirLib.shell cfg.settings.dataDir}}";
           mcpJson = import ./lib/mcp-json.nix { inherit lib; };
@@ -531,13 +527,20 @@
             lib.filterAttrs (name: _: !(lib.elem name invalidInline)) ext.inline
           );
 
-          extensionPaths = map toString (
-            extLib.order {
-              builtin = builtinPaths;
-              shipped = if shipped == [ ] then [ ] else extLib.bundlePaths "${extensionBundle}" shipped;
-              inline = inlinePaths;
-            }
-          );
+          rlmCoreExtensions = lib.filter (
+            p:
+            let
+              b = baseNameOf p;
+            in
+            lib.any (n: lib.hasInfix n b) [
+              "opencode-free"
+              "context-cap"
+              "alimit"
+              "llamacpp-lifecycle"
+              "view-image"
+              "rate-limit-hook"
+            ]
+          ) (map toString (extLib.bundlePaths "${extensionBundle}" shipped));
 
           clmEnv = {
             PI_CLM_NATIVE_COMPACTION = clm.nativeCompaction;
@@ -573,21 +576,6 @@
               "export PI_CLM_STEERING=\"\${PI_CLM_STEERING:-$PI_CODING_AGENT_DIR/npm/node_modules/@lolipopshock/pi-clm/steering/house-brief.md}\""
             ]
           );
-
-          rlmCoreExtensions = lib.filter (
-            p:
-            let
-              b = baseNameOf p;
-            in
-            lib.any (n: lib.hasInfix n b) [
-              "opencode-free"
-              "context-cap"
-              "alimit"
-              "llamacpp-lifecycle"
-              "view-image"
-              "rate-limit-hook"
-            ]
-          ) extensionPaths;
 
           patchPiClmScript = pkgs.writeShellScript "pi-clm-patch" ''
             dir="$1"
@@ -693,20 +681,6 @@
               )
           );
 
-          seedSettings =
-            cfg.settings.extra
-            // {
-              skills = [ "${skillsDir}" ] ++ cfg.skills.dirs;
-              extensions = extensionPaths;
-            }
-            // lib.optionalAttrs (cfg.default.provider != "") { defaultProvider = cfg.default.provider; }
-            // lib.optionalAttrs (cfg.default.model != "") { defaultModel = cfg.default.model; }
-            # pi runs `npm` from PATH by default, and the system has none there.
-            // lib.optionalAttrs (piPackages != [ ]) {
-              packages = piPackages;
-              npmCommand = [ "${npmWrapper}/bin/npm" ];
-            };
-
           # Runs per user under a minimal env that only has HOME.
           gcHook = ''
             D="${dataDirLib.shell cfg.settings.dataDir}"
@@ -731,10 +705,17 @@
             exit 0
           '';
 
-          settingsSeed = pkgs.writeText "pi-agent-settings.json" (builtins.toJSON seedSettings);
           modelsSeed = pkgs.writeText "pi-agent-models.json" (builtins.toJSON { inherit providers; });
         in
         {
+          icedos.ai-tools.per-agent.pi-agent = {
+            skills = perAgentSkills;
+            plugins = {
+              pi-agent-extensions = extensionBundle;
+            };
+            excludeSkills = cfg.skills.exclude;
+          };
+
           assertions = [
             {
               assertion = invalidSkillNames == [ ];
@@ -881,6 +862,43 @@
                 invalidServers = mcpJson.invalidNames registry;
 
                 rulesText = lib.concatStringsSep "\n\n" (lib.attrValues rules);
+
+                globalPackages = map (
+                  name: "${config.xdg.dataHome}/icedos/agents/global/plugins/${name}"
+                ) piAgentGlobalPlugins;
+
+                piPackages =
+                  globalPackages ++ cfg.packages ++ map (p: pkgSource p.npm ext.${p.key}.version) optionPackages;
+
+                shippedExtensionPaths =
+                  if shipped == [ ] then
+                    [ ]
+                  else
+                    extLib.bundlePaths "${config.xdg.dataHome}/icedos/agents/per-agent/pi-agent/plugins/pi-agent-extensions" shipped;
+
+                extensionPaths = map toString (
+                  extLib.order {
+                    builtin = builtinPaths;
+                    shipped = shippedExtensionPaths;
+                    inline = inlinePaths;
+                  }
+                );
+
+                seedSettings =
+                  cfg.settings.extra
+                  // {
+                    skills = [ "${config.xdg.dataHome}/icedos/agents/view/pi-agent/skills" ] ++ cfg.skills.dirs;
+                    extensions = extensionPaths;
+                  }
+                  // lib.optionalAttrs (cfg.default.provider != "") { defaultProvider = cfg.default.provider; }
+                  // lib.optionalAttrs (cfg.default.model != "") { defaultModel = cfg.default.model; }
+                  # pi runs `npm` from PATH by default, and the system has none there.
+                  // lib.optionalAttrs (piPackages != [ ]) {
+                    packages = piPackages;
+                    npmCommand = [ "${npmWrapper}/bin/npm" ];
+                  };
+
+                settingsSeed = pkgs.writeText "pi-agent-settings.json" (builtins.toJSON seedSettings);
               in
               {
                 options.icedos.managed-settings.pi-agent = icedosLib.mkAttrsOption {

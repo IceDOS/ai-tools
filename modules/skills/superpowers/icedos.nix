@@ -101,29 +101,30 @@ in
                 '';
               }) cfg.autoload
             );
+
+            plugins.pool.superpowers = src;
+
+            per-agent = {
+              claude-code = lib.mkIf (has "claude-code") {
+                excludeSkills = cfg.skills;
+              };
+              pi-agent = lib.mkIf (has "pi-agent") {
+                globalPlugins = [ "superpowers" ];
+                excludeSkills = cfg.skills;
+              };
+              opencode = lib.mkIf (has "opencode") {
+                globalPlugins = [ "superpowers" ];
+                excludeSkills = cfg.skills;
+              };
+            };
           }
           // lib.optionalAttrs (has "claude-code") {
-            claude-code = {
-              excludeSkills = cfg.skills;
-              users = lib.genAttrs (builtins.attrNames config.icedos.users) (
-                u:
-                lib.optionalAttrs (!hasOfficialMarketplace u) {
-                  marketplaces = [ officialMarketplace ];
-                }
-              );
-            };
-          }
-          // lib.optionalAttrs (has "pi-agent") {
-            pi-agent = {
-              packages = [ "${src}" ];
-              skills.exclude = cfg.skills;
-            };
-          }
-          // lib.optionalAttrs (has "opencode") {
-            opencode = {
-              plugins = [ "${src}" ];
-              excludeSkills = cfg.skills;
-            };
+            claude-code.users = lib.genAttrs (builtins.attrNames config.icedos.users) (
+              u:
+              lib.optionalAttrs (!hasOfficialMarketplace u) {
+                marketplaces = [ officialMarketplace ];
+              }
+            );
           };
         }
       )

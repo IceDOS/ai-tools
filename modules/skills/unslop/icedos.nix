@@ -57,9 +57,10 @@ in
                 '';
               }) cfg.autoload
             );
-          }
-          // lib.optionalAttrs (has "claude-code") {
-            claude-code.excludeSkills = cfg.skills;
+
+            per-agent.claude-code = lib.mkIf (has "claude-code") {
+              excludeSkills = cfg.skills;
+            };
           };
         }
       )

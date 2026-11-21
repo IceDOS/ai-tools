@@ -21,6 +21,9 @@ launchWrapper = []
 # into ~/.config/gemini/mcp_config.json for Antigravity.
 enableMcpIntegration = true
 
+# Shared skills Antigravity skips.
+excludeSkills = []
+
 # Antigravity CLI bottom status bar (/statusline), rendered by alimit like the other agents' bars;
 # configured via agy's own settings.json.
 statusLine = true
