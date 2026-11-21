@@ -140,3 +140,38 @@ test("pinned reuse of own id stays allowed even when in pin store and group", ()
   assert.equal(a2.id, a.id);
   assert.equal(a2.group, g.id);
 });
+
+test("same-process session switch takes back the resumed session's pinned ID and group (pi /resume)", () => {
+  const { relay } = tmpRelay();
+  const old = relay.register({ kind: "pi", pid: 100, cwd: "/a", session: "s-old" });
+  const peer = relay.register({ kind: "claude", pid: 200, cwd: "/b" });
+  relay.link(old.id, peer.id);
+  const gid = relay.get(old.id)!.group!;
+  relay.unregister(old.id);
+  const fresh = relay.register({ kind: "pi", pid: 100, cwd: "/a", session: "s-new" });
+  const back = relay.register({ kind: "pi", pid: 100, cwd: "/a", session: "s-old" });
+  assert.equal(back.id, old.id);
+  assert.equal(back.group, gid);
+  assert.equal(relay.get(fresh.id), undefined);
+  assert.equal(relay.readPin("pi", "s-new"), fresh.id);
+  assert.equal(relay.readPin("pi", "s-old"), old.id);
+});
+
+test("session switch leaves a pin held by a live session alone", () => {
+  const { relay } = tmpRelay();
+  const a = relay.register({ kind: "pi", pid: 100, cwd: "/a", session: "s1" });
+  const b = relay.register({ kind: "pi", pid: 200, cwd: "/b", session: "s2" });
+  const r = relay.register({ kind: "pi", pid: 200, cwd: "/b", session: "s1" });
+  assert.equal(r.id, b.id);
+  assert.equal(r.session, "s1");
+  assert.equal(relay.readPin("pi", "s1"), a.id);
+});
+
+test("opencode root sessions resume their pinned ID per scope", () => {
+  const { relay } = tmpRelay();
+  const old = relay.register({ kind: "opencode", pid: 100, cwd: "/a", scope: "r-old", session: "r-old" });
+  relay.unregister(old.id);
+  relay.register({ kind: "opencode", pid: 100, cwd: "/a", scope: "r-new", session: "r-new" });
+  const back = relay.register({ kind: "opencode", pid: 100, cwd: "/a", scope: "r-old", session: "r-old" });
+  assert.equal(back.id, old.id);
+});

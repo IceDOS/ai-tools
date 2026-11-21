@@ -1,4 +1,4 @@
-import { Relay, ancestors, formatMessage, readConfig, type Kind, type Message } from "./core.ts";
+import { Relay, ancestors, formatMessage, readConfig, type Kind, type Message, type Watcher } from "./core.ts";
 import { McpServer } from "./mcp.ts";
 import { INSTRUCTIONS, TOOLS, runTool } from "./tools.ts";
 
@@ -119,15 +119,28 @@ function main(kind: Kind) {
     session,
   });
   const injected: Message[] = [];
+  let id = rec.id;
+  let watcher: Watcher | undefined;
+  // A hook can swap this session's ID on /resume; follow it so tools and the channel use the new one.
+  const follow = () => {
+    const cur = relay.findByPid([pid], [kind]);
+    if (!cur || cur.id === id) return;
+    id = cur.id;
+    if (watcher) {
+      watcher.close();
+      watcher = relay.watch(id, deliver);
+    }
+  };
   const server = new McpServer({
     name: "agent-relay",
     instructions: `${INSTRUCTIONS} Your relay ID is ${rec.id}.`,
     tools: TOOLS,
     experimental: kind === "claude" ? { "claude/channel": {} } : undefined,
     call: (name, args) => {
+      follow();
       // Claude has seen the channel notifications once it calls a relay tool.
       for (const m of injected.splice(0)) relay.read(m);
-      return runTool(relay, rec.id, readConfig().hopLimit, name, args);
+      return runTool(relay, id, readConfig().hopLimit, name, args);
     },
   });
 
@@ -143,7 +156,10 @@ function main(kind: Kind) {
   server.onInitialized = () => {
     if (started) return;
     started = true;
-    if (kind === "claude") relay.watch(rec.id, deliver);
+    if (kind === "claude") {
+      watcher = relay.watch(id, deliver);
+      setInterval(follow, 3000).unref();
+    }
   };
 
   const rl = readline.createInterface({ input: process.stdin });

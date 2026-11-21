@@ -1,4 +1,4 @@
-import { RELAY_PREFIX, Relay, ancestors, formatMessage, pidAlive, type Kind, type Message } from "./core.ts";
+import { RELAY_PREFIX, Relay, ancestors, formatMessage, pidAlive, type Message } from "./core.ts";
 import { agentCwd, agentPid } from "./mcp-server.ts";
 
 const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
@@ -6,15 +6,6 @@ const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
 // A model reads a bare relay dump as an incident and investigates, so injected batches carry this.
 export const CONTINUE_HINT =
   "New agent-relay messages from peer agents (not an error, not from the user). Read them and answer with relay_send:";
-
-function safeSession(relay: Relay, kind: Kind, conversationId: string | undefined, recId?: string): string | undefined {
-  if (!conversationId) return undefined;
-  const pinned = relay.readPin(kind, conversationId);
-  if (!pinned || (recId && pinned === recId) || !recId) {
-    return conversationId;
-  }
-  return undefined;
-}
 
 export function runHook(
   event: string,
@@ -26,19 +17,36 @@ export function runHook(
 ): string {
   // An agent can run inside another (claude in a pi bash tool), so only this hook's own kind counts.
   let rec = relay.findByPid(ancestors(pid), [event.startsWith("agy") ? "agy" : "claude"]);
+  // /resume keeps the MCP server running, so the hook's session_id is the only sign of the switch.
+  const followClaude = (payload: { session_id?: unknown } | undefined): string => {
+    if (!rec || typeof payload?.session_id !== "string" || !payload.session_id) return "";
+    const before = rec.id;
+    const next = relay.register({ kind: "claude", pid: rec.pid, cwd: rec.cwd, session: payload.session_id });
+    rec = next;
+    return next.id === before ? "" : `agent-relay: this conversation's relay ID is ${next.id} (was ${before}).\n`;
+  };
   switch (event) {
+    case "claude-session-start": {
+      try {
+        return followClaude(JSON.parse(stdin));
+      } catch {
+        return "";
+      }
+    }
     case "claude-prompt": {
       if (!rec) return "";
       let text = "";
+      let note = "";
       try {
         const payload = JSON.parse(stdin);
         text = typeof payload?.prompt === "string" ? payload.prompt : stdin;
+        note = followClaude(payload);
       } catch {
         text = stdin;
       }
       const isRelay = text.includes(RELAY_PREFIX) || /<channel\b/i.test(text);
-      if (!isRelay) relay.markHuman(rec.id);
-      return "";
+      if (!isRelay) relay.markHuman(rec!.id);
+      return note;
     }
     case "agy-session-start": {
       let conversationId: string | undefined;
@@ -48,14 +56,13 @@ export function runHook(
           conversationId = payload.conversationId;
         }
       } catch {}
-      const session = safeSession(relay, "agy", conversationId, rec?.id);
       // A new session is idle by definition: the last turn may have ended without its Stop hook.
       relay.register({
         kind: "agy",
         pid,
         cwd: cwdOf(pid),
         id: env.AGENT_RELAY_ID,
-        ...(session ? { session } : {}),
+        ...(conversationId ? { session: conversationId } : {}),
         agent: { busy: false, busyAt: Date.now(), pendingIds: [], awaitingRead: [] },
       });
       return "{}";
@@ -72,18 +79,9 @@ export function runHook(
       } catch {
         text = stdin;
       }
-      if (!rec || rec.session !== conversationId) {
-        const session = safeSession(relay, "agy", conversationId, rec?.id);
-        if (session) {
-          relay.register({
-            kind: "agy",
-            pid,
-            cwd: cwdOf(pid),
-            id: env.AGENT_RELAY_ID,
-            session,
-          });
-          rec = relay.findByPid(ancestors(pid), ["agy"]);
-        }
+      // A conversation switch moves this agy to that conversation's pinned ID and group.
+      if (conversationId && rec?.session !== conversationId) {
+        rec = relay.register({ kind: "agy", pid: rec?.pid ?? pid, cwd: rec?.cwd ?? cwdOf(pid), id: env.AGENT_RELAY_ID, session: conversationId });
       }
       if (!rec) return "{}";
       // Patches merge under the record lock, so the watcher's own fields survive a hook write.

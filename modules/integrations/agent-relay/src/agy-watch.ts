@@ -130,10 +130,19 @@ async function main(agyPid: number, sockPath: string): Promise<void> {
     await new Promise((r) => setTimeout(r, 1000));
     rec = findAgy(relay, agyPid);
   }
-  relay.updateAgent(rec.id, { watcher: process.pid });
-  relay.watch(rec.id, makeDeliver(relay, rec.id, socketPty(sockPath)), 1000);
+  const pty = socketPty(sockPath);
+  let id = rec.id;
+  relay.updateAgent(id, { watcher: process.pid });
+  let watcher = relay.watch(id, makeDeliver(relay, id, pty), 1000);
   setInterval(() => {
     if (!pidAlive(agyPid)) process.exit(0);
+    // A conversation switch gives agy another relay ID; follow it.
+    const cur = findAgy(relay, agyPid);
+    if (!cur || cur.id === id) return;
+    id = cur.id;
+    watcher.close();
+    relay.updateAgent(id, { watcher: process.pid });
+    watcher = relay.watch(id, makeDeliver(relay, id, pty), 1000);
   }, 2000);
 }
 

@@ -312,3 +312,35 @@ test("agy-pre-invocation skips registration and pin write when already registere
   assert.equal(registerCalls, 0, "should not call register when session already matches");
   assert.equal(pinWrites, 0, "should not rewrite pin when session already matches");
 });
+
+test("claude /resume takes back the resumed conversation's ID and group", () => {
+  const { relay } = tmpRelay();
+  const old = relay.register({ kind: "claude", pid: 200, cwd: "/b", session: "conv-old" });
+  const peer = relay.register({ kind: "pi", pid: 100, cwd: "/a" });
+  relay.link(old.id, peer.id);
+  const gid = relay.get(old.id)!.group!;
+  relay.unregister(old.id); // claude killed
+  const fresh = relay.register({ kind: "claude", pid: 200, cwd: "/b", session: "conv-new" });
+  assert.notEqual(fresh.id, old.id);
+  const note = runHook("claude-session-start", JSON.stringify({ session_id: "conv-old", source: "resume" }), relay, 200, {});
+  const rec = relay.findByPid([200], ["claude"])!;
+  assert.equal(rec.id, old.id);
+  assert.equal(rec.group, gid);
+  assert.equal(relay.get(fresh.id), undefined);
+  assert.match(note, new RegExp(old.id));
+  // The ID it left stays with the new conversation.
+  assert.equal(relay.readPin("claude", "conv-new"), fresh.id);
+  // Same session again is a no-op.
+  assert.equal(runHook("claude-prompt", JSON.stringify({ prompt: "hi", session_id: "conv-old" }), relay, 200, {}), "");
+});
+
+test("agy-pre-invocation follows a conversation switch to its pinned ID", () => {
+  const { relay } = tmpRelay();
+  const old = relay.register({ kind: "agy", pid: 300, cwd: "/c", session: "c-old" });
+  relay.unregister(old.id);
+  runHook("agy-session-start", JSON.stringify({ conversationId: "c-new" }), relay, 300, {}, () => "/c");
+  const fresh = relay.findByPid([300], ["agy"])!;
+  assert.notEqual(fresh.id, old.id);
+  runHook("agy-pre-invocation", JSON.stringify({ lastUserInput: "hi", conversationId: "c-old" }), relay, 300, {}, () => "/c");
+  assert.equal(relay.findByPid([300], ["agy"])!.id, old.id);
+});

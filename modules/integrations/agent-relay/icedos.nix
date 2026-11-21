@@ -109,6 +109,17 @@
                       ];
                     }
                   ];
+                  settings.hooks.SessionStart = [
+                    {
+                      matcher = "resume";
+                      hooks = [
+                        {
+                          type = "command";
+                          command = "${pkg}/bin/agent-relay-hook claude-session-start";
+                        }
+                      ];
+                    }
+                  ];
                 };
 
                 xdg.configFile."gemini/hooks.json" = mkIf (has "antigravity") {

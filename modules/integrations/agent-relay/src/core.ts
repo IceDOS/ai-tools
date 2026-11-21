@@ -578,8 +578,21 @@ export class Relay {
     const existing = all.find(
       (s) => s.kind === input.kind && (input.scope ? s.scope === input.scope : s.pid === input.pid),
     );
+    const liveIds = new Set(all.map((s) => s.id));
     if (existing) {
-      if (input.session) this.writePin(input.kind, input.session, existing.id);
+      const pinned = input.session && existing.session !== input.session ? this.readPin(input.kind, input.session) : undefined;
+      // A conversation switch (/resume) takes back that conversation's pinned ID and group; the ID it
+      // leaves stays pinned to its own conversation.
+      if (pinned && pinned !== existing.id && !liveIds.has(pinned)) {
+        this.forget(existing);
+        return this.register({
+          ...input,
+          ...(existing.name && !input.name ? { name: existing.name } : {}),
+          ...(existing.agent || input.agent ? { agent: { ...existing.agent, ...input.agent } } : {}),
+        });
+      }
+      // A pin held by a live session in another process stays with it.
+      if (input.session && !pinned) this.writePin(input.kind, input.session, existing.id);
       return this.update(existing.id, {
         cwd: input.cwd,
         ...(input.scope ? { scope: input.scope } : {}),
@@ -588,7 +601,6 @@ export class Relay {
         ...(input.session ? { session: input.session } : {}),
       });
     }
-    const liveIds = new Set(all.map((s) => s.id));
     const pinnedId = input.session ? this.readPin(input.kind, input.session) : undefined;
     let id = pinnedId && !liveIds.has(pinnedId) ? pinnedId : "";
     if (!id) {
