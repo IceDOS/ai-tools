@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -92,6 +93,30 @@ def show_image(target):
     with open(meta_path, "w", encoding="utf-8") as f:
         _json.dump({"data": b64, "mime": mime}, f)
     return f"<Image: {mime}, {len(data)} bytes>"
+
+import __main__ as _rlm_k
+
+def rlm_batch(prompts, context=None):
+    \"\"\"Run one recursive sub-LLM per prompt in parallel, like rlm() for each.
+    Returns answers in prompt order; a failed child's slot holds a RuntimeError instead of a string.
+    \"\"\"
+    texts = [str(p) for p in prompts]
+    if context is not None:
+        payload = context if isinstance(context, str) else _json.dumps(context, ensure_ascii=False, default=str)
+        texts = [f"{t}\\n\\n{payload}" for t in texts]
+    if not texts:
+        return []
+    with _rlm_k._rlm_lock:
+        _rlm_k._rlm_counter += 1
+        rid = _rlm_k._rlm_counter
+        _rlm_k._send({"type": "rlm_batch_request", "id": rid, "prompts": texts, "depth": _rlm_k.RLM_DEPTH + 1})
+        while True:
+            msg = _rlm_k._readline()
+            if msg.get("type") == "rlm_batch_response" and msg.get("id") == rid:
+                return [
+                    r.get("result", "") if r.get("ok") else RuntimeError(f"rlm() failed: {r.get('error', 'unknown error')}")
+                    for r in msg.get("results", [])
+                ]
 """
 
 
@@ -233,6 +258,9 @@ class KernelHost:
                     out = {"type": "rlm_response", "id": reply["id"], "ok": ok}
                     out["result" if ok else "error"] = value
                     self._send(out)
+                elif kind == "rlm_batch_request":
+                    results = self._run_batch(reply.get("prompts") or [], int(reply.get("depth", 0)))
+                    self._send({"type": "rlm_batch_response", "id": reply["id"], "results": results})
                 elif kind == "refine_request":
                     scheduled, reason = self.on_refine(reply.get("instructions"), bool(reply.get("global")))
                     out = {"type": "refine_response", "id": reply["id"], "scheduled": scheduled}
@@ -241,6 +269,18 @@ class KernelHost:
                     self._send(out)
                 elif kind == reply_type and reply.get("id") == msg["id"]:
                     return reply
+
+    def _run_batch(self, prompts: list, depth: int) -> list[dict]:
+        def one(prompt) -> dict:
+            try:
+                ok, value = self.on_rlm(str(prompt), depth)
+            except Exception as exc:
+                ok, value = False, f"{type(exc).__name__}: {exc}"
+            return {"ok": ok, "result" if ok else "error": value}
+
+        workers = max(1, min(self.settings.max_parallel, len(prompts)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(one, prompts))
 
     def execute(self, code: str) -> ExecResult:
         self._busy.set()

@@ -116,6 +116,8 @@ enable = false
 autoload = false
 # rlm() recursion limit; 0 turns recursion off.
 maxDepth = 2
+# Children one rlm_batch() call runs at once; each nesting level has its own cap.
+maxParallel = 4
 # Log every child's stream-json under the plugin data dir's children/<conversation>/.
 childLog = true
 # Per-child run timeout; "0s" means no limit.

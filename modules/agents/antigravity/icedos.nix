@@ -79,6 +79,11 @@
             source = ./config.toml;
             default = e.maxDepth;
           } 0 10;
+          maxParallel = mkIntBetweenOption {
+            path = "${path}.maxParallel";
+            source = ./config.toml;
+            default = e.maxParallel;
+          } 1 64;
           childLog = mkBoolOption { default = e.childLog; };
           childTimeout = mkStrOption { default = e.childTimeout; };
           snapshots = mkBoolOption { default = e.snapshots; };

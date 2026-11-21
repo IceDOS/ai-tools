@@ -19,6 +19,7 @@ class Settings:
     self_cmd: list[str]
     runner: str = "agy"
     opencode: str = "opencode"
+    max_parallel: int = 4
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -41,4 +42,5 @@ class Settings:
             self_cmd=self_cmd,
             runner=env.get("RLM_RUNNER", "agy"),
             opencode=env.get("RLM_OPENCODE", "opencode"),
+            max_parallel=max(1, int(env.get("RLM_MAX_PARALLEL", "4") or "4")),
         )

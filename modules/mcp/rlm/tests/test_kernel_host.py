@@ -218,3 +218,42 @@ def test_show_image_cleared_between_cells(settings):
     finally:
         host.close()
 
+
+
+def test_rlm_batch_orders_results_and_keeps_failures(settings):
+    calls = []
+    host = make_host(settings, calls)
+    try:
+        r = host.execute("res = rlm_batch(['a', 'fail', 'c'], context='ctx'); [type(x).__name__ for x in res], res[0], str(res[1])")
+        assert r.ok, r.stderr
+        assert r.result == "(['str', 'RuntimeError', 'str'], 'answer:a\\n\\nctx', 'rlm() failed: child failed')"
+        assert sorted(p for p, _ in calls) == ["a\n\nctx", "c\n\nctx", "fail\n\nctx"]
+        assert host.execute("rlm_batch([])").result == "[]"
+    finally:
+        host.close()
+
+
+def test_rlm_batch_runs_children_in_parallel_up_to_cap(settings):
+    import dataclasses
+
+    lock, live, peak = threading.Lock(), [0], [0]
+
+    def on_rlm(prompt, depth):
+        with lock:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        time.sleep(0.4)
+        with lock:
+            live[0] -= 1
+        return True, prompt
+
+    host = KernelHost(dataclasses.replace(settings, max_parallel=3), on_rlm, lambda i, g: (True, None))
+    try:
+        start = time.monotonic()
+        r = host.execute("rlm_batch([str(i) for i in range(6)])")
+        elapsed = time.monotonic() - start
+        assert r.ok and r.result == str([str(i) for i in range(6)])
+        assert peak[0] == 3
+        assert elapsed < 2.0  # serial would take 2.4s
+    finally:
+        host.close()

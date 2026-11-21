@@ -24,6 +24,11 @@ in
       source = ../config.toml;
       default = defaults.maxDepth;
     } 0 10;
+    maxParallel = mkIntBetweenOption {
+      path = "icedos.ai-tools.opencode.extensions.recursive-language-models.maxParallel";
+      source = ../config.toml;
+      default = defaults.maxParallel;
+    } 1 64;
     childLog = mkBoolOption { default = defaults.childLog; };
     childTimeout = mkStrOption { default = defaults.childTimeout; };
     snapshots = mkBoolOption { default = defaults.snapshots; };
@@ -69,6 +74,7 @@ in
             RLM_PYTHON = "${pkgs.python3}/bin/python3";
             RLM_SELF = bin;
             RLM_MAX_DEPTH = toString cfg.maxDepth;
+            RLM_MAX_PARALLEL = toString cfg.maxParallel;
             RLM_CHILD_TIMEOUT = cfg.childTimeout;
             RLM_CHILD_LOG = if cfg.childLog then "1" else "0";
             RLM_SNAPSHOTS = if cfg.snapshots then "1" else "0";

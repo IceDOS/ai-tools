@@ -22,6 +22,7 @@ let
         RLM_PYTHON = "${pkgs.python3}/bin/python3";
         RLM_SELF = bin;
         RLM_MAX_DEPTH = toString cfg.maxDepth;
+        RLM_MAX_PARALLEL = toString cfg.maxParallel;
         RLM_CHILD_TIMEOUT = cfg.childTimeout;
         RLM_CHILD_LOG = if cfg.childLog then "1" else "0";
         RLM_SNAPSHOTS = if cfg.snapshots then "1" else "0";

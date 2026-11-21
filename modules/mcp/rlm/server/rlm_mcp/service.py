@@ -39,6 +39,7 @@ class RlmService:
         self._hosts: dict[str, KernelHost] = {}
         self._sources: dict[str, session.SessionSource] = {}
         self._cell_children: dict[str, int] = {}
+        self._count_lock = threading.Lock()
         self._cell_usage: dict[str, dict] = {}
         self._control: socket.socket | None = None
 
@@ -137,8 +138,9 @@ class RlmService:
             os.environ.get("RLM_CHILD_ID"),
             cwd=self.cwd,
         )
-        self._cell_children[key] = self._cell_children.get(key, 0) + 1
-        children.add_usage(self._cell_usage.setdefault(key, {}), result.usage)
+        with self._count_lock:
+            self._cell_children[key] = self._cell_children.get(key, 0) + 1
+            children.add_usage(self._cell_usage.setdefault(key, {}), result.usage)
         return (True, result.output) if result.ok else (False, result.error or "child failed")
 
     def on_refine(
