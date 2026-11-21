@@ -1,13 +1,13 @@
 
 # Shared AI agent rules: name = markdown. Every agent module in this repo
 # loads them (pi-agent as appended system prompt, antigravity as
-# ~/.config/gemini/rules/<name>.md),
-# and claude-code gets them as ~/.claude/rules/<name>.md. A per-agent rule of the
-# same name wins.
+# ~/.config/gemini/rules/<name>.md, opencode as ambient context in
+# ~/.config/opencode/AGENTS.md), and claude-code gets them as
+# ~/.claude/rules/<name>.md. A per-agent rule of the same name wins.
 [icedos.ai-tools.rules]
 
 # Shared AI agent skills: name = full SKILL.md content (frontmatter included).
-# Written for claude-code, antigravity and pi-agent. A per-agent
+# Written for claude-code, antigravity, pi-agent and opencode. A per-agent
 # skill of the same name wins.
 [icedos.ai-tools.skills.pool]
 

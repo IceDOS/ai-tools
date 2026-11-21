@@ -1,0 +1,151 @@
+# Additional MCP servers registered exclusively for OpenCode.
+[icedos.ai-tools.opencode.extra-mcp-servers]
+
+# Global rules, name = markdown, merged into ambient context ($XDG_CONFIG_HOME/opencode/AGENTS.md).
+[icedos.ai-tools.opencode.rules]
+
+# Global skills, name = full SKILL.md content, written to $XDG_CONFIG_HOME/opencode/skills/<name>/SKILL.md.
+[icedos.ai-tools.opencode.skills]
+
+# Keys merged into OpenCode's declarative configuration ($XDG_CONFIG_HOME/opencode/opencode.json).
+[icedos.ai-tools.opencode.settings]
+
+# Keys merged into OpenCode's terminal client configuration ($XDG_CONFIG_HOME/opencode/cli.json).
+[icedos.ai-tools.opencode.cli]
+
+# Terminal window title configuration for OpenCode.
+[icedos.ai-tools.opencode.terminal-title]
+# Whether OpenCode manages the terminal window title via the icedos-status TUI plugin.
+enable = true
+# Idle glyph displayed in the terminal window title.
+idleGlyph = "▣"
+# Animation glyphs displayed in the terminal window title while OpenCode is working.
+workingGlyphs = ["◰", "◳", "◲", "◱"]
+
+# Background web service configuration for OpenCode (systemd user unit).
+[icedos.ai-tools.opencode.web]
+# Whether to enable the opencode background web service.
+enable = false
+# Extra arguments passed to `opencode serve`.
+extraArgs = []
+
+[icedos.ai-tools.opencode]
+# Whether the launcher shows a desktop entry that opens in the default terminal.
+desktopEntry = false
+
+# Command prepended to opencode in agent-launch and the desktop entry (set by agent-relay).
+launchWrapper = []
+
+# Arguments added to every interactive opencode invocation.
+extraArgs = []
+
+# Whether to wire Home Manager's shared programs.mcp.servers registry into OpenCode.
+enableMcpIntegration = true
+
+# Shared skills OpenCode skips, e.g. ones an installed plugin already ships.
+excludeSkills = []
+
+# Server plugin references or directory paths added to OpenCode's settings.plugins.
+plugins = []
+
+# Display a status banner above the prompt after a turn completes until the next turn starts.
+turnEndMessage = true
+
+# Display running elapsed time for active tool calls in the TUI.
+toolTimer = true
+
+# Whether `icedos gc` prunes stale OpenCode session and log data.
+includeInIcedosGc = false
+
+# Retain session data and logs newer than this many days on GC.
+sessionRetentionDays = 30
+
+# Ship the code-review skill: reviewer children per dimension, then an adversarial verify pass.
+# Needs extensions.recursive-language-models, with maxDepth at least 2.
+codeReview = false
+
+# Ship free-review: the code-review loop on opencode's free models only. Needs codeReview.
+freeReview = false
+
+# OpenCode CLM (Context Language Models) extension: the model curates its own context mirror.
+[icedos.ai-tools.opencode.extensions.context-language-models]
+# Whether to enable opencode-clm.
+enable = false
+# Exact npm version to pin, e.g. "0.5.1"; "" installs the latest release once.
+version = ""
+# Context budget in tokens (e.g. "32k", "32000"), percentage ("50%"), or "window". "" = plugin default (50%).
+budget = ""
+# Headroom reserved below budget for generation (e.g. "2048", "2k"). "" = plugin default (2048).
+reserve = ""
+# Budget fractions for escalating reminders (e.g. "0.25,0.5,0.75" or "off"). "" = plugin default ("0.25,0.5,0.75").
+remindAt = ""
+# Share of budget context must grow past accepted edit before reminder re-fires (e.g. "10%", "0.1", "off"). "" = plugin default (0.1).
+reminderCooldown = ""
+# Edit gate deciding whether context growth is accepted: "fit" | "shrink" | "none". "" = plugin default ("fit").
+gate = ""
+# Overflow guard withholding old tool results when over budget: "withhold" | "off". "" = plugin default ("withhold").
+guard = ""
+# Character cap per tool result in effective context (e.g. "10000" or "10000:0.5", "off"). "" = plugin default (off).
+observationCap = ""
+# Parent dir for CLM's per-session mirror; "" = plugin default (<project>/.opencode/clm), relative paths resolve against the project.
+mirrorDir = ""
+# Steering brief path; "house" uses bundled house-brief.md, "off" disables. "" = plugin default (protocol only).
+steering = ""
+# Custom /clm-compact template path; "" = plugin default built-in prompt.
+compactPrompt = ""
+# Token estimation factor multiplier between 1 and 4 (e.g. "1.5"). "" = plugin default (1).
+estimateFactor = ""
+# Compaction mode: "auto" | "off" | "on". "" = plugin default ("auto").
+compaction = ""
+# Operation mode: "edit" (model edits mirror) or "notices-only" (advisory reminders only). "" = plugin default ("edit").
+mode = ""
+# Run only first tool call per response: "true" | "false". "" = plugin default (false).
+oneTool = ""
+# Append token size trailer to tool results: "true" | "false". "" = plugin default (false).
+trailer = ""
+# Render assistant reasoning in mirror: "true" | "false". "" = plugin default (true).
+reasoning = ""
+# Write transformed requests to disk for debugging: "true" | "false". "" = plugin default (false).
+dumpRequests = ""
+
+# OpenCode RLM (Recursive Language Models) extension: persistent Python REPL kernel and recursive child agents.
+[icedos.ai-tools.opencode.extensions.recursive-language-models]
+# Whether to enable opencode-rlm.
+enable = false
+# Launch opencode with default_agent = "rlm" (RLM mode).
+autoload = false
+# rlm() recursion limit; 0 turns recursion off.
+maxDepth = 2
+# Log every child's stream-json under the plugin data dir's children/<conversation>/.
+childLog = true
+# Per-child run timeout; "0s" means no limit.
+childTimeout = "15m"
+# Pickle namespace data per conversation and restore it on resume.
+snapshots = true
+# Whether icedos gc prunes snapshots, child logs and local harness files older than retentionDays.
+includeInIcedosGc = true
+# Stale snapshot and child log retention in days.
+retentionDays = 30
+
+# obra/superpowers through its OpenCode 2 plugin, which registers its skills.
+[icedos.ai-tools.opencode.superpowers]
+enable = false
+# Git ref to install, e.g. a tag or commit; "" tracks the default branch.
+rev = ""
+
+# npm plugins: version "" installs the newest release once; options go to the plugin entry as is.
+# @log0u7/opencode-watt: electricity use and cost of local LLM inference.
+[icedos.ai-tools.opencode.extensions.power]
+enable = false
+version = ""
+options = {}
+
+[icedos.ai-tools.opencode.extensions.vpn-rotate]
+# Used when the vpn-rotate module is enabled: retries the opencode provider through its tunnel and shows a status row.
+# Rotations per failing request; 0 means no limit (OpenCode itself stops after 10 retries).
+maxRetries = 0
+# Models tried in order when a rotation fails, e.g. ["opencode/minimax-m2.5-free"]; empty means every free opencode model.
+fallbackModels = []
+# When to go back to the selected model: "prompt" (next prompt), "stay" (until you pick another model),
+# or a duration such as "90s", "15m" or "2h" (picking another model also ends it).
+fallbackReturn = "prompt"

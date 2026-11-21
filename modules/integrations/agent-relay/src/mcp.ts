@@ -5,7 +5,7 @@ export interface McpOptions {
   instructions: string;
   tools: ToolDef[];
   experimental?: Record<string, object>;
-  call(name: string, args: Record<string, unknown>): string;
+  call(name: string, args: Record<string, unknown>, meta?: Record<string, unknown>): string;
 }
 
 export class McpServer {
@@ -46,7 +46,7 @@ export class McpServer {
         return reply({ tools: this.opts.tools });
       case "tools/call":
         try {
-          return reply({ content: [{ type: "text", text: this.opts.call(m.params?.name, m.params?.arguments ?? {}) }] });
+          return reply({ content: [{ type: "text", text: this.opts.call(m.params?.name, m.params?.arguments ?? {}, m.params?._meta) }] });
         } catch (e) {
           return reply({ content: [{ type: "text", text: (e as Error).message }], isError: true });
         }

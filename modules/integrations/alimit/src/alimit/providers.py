@@ -42,11 +42,36 @@ def _read_keys(path, names):
     return out
 
 
+def _read_sqlite_keys(path, names):
+    """Read API keys from OpenCode SQLite credential table via read-only URI."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return []
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        out = []
+        for n in names:
+            cur = con.execute("SELECT value FROM credential WHERE integration_id = ? AND (active = 1 OR active IS NULL)", (n,))
+            for (raw,) in cur.fetchall():
+                try:
+                    val = json.loads(raw)
+                    k = val.get("key") or val.get("access")
+                    if isinstance(k, str) and k:
+                        out.append(k)
+                except (ValueError, TypeError):
+                    pass
+        con.close()
+        return out
+    except Exception:
+        return []
+
+
 def _keys(env: str, pi_names=(), opencode_names=()):
-    """Candidate keys in order: env var, pi-agent's auth.json, opencode's auth.json."""
+    """Candidate keys in order: env var, pi-agent's auth.json, opencode's auth.json, opencode.db."""
     keys = [os.environ[env]] if os.environ.get(env) else []
     keys += _read_keys(config.PI_AGENT_AUTH, pi_names)
     keys += _read_keys(config.OPENCODE_AUTH, opencode_names)
+    keys += _read_sqlite_keys(config.OPENCODE_DB, opencode_names)
     # dedupe, keep order
     return list(dict.fromkeys(keys))
 

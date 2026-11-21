@@ -20,6 +20,8 @@ AGY_CREDS: tuple = ("antigravity-cli/antigravity-oauth-token",)
 
 CLAUDE_SEED = frozenset({"settings.json"})
 PI_SEED = frozenset({"settings.json"})
+OPENCODE_PRIVATE = frozenset()
+OPENCODE_SEED = frozenset({"opencode.json"})
 # agy rewrites these with rename-over-save, so a symlink would not survive (2026-10-11, Step 1 of Task 16).
 # agy also replaces builtin with a real dir when its checksum differs after an upgrade.
 AGY_SEED = frozenset({"antigravity-cli/settings.json", "antigravity-cli/cache",
@@ -28,6 +30,7 @@ SETTINGS_FILE = {
     "claude": "settings.json",
     "pi-agent": "settings.json",
     "antigravity": "home/.gemini/antigravity-cli/settings.json",
+    "opencode": "opencode.json",
 }
 LEDGER = ".ai-account-settings.json"
 
@@ -35,6 +38,7 @@ CREDS = {
     "claude": (".credentials.json",),
     "pi-agent": ("auth.json",),
     "ollama": ("key",),
+    "opencode": ("opencode.db",),
 }
 
 
@@ -94,6 +98,14 @@ def _antigravity(acct, cfg):
     return Launch({"HOME": str(home), "DBUS_SESSION_BUS_ADDRESS": f"unix:path={sock}"}, [], (fd,))
 
 
+def _opencode(acct, cfg):
+    _mirrored(acct, cfg.real_dirs["opencode"], OPENCODE_PRIVATE, OPENCODE_SEED)
+    return Launch({
+        "OPENCODE_CONFIG_DIR": str(acct.dir),
+        "OPENCODE_DB": str(acct.dir / "opencode.db"),
+    }, [])
+
+
 def _ollama(acct, cfg):
     key = acct.dir / "key"
     if not logged_in(acct):
@@ -105,6 +117,7 @@ PREPARE = {
     "claude": _claude,
     "pi-agent": _pi_agent,
     "antigravity": _antigravity,
+    "opencode": _opencode,
     "ollama": _ollama,
 }
 
@@ -150,6 +163,18 @@ def logged_in(acct: Account) -> bool:
         return True
     if acct.agent == "antigravity" and not AGY_CREDS:
         return (acct.dir / "home" / ".gemini" / "antigravity-cli").is_dir()
+    if acct.agent == "opencode":
+        db = acct.dir / "opencode.db"
+        if not db.is_file() or db.stat().st_size == 0:
+            return False
+        try:
+            import sqlite3
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            row = con.execute("SELECT count(*) FROM credential WHERE active = 1 OR active IS NULL").fetchone()
+            con.close()
+            return bool(row and row[0] > 0)
+        except Exception:
+            return False
     paths = creds_paths(acct)
     return bool(paths) and all(p.is_file() and p.stat().st_size > 0 for p in paths)
 
@@ -160,4 +185,6 @@ def login_plan(acct: Account, cfg: Config):
         return None, {}, "paste the ollama.com API key for this account"
     if agent == "antigravity":
         return [bin_], {}, "sign in when agy asks, then quit agy"
+    if agent == "opencode":
+        return [bin_, "auth", "login"], {}, "choose an integration and sign in, then quit"
     return [bin_], {}, "run /login inside the agent, then quit it"

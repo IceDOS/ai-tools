@@ -17,13 +17,14 @@ PROVIDERS = {
     "antigravity": ("antigravity",),
     "ollama": ("ollama",),
     "pi-agent": ("opencode-go", "openrouter"),
+    "opencode": ("opencode-go",),
 }
 
 
 def tag(agent: str, name: str) -> str:
     if name == "default":
         return "default"
-    return f"{agent}.{name}" if agent == "pi-agent" else name
+    return f"{agent}.{name}" if agent in ("pi-agent", "opencode") else name
 
 
 def _headroom(cfg, agent, eligible):

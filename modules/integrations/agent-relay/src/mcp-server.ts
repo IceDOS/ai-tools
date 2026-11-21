@@ -3,9 +3,10 @@ import { McpServer } from "./mcp.ts";
 import { INSTRUCTIONS, TOOLS, runTool } from "./tools.ts";
 
 const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
+const path = process.getBuiltinModule("node:path") as typeof import("node:path");
 const readline = process.getBuiltinModule("node:readline") as typeof import("node:readline");
 
-const PATTERNS: Record<string, RegExp> = { claude: /claude/, agy: /agy|antigravity|language_server/ };
+const PATTERNS: Record<string, RegExp> = { claude: /claude/, agy: /agy|antigravity|language_server/, opencode: /opencode/ };
 
 function cmdline(pid: number): string {
   try {
@@ -31,6 +32,46 @@ export function agentCwd(pid: number, readlink: (p: string) => string = (p) => f
 
 function main(kind: Kind) {
   const relay = new Relay();
+  const out = (line: string) => process.stdout.write(line + "\n");
+
+  if (kind === "opencode") {
+    // OpenCode shares one server instance across sessions; caller is identified by _meta sessionID.
+    const server = new McpServer({
+      name: "agent-relay",
+      instructions: INSTRUCTIONS,
+      tools: TOOLS,
+      call: (name, args, meta) => {
+        const sessionID = meta?.["ai.opencode/sessionID"];
+        if (typeof sessionID !== "string" || !sessionID) {
+          throw new Error("Missing ai.opencode/sessionID in tool call metadata");
+        }
+        const all = relay.sessions();
+        let target = all.find((s) => s.kind === "opencode" && s.scope === sessionID);
+        if (!target) {
+          const rootFile = path.join(relay.root, "opencode", "roots", `${sessionID}.json`);
+          try {
+            const data = JSON.parse(fs.readFileSync(rootFile, "utf8"));
+            const rootId = typeof data === "string" ? data : data?.rootSessionID;
+            if (rootId) {
+              target = all.find((s) => s.kind === "opencode" && s.scope === rootId);
+            }
+          } catch {}
+        }
+        if (!target) {
+          throw new Error(`No registered relay session found for opencode session ${sessionID}`);
+        }
+        return runTool(relay, target.id, readConfig().hopLimit, name, args);
+      },
+    });
+
+    const rl = readline.createInterface({ input: process.stdin });
+    rl.on("line", (line) => {
+      if (line.trim()) for (const r of server.handle(line)) out(r);
+    });
+    rl.on("close", () => process.exit(0));
+    return;
+  }
+
   const pid = agentPid(kind);
   const rec = relay.register({
     kind,
@@ -38,7 +79,6 @@ function main(kind: Kind) {
     cwd: agentCwd(pid),
     id: process.env.AGENT_RELAY_ID,
   });
-  const out = (line: string) => process.stdout.write(line + "\n");
   const injected: Message[] = [];
   const server = new McpServer({
     name: "agent-relay",
@@ -75,4 +115,4 @@ function main(kind: Kind) {
 }
 
 const kind = process.argv[2];
-if (import.meta.main && (kind === "claude" || kind === "agy")) main(kind);
+if (import.meta.main && (kind === "claude" || kind === "agy" || kind === "opencode")) main(kind);

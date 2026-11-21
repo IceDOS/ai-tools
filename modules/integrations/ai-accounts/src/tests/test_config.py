@@ -90,3 +90,6 @@ class StateTest(unittest.TestCase):
         state.write_status("ollama", {"default": True})
         self.assertEqual(state.status()["claude"], {"default": True, "work": False})
         self.assertIn("ollama", state.status())
+
+    def test_opencode_in_agents(self):
+        self.assertIn("opencode", config.AGENTS)

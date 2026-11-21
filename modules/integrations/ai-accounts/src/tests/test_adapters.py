@@ -1,3 +1,4 @@
+import sqlite3
 import json
 import os
 import shutil
@@ -23,8 +24,8 @@ class AdapterTest(unittest.TestCase):
         self.real = root / "real"
         self.real.mkdir()
         (self.real / "settings.json").write_text("{}")
-        self.cfg = Config(real_dirs={a: str(self.real) for a in ("claude", "pi-agent", "antigravity")},
-                          bins={"claude": "/x/claude", "antigravity": "/x/agy", "pi-agent": "/x/pi"},
+        self.cfg = Config(real_dirs={a: str(self.real) for a in ("claude", "pi-agent", "antigravity", "opencode")},
+                          bins={"claude": "/x/claude", "antigravity": "/x/agy", "pi-agent": "/x/pi", "opencode": "/x/opencode"},
                           bus_talk=["org.kde.*"])
 
     def tearDown(self):
@@ -260,3 +261,54 @@ class AdapterTest(unittest.TestCase):
             adapters.prepare(acct_b, self.cfg)
         b_s = acct_b.dir / "home" / ".gemini" / "antigravity-cli" / "settings.json"
         self.assertEqual(json.loads(b_s.read_text()), {"from": "a", "model": "managed_model"})
+
+    def test_opencode_shared(self):
+        (self.real / "opencode.json").write_text("{}")
+        (self.real / "cli.json").write_text("{}")
+        (self.real / "plugins").mkdir()
+        acct = Account("opencode", "work")
+        launch = adapters.prepare(acct, self.cfg)
+        self.assertEqual(launch.env, {
+            "OPENCODE_CONFIG_DIR": str(acct.dir),
+            "OPENCODE_DB": str(acct.dir / "opencode.db"),
+        })
+        self.assertTrue((acct.dir / "plugins").is_symlink())
+        self.assertTrue((acct.dir / "cli.json").is_symlink())
+        self.assertTrue((acct.dir / "opencode.json").is_file())
+        self.assertFalse((acct.dir / "opencode.json").is_symlink())
+
+    def test_opencode_isolated_has_no_links(self):
+        acct = Account("opencode", "solo", "isolated")
+        adapters.prepare(acct, self.cfg)
+        self.assertFalse((acct.dir / "opencode.json").exists())
+
+    def test_opencode_logged_in_needs_active_credential(self):
+        acct = Account("opencode", "work")
+        self.assertFalse(adapters.logged_in(acct))
+        acct.dir.mkdir(parents=True, exist_ok=True)
+        db_path = acct.dir / "opencode.db"
+        db_path.touch()
+        self.assertFalse(adapters.logged_in(acct))
+
+        con = sqlite3.connect(db_path)
+        con.execute("CREATE TABLE credential (id TEXT, integration_id TEXT, active INT, value TEXT)")
+        con.commit()
+        con.close()
+        self.assertFalse(adapters.logged_in(acct))
+
+        con = sqlite3.connect(db_path)
+        con.execute("INSERT INTO credential VALUES ('c1', 'opencode-go', 0, '{}')")
+        con.commit()
+        con.close()
+        self.assertFalse(adapters.logged_in(acct))
+
+        con = sqlite3.connect(db_path)
+        con.execute("INSERT INTO credential VALUES ('c2', 'opencode-go', 1, '{}')")
+        con.commit()
+        con.close()
+        self.assertTrue(adapters.logged_in(acct))
+
+    def test_opencode_login_plan(self):
+        acct = Account("opencode", "work")
+        cmd, env, hint = adapters.login_plan(acct, self.cfg)
+        self.assertEqual(cmd, ["/x/opencode", "auth", "login"])

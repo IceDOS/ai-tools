@@ -81,6 +81,7 @@
             "claude"
             "pi-agent"
             "antigravity"
+            "opencode"
             "ollama"
           ];
           validName = n: n != "default" && builtins.match "[a-z0-9][a-z0-9_-]*" n != null;
@@ -101,14 +102,19 @@
                   claude = "${home}/.claude";
                   pi-agent = "${config.xdg.configHome}/pi-agent";
                   antigravity = home;
+                  opencode = "${config.xdg.configHome}/opencode";
                   ollama = "";
                 };
                 # agy's .gemini lives here; the antigravity launcher keeps it out of ~.
-                dataDirs.antigravity = "${config.xdg.dataHome}/gemini";
+                dataDirs = {
+                  antigravity = "${config.xdg.dataHome}/gemini";
+                  opencode = "${config.xdg.dataHome}/opencode";
+                };
                 bins = {
                   claude = lib.getExe pkgs.claude-code;
                   pi-agent = lib.getExe pkgs.pi-agent;
                   antigravity = "${pkgs.antigravity-cli}/bin/agy";
+                  opencode = lib.getExe pkgs.opencode;
                   ollama = "";
                 };
                 accountNames = lib.concatMap (a: lib.attrNames a.accounts) (lib.attrValues userCfg.agents);

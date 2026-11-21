@@ -74,6 +74,18 @@
               launchWrapper = [ "${pkg}/bin/agent-relay-agy" ];
             };
           }
+          // optionalAttrs (has "opencode") {
+            opencode = {
+              plugins = [ "${lib'}/opencode" ];
+              extra-mcp-servers.agent-relay = {
+                type = "local";
+                command = [
+                  "${pkg}/bin/agent-relay-mcp"
+                  "opencode"
+                ];
+              };
+            };
+          }
           // optionalAttrs (has "agent-launch") {
             agent-launch.relayIds = true;
           };

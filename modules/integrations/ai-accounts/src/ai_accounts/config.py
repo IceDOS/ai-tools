@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-AGENTS = ("claude", "pi-agent", "antigravity", "ollama")
+AGENTS = ("claude", "pi-agent", "antigravity", "opencode", "ollama")
 
 
 def _xdg(name: str, default: str) -> Path:

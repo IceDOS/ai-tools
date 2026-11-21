@@ -169,12 +169,13 @@ PROVIDER_SHORT = {"antigravity": "ag", "opencode-go": "go", "ollama": "ol", "ope
 # Non-default accounts: "<provider>@<tag>/<window>"; Claude's bare keys become "claude@<tag>/<key>".
 ACCOUNT_SEP = "@"
 # Agents whose auth file holds several providers tag their windows "<agent>.<account>".
-MULTI_PROVIDER_AGENTS = ("pi-agent",)
+MULTI_PROVIDER_AGENTS = ("pi-agent", "opencode")
 AGENT_PROVIDERS = {
     "claude": ("claude",),
     "antigravity": ("antigravity",),
     "ollama": ("ollama",),
     "pi-agent": ("opencode-go", "openrouter"),
+    "opencode": ("opencode-go",),
 }
 
 
@@ -206,6 +207,7 @@ ENABLED_PROVIDERS = tuple(p for p in os.environ.get("ALIMIT_PROVIDERS", "").spli
 # Credentials other agents already keep; alimit only reads them.
 PI_AGENT_AUTH = _env_path("ALIMIT_PI_AGENT_AUTH", HOME / ".config" / "pi-agent" / "auth.json")
 OPENCODE_AUTH = _env_path("OPENCODE_DATA_DIR", _DATA_HOME / "opencode") / "auth.json"
+OPENCODE_DB = _env_path("OPENCODE_DB", _DATA_HOME / "opencode" / "opencode.db")
 
 OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 OLLAMA_BALANCE_URL = "https://ollama.com/api/balance"

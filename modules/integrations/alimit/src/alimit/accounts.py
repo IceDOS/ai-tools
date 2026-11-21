@@ -35,6 +35,7 @@ CREDENTIALS = {
     "claude": ".credentials.json",
     "pi-agent": "auth.json",
     "ollama": "key",
+    "opencode": "opencode.db",
 }
 
 

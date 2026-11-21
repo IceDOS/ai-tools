@@ -38,6 +38,12 @@ class AccountsTest(unittest.TestCase):
         self.assertEqual(accounts.Account("pi-agent", "w").credentials, st / "pi-agent/w/auth.json")
         self.assertEqual(accounts.Account("ollama", "h").credentials, st / "ollama/h/key")
 
+    def test_opencode_credentials_and_tag(self):
+        st = self.root / "state"
+        self.assertEqual(accounts.Account("opencode", "work").credentials, st / "opencode/work/opencode.db")
+        self.assertEqual(accounts.Account("opencode", "work").tag, "opencode.work")
+        self.assertEqual(accounts.agent_account("opencode-go@opencode.work/rolling"), ("opencode", "work"))
+
     def test_env_tags(self):
         with mock.patch.dict(os.environ, {"AI_ACCOUNT_TAGS": "claude=work,ollama=default"}):
             self.assertEqual(accounts.env_tags(), {"claude": "work", "ollama": "default"})

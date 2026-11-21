@@ -23,7 +23,7 @@ interface Server {
 }
 
 // Spawns the real stdio server, so the test sees exactly the lines Claude sees.
-function startServer(root: string, kind: "claude" | "agy"): Server {
+function startServer(root: string, kind: "claude" | "agy" | "opencode"): Server {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "relay-mcp-home-"));
   const env = { ...process.env, AGENT_RELAY_ROOT: root, HOME: home, XDG_CONFIG_HOME: path.join(home, ".config") };
   delete (env as Record<string, string | undefined>).AGENT_RELAY_ID;
@@ -152,6 +152,56 @@ test("agy: no channel capability and no delivery from the MCP server, agy-watch 
     assert.deepEqual(channels(server), []);
     assert.equal(relay.status(me.id, msg.short)[0].state, "queued");
     assert.equal(relay.pending(id).length, 1);
+  } finally {
+    server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("opencode: resolves session per tool call via _meta sessionID or root map, fails when missing", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-mcp-"));
+  const relay = relayAt(root);
+  const rootRec = relay.register({ kind: "opencode", pid: process.pid, cwd: root, scope: "ses_root" });
+  const server = startServer(root, "opencode");
+  try {
+    const init = await server.request(1, "initialize");
+    assert.equal(init.result.capabilities.experimental, undefined);
+    assert.equal(init.result.instructions.includes("Your relay ID is"), false);
+
+    // Call without _meta fails clearly
+    const failNoMeta = await server.request(2, "tools/call", { name: "relay_peers", arguments: {} });
+    assert.equal(failNoMeta.result.isError, true);
+    assert.match(failNoMeta.result.content[0].text, /Missing ai\.opencode\/sessionID/);
+
+    // Call with unknown sessionID fails clearly
+    const failUnknown = await server.request(3, "tools/call", {
+      name: "relay_peers",
+      arguments: {},
+      _meta: { "ai.opencode/sessionID": "ses_unknown" },
+    });
+    assert.equal(failUnknown.result.isError, true);
+    assert.match(failUnknown.result.content[0].text, /No registered relay session found/);
+
+    // Call with root session succeeds
+    const callRoot = await server.request(4, "tools/call", {
+      name: "relay_peers",
+      arguments: {},
+      _meta: { "ai.opencode/sessionID": "ses_root" },
+    });
+    assert.equal(callRoot.result.isError, undefined);
+    assert.match(callRoot.result.content[0].text, /not linked to any session/);
+
+    // Call with subagent mapped in roots/ succeeds
+    const rootsDir = path.join(root, "opencode", "roots");
+    fs.mkdirSync(rootsDir, { recursive: true });
+    fs.writeFileSync(path.join(rootsDir, "ses_sub.json"), JSON.stringify({ rootSessionID: "ses_root" }));
+    const callSub = await server.request(5, "tools/call", {
+      name: "relay_peers",
+      arguments: {},
+      _meta: { "ai.opencode/sessionID": "ses_sub" },
+    });
+    assert.equal(callSub.result.isError, undefined);
+    assert.match(callSub.result.content[0].text, /not linked to any session/);
   } finally {
     server.close();
     fs.rmSync(root, { recursive: true, force: true });

@@ -96,6 +96,10 @@
             inherit config repoUrl;
             name = "pi-agent";
           };
+          hasOpencode = icedosLib.hasModule {
+            inherit config repoUrl;
+            name = "opencode";
+          };
 
           # cost-footer already shows the opencode-go plan rows.
           piAgentSkip = optional (
@@ -110,6 +114,12 @@
                 (builtins.toJSON piAgentSkip)
               ]
               (builtins.readFile ./pi-agent.ts);
+          alimitOpencodePlugin = pkgs.runCommand "alimit-opencode-plugin" { } ''
+            mkdir -p "$out"
+            substitute ${./opencode/tui.tsx} "$out/tui.tsx" \
+              --replace-fail '@alimit@' '${alimit}'
+          '';
+
           pollable = [
             "claude"
             "opencode-go"
@@ -147,6 +157,14 @@
             pi-agent.extensions.inline.alimit = mkIf (any (u: u.statusLine) (attrValues alimitUsers)) (
               mkDefault piAgentExtension
             );
+          }
+          // optionalAttrs hasOpencode {
+            opencode.cli.plugins = mkIf (any (u: u.statusLine) (attrValues alimitUsers)) [
+              {
+                package = "${alimitOpencodePlugin}";
+                options = { };
+              }
+            ];
           };
 
           icedos.system.toolset.commands = mkIf (alimitUsers != { }) [

@@ -107,6 +107,26 @@ class TestKeys(unittest.TestCase):
                     providers.fetch_opencode_go()
         self.assertEqual(calls, ["stale", "valid"])
 
+    def test_opencode_db_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            import sqlite3
+            db = Path(tmp) / "opencode.db"
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE credential (id TEXT, integration_id TEXT, active INT, value TEXT)")
+            con.execute("INSERT INTO credential VALUES ('1', 'opencode-go', 1, ?)", (json.dumps({"key": "go-key-1"}),))
+            con.execute("INSERT INTO credential VALUES ('2', 'opencode-go', 0, ?)", (json.dumps({"key": "inactive-key"}),))
+            con.execute("INSERT INTO credential VALUES ('3', 'opencode', 1, ?)", (json.dumps({"access": "zen-token"}),))
+            con.execute("INSERT INTO credential VALUES ('4', 'other', 1, ?)", (json.dumps({"key": "other-key"}),))
+            con.commit()
+            con.close()
+
+            with mock.patch.object(config, "OPENCODE_DB", db), \
+                    mock.patch.object(config, "PI_AGENT_AUTH", Path(tmp) / "none.json"), \
+                    mock.patch.object(config, "OPENCODE_AUTH", Path(tmp) / "none.json"), \
+                    mock.patch.dict("os.environ", {}, clear=True):
+                keys = providers._keys("OPENCODE_API_KEY", opencode_names=("opencode-go", "opencode"))
+                self.assertEqual(keys, ["go-key-1", "zen-token"])
+
     def test_no_keys(self):
         with mock.patch.object(config, "PI_AGENT_AUTH", Path("/nonexistent")), \
                 mock.patch.dict("os.environ", {}, clear=True):

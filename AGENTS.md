@@ -14,7 +14,7 @@
 - Format with `icedos nixf .` after editing any `.nix`.
 
 ## Purpose
-AI agents, local model servers and their glue: `claude-code`, `antigravity`, `pi-agent`
+AI agents, local model servers and their glue: `claude-code`, `antigravity`, `pi-agent`, `opencode`
 (agents), `llamacpp`, `ollama` (model servers),
 `mcp-server` (`icedos mcp serve`), one module per MCP server (`aws-mcp`, `basic-memory-mcp`,
 `chrome-devtools-mcp`, `context7-mcp`, `ddev-mcp`, `kwin-mcp`, `nixos-mcp`, `opencart-mcp`, `pagespeed-insights-mcp`, `plesk-mcp`, `rea-mcp`,
@@ -31,7 +31,7 @@ Every option here lives under `icedos.ai-tools`: the shared `rules`, `skills.poo
 `modules/<category>/<name>/{icedos.nix,config.toml}`; `flake.nix` exposes them via
 `icedosLib.scanModules { path = ./modules; filename = "icedos.nix"; }`, which recurses, and
 `meta.name` (not the folder) names the module. The categories are `agents` (antigravity,
-claude-code, pi-agent), `models` (llamacpp, ollama), `mcp` (one folder per MCP server: icedos-mcp, whose module name is `mcp-server`, and
+claude-code, pi-agent, opencode), `models` (llamacpp, ollama), `mcp` (one folder per MCP server: icedos-mcp, whose module name is `mcp-server`, and
 aws, basic-memory, chrome-devtools, context7, ddev, kwin, nixos, opencart, pagespeed-insights, plesk, rea, signal, each named
 `<folder>-mcp` except `kwin-mcp`; gateway, whose module name is `mcp-gateway`; `mcp/lib` holds their
 shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-intelligence).
@@ -40,11 +40,13 @@ shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-
 ## Shared options (`icedos.ai-tools.*`)
 - `icedos.ai-tools.rules` — name = markdown. pi-agent writes them all to
   `<dataDir>/APPEND_SYSTEM.md`, which pi appends to every system prompt,
-  antigravity writes `~/.config/gemini/rules/<name>.md`, and `claude-code` sets
-  `programs.claude-code.rules` (mkDefault per entry).
+  antigravity writes `~/.config/gemini/rules/<name>.md`, `claude-code` sets
+  `programs.claude-code.rules` (mkDefault per entry), and opencode concatenates them into
+  `programs.opencode.context`.
 - `icedos.ai-tools.skills.pool` — name = full SKILL.md. Same fan-out: antigravity
-  `~/.local/share/gemini/antigravity-cli/skills/`, Claude Code `programs.claude-code.skills`.
-  pi-agent builds them into a store dir that its settings.json lists under skills.
+  `~/.local/share/gemini/antigravity-cli/skills/`, Claude Code `programs.claude-code.skills`,
+  opencode `programs.opencode.skills`. pi-agent builds them into a store dir that its
+  settings.json lists under skills.
 - Per-agent options of the same name win over the shared entry
   (`antigravity.{rules,skills}`, `pi-agent.{rules,skills.extra-builtin}`).
 - Non-agent modules (`llamacpp`, `ollama` and the `mcp` modules) have a `skills`
@@ -199,6 +201,52 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   With kde's `vigor` module, unset `meters.power` values come from vigor's tariff, `gpuIdleWatts` and `windows`.
   `agent-launch` registers locator `pi-agent`, which zed's bridge resolves from pi's per-cwd session dirs.
 - `antigravity`: owns `icedos.ai-tools.antigravity.users.<name>`. agy hardcodes `$HOME/.gemini`, so its package's `agy` runs `agy_home.py`, which sets `HOME` to a symlink farm of `~` (`~/.local/state/icedos/antigravity/home`, built by ai-accounts' `mirror.sync` on each launch) whose `.gemini` links to `~/.local/share/gemini`; a home that already has `.gemini` (an ai-accounts account, a nested agy) is left alone. Every process agy starts inherits that `HOME`, and a new top-level entry one of them creates lands in the farm, not `~`. Code outside agy reads `~/.local/share/gemini` directly, and ai-accounts gets it as `dataDir`. The `rlm` plugin (`modules/agents/antigravity/plugins/rlm/`, powered by the shared server in `modules/mcp/rlm/`, enabled via `extensions.recursive-language-models.enable`) ports pi-rlm to agy. It packages the unmodified `rlm_kernel.py` pinned from `@florianguyonnet/pi-rlm` alongside the `rlm_mcp` server and links `~/.config/gemini/plugins/rlm`. When `extensions.recursive-language-models.autoload` is true, the `agy` wrapper appends `--agent rlm`. Child agents run headless via `agy -p --agent rlm --output-format stream-json`, logged to `<dataDir>/children/<session>/<id>.jsonl`. The CLI and server exchange metadata through `sessions/<pid>.json`. Kernel data variables are pickled after each cell and restored when a conversation resumes; the postGc hook prunes old snapshots, child logs and harness notes. The `/refine` harness records persistent prompt and memory notes injected during session start. Running children show live in the terminal title (`· N rlm`, counted by `tool_state.py` from the child logs via `ANTIGRAVITY_RLM_DATA_DIR`) and as a status-bar snapshot, since agy never redraws the bar during a tool call; a log whose start-record `pid` (the rlm server) is gone counts as ended. `/rlm-children` is answered by the plugin's PreInvocation hook with an `errorMessage` plus `terminate`, so it costs no model turn; `/rlm-children <id>` (or `#seq` or a unique prefix) posts a child transcript; plugin skills arrive namespaced (`/rlm:rlm-children`), and agy 1.5.6 drops a whole hook result whose `systemMessage` carries any `metadata`. Unlike pi-agent, agy cannot toggle RLM mode mid-session.
+- `opencode`: built on Home Manager's `programs.opencode`. Declarative settings land in
+  `~/.config/opencode/opencode.json` (`settings`) and client TUI configuration in
+  `~/.config/opencode/cli.json` (`cli`). Rules from `rules` and `opencode.rules` are concatenated
+  sorted by name into `programs.opencode.context` (`~/.config/opencode/AGENTS.md`). Skills from
+  `skills.pool` and `opencode.skills` map to `programs.opencode.skills`, with `excludeSkills`
+  filtering out skills provided by plugins. The `ponytail` skills module adds its upstream opencode
+  plugin to `opencode.plugins` and lists its skills in `excludeSkills`. Server plugins pass via
+  `plugins` (`settings.plugins`). TUI plugin `icedos-status` runs via `cli.plugins` to handle terminal
+  title (`cli.terminal.title = false`, managed via `terminal-title.{enable,idleGlyph,workingGlyphs}`),
+  status banners (`turnEndMessage`), and tool timers (`toolTimer`; names the nested tool `kernel.ipython` during `execute`). When `alimit.users.<name>.statusLine`
+  is true, an OpenCode TUI plugin (`alimit/opencode/tui.tsx`) renders usage in slot `app` via
+  `cli.plugins`. CLM extension `extensions.context-language-models` (`opencode/clm/module.nix`) adds
+  `opencode-clm[@version]` through opencode's npm installer (pinning a version disables auto-update),
+  with the non-empty fields as plugin options; `compaction = "off"` also sets `compaction.auto = false`. CLM 0.5.1 mirrors each session into `<project>/.opencode/clm/` unless `mirrorDir` is set, and its own `compaction` option has no effect on OpenCode 2, so it isn't passed.
+  RLM extension `extensions.recursive-language-models` (`opencode/rlm/module.nix`, powered by `modules/mcp/rlm/`)
+  registers MCP server `kernel` and the `opencode-rlm` server plugin; `autoload` sets `default_agent = "rlm"`.
+  Agent `rlm` denies every tool except `execute`, `skill`, `kernel_*`, and dynamically generated allow rules for configured MCP servers (`<server>_*`), reached from `execute` as `tools.<server>["<tool>"]` (opencode permissions are last-match). Children run headless
+  via `opencode run --format json --agent rlm --auto --standalone`; `icedos-status` renders an opencode RLM children footer row. Data lives in
+  `${XDG_DATA_HOME:-~/.local/share}/icedos-rlm`, shared with antigravity's rlm (disjoint session ids).
+  `/rlm-children` lists children and `/rlm-children <id>` (or `#seq` or a unique prefix) posts a child transcript, as plugin commands, and `/refine` harness notes are injected through the `context` hook.
+  `codeReview` ships the `code-review` skill (needs RLM) and `freeReview` its loop on `opencode/*-free`
+  children started with `opencode run --agent build`. `superpowers.{enable,rev}` adds obra/superpowers'
+  git plugin. npm extension `power` (`npmExtensions` in
+  `icedos.nix`) takes `{enable,version,options}`; TUI-only packages go to `cli.plugins`, the rest to
+  `settings.plugins` (tok/s is native: `cli.session.tps`). OpenCode 2.3 accepts an `lsp` key but has no LSP client, so the module sets none.
+  With the `vpn-rotate` module enabled, the `plugins/vpn-rotate` server plugin runs
+  `vpn-rotate` from the `session.retry` hook on `provider.rate-limit`/`provider.free-limit` errors of provider
+  `opencode` and retries at once on exit 0. While the state file says `tunnel`, its `model.request` hook points that
+  provider's base URL at a loopback `Bun.serve` forwarder that fetches through the tunnel proxy, so other providers
+  stay direct. When a rotation fails (not when cancelled), the retry hook moves the request to the next model in
+  `extensions.vpn-rotate.fallbackModels` (empty means every enabled zero-cost `opencode` model, big-pickle included), skipping models that
+  failed during the same prompt. It calls `session.switchModel` so the input bar shows the fallback, and its
+  `experimental.model.resolve` hook covers the retry that may start before the switch lands. `fallbackReturn` picks
+  when the original selection (variant included) comes back: `prompt` (next prompt), `stay` (never) or a duration
+  such as `15m` (`s`/`m`/`h`); it only switches back while the session still uses the fallback. `icedos-status` shows the state as a footer row (`vpnRow`), and with agent-relay enabled the session's relay ID next to it. The module also turns off Stylix's
+  opencode target, which only writes the `tui.json` OpenCode 2 ignores.
+  Interactive invocations prepend `launchWrapper` and append `extraArgs`; `desktopEntry` installs a
+  `.desktop` file for the launcher. Background web service `web.{enable,extraArgs}` runs `opencode serve`
+  under a systemd user unit. `ai-accounts` isolates credentials and session history under
+  `~/.local/state/icedos/ai-accounts/opencode/<account>/` (`OPENCODE_CONFIG_DIR` seeded with
+  `opencode.json`, `OPENCODE_DB` pointing to `opencode.db`); provider `opencode-go`, login
+  `opencode auth login`, logged-in check reads the `credential` table read-only. `includeInIcedosGc`
+  prunes `~/.local/share/opencode/log/` and deletes root sessions older than `sessionRetentionDays`
+  (read from `opencode.db` read-only) via `opencode --standalone session delete`, so the background
+  service is never started. `agent-launch` registers locator `opencode` (`--session {id}`), which zed's
+  bridge resolves from `opencode.db` (`session_v2`, read-only).
 - `claude-code` — owns `icedos.ai-tools.claude-code.users.<name>` (`mkSubmoduleAttrsOption`,
   filled per normal user via `genDefaults`) and enables `programs.claude-code` for every hm user
   (`enable = lib.mkDefault true`, `enableMcpIntegration = true`). It feeds the shared
@@ -273,6 +321,8 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   - The probe imports pi-agent's `extensions/free-models.ts` (`VPN_ROTATE_OPENCODE_FREE_MODULE`) for opencode
     Zen's URL, user-agent and cached models, probes the request's free model, and skips when it has none.
   - `cooldownSeconds` and `maxPerHour` treat 0 as no limit.
+- `agent-relay` — owns `icedos.ai-tools.agent-relay`.
+  - `opencode`: the plugin dir `$out/lib/agent-relay/opencode` (via `icedos.ai-tools.opencode.plugins`), and `agent-relay-mcp opencode` via `opencode.extra-mcp-servers`. opencode runs one shared server for all windows, so identity is per ROOT session: each root session registers lazily with scope = `rootSessionID`, and its ID is pinned in `$AGENT_RELAY_ROOT/opencode/pins/<root>.txt` across resumes. The MCP server resolves the caller from `_meta["ai.opencode/sessionID"]`; subagents map to their root via `opencode/roots/<id>.json`, and an unmapped caller gets an error. Delivery uses `ctx.session.synthetic` steer after tool calls and on `experimental.idle`. The relay ID is injected into the system prompt. `session.deleted` retires the ID. Limit: agent-launch's `AGENT_RELAY_ID` can't choose the opencode relay ID.
 - `skills` category (`ponytail`, `unslop`, options at `icedos.ai-tools.skills.<name>`) — each fetches a GitHub repo (`owner`/`repo`/`rev`/`hash`)
   and reads the `skills` it lists from the repo's `skills/` dir into the shared pool through
   `mcp/lib/upstream-skills.nix`. Each name in `autoload` adds a `<name>-autoload` rule telling agents

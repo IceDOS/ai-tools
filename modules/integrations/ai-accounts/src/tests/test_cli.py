@@ -156,3 +156,12 @@ class CliTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn(" 4.2%", out)
         self.assertIn("  82%", out)
+
+    def test_build_env_opencode_tags(self):
+        acct = config.Account("opencode", "work")
+        launch = adapters.Launch({"OPENCODE_CONFIG_DIR": "/a"}, [])
+        env = cli.build_env(self.cfg, "opencode", acct, launch, {})
+        self.assertEqual(env["AI_ACCOUNT"], "work")
+        self.assertEqual(env["AI_ACCOUNT_AGENT"], "opencode")
+        self.assertEqual(env["AI_ACCOUNT_TAGS"], "opencode-go=opencode.work")
+        self.assertEqual(env["OPENCODE_CONFIG_DIR"], "/a")

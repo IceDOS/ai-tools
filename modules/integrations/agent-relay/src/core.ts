@@ -2,13 +2,14 @@ const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
 const path = process.getBuiltinModule("node:path") as typeof import("node:path");
 const crypto = process.getBuiltinModule("node:crypto") as typeof import("node:crypto");
 
-export type Kind = "pi" | "claude" | "agy" | "script";
+export type Kind = "pi" | "claude" | "agy" | "script" | "opencode";
 
 export interface SessionRecord {
   id: string;
   kind: Kind;
   pid: number;
   cwd: string;
+  scope?: string;
   name?: string;
   group?: string;
   started: string;
@@ -33,6 +34,7 @@ export interface RegisterInput {
   pid: number;
   cwd: string;
   id?: string;
+  scope?: string;
   name?: string;
   agent?: Record<string, unknown>;
 }
@@ -274,6 +276,15 @@ function messageId(now: Date): string {
   return now.getTime().toString(36).padStart(10, "0") + seq.toString(36).padStart(4, "0") + hex(4);
 }
 
+// Readers never see a partial file: write a .tmp sibling, then rename.
+export function writeAtomic(file: string, data: unknown): void {
+  const tmp = `${file}.${process.pid}.${hex(6)}.tmp`;
+  fs.mkdirSync(path.dirname(tmp), { recursive: true, mode: 0o700 });
+  const str = typeof data === "string" ? data : JSON.stringify(data);
+  fs.writeFileSync(tmp, str, { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
 export class Relay {
   readonly root: string;
   readonly limits: Limits;
@@ -307,9 +318,7 @@ export class Relay {
 
   // Readers never see a partial file: write a .tmp sibling, then rename.
   protected write(file: string, data: unknown): void {
-    const tmp = `${file}.${process.pid}.${hex(6)}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
-    fs.renameSync(tmp, file);
+    writeAtomic(file, data);
   }
 
   // Cross-process mutex around one read-modify-write. Gives up rather than fail the caller.
@@ -380,10 +389,13 @@ export class Relay {
 
   register(input: RegisterInput): SessionRecord {
     const all = this.sessions();
-    const existing = all.find((s) => s.pid === input.pid && s.kind === input.kind);
+    const existing = all.find(
+      (s) => s.kind === input.kind && (input.scope ? s.scope === input.scope : s.pid === input.pid),
+    );
     if (existing) {
       return this.update(existing.id, {
         cwd: input.cwd,
+        ...(input.scope ? { scope: input.scope } : {}),
         ...(input.name ? { name: input.name } : {}),
         ...(input.agent ? { agent: { ...existing.agent, ...input.agent } } : {}),
       });
@@ -400,6 +412,7 @@ export class Relay {
       cwd: input.cwd,
       started: this.iso(),
       parent: p ? { id: p.id, kind: p.kind, ...(p.name ? { name: p.name } : {}) } : null,
+      ...(input.scope ? { scope: input.scope } : {}),
       ...(input.name ? { name: input.name } : {}),
       ...(input.agent ? { agent: input.agent } : {}),
     };
