@@ -1,0 +1,15 @@
+[icedos.ai-tools.vpn-rotate]
+# Retries rate-limited free-model requests of pi-agent and opencode through a private userspace tunnel.
+# Needs a `protonvpn signin` account; the host network is never touched, and only those requests use the tunnel.
+# Country codes to rotate through, spelled Proton's way ("UK", not "GB"); empty uses every country.
+countries = []
+# Country codes never to rotate to; applied after countries.
+excludedCountries = []
+# No new rotation within this many seconds of the last one, from any session; 0 disables.
+cooldownSeconds = 0
+# At most this many rotations in any hour; 0 disables the cap.
+maxPerHour = 0
+# Port of the tunnel's local HTTP proxy.
+proxyPort = 25345
+# How long a tunnel stays up before traffic goes direct again, in seconds.
+directRetrySeconds = 3600

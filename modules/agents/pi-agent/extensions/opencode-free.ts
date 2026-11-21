@@ -539,7 +539,7 @@ function descendingId(timestamp = Date.now()): string {
   return "ses_" + time + Array.from(bytes, (byte) => ID_CHARS[byte % 62]).join("");
 }
 
-const statePath = (): string => `${process.env.XDG_RUNTIME_DIR || "/tmp"}/pi-vpn-rotate.json`;
+const statePath = (): string => `${process.env.XDG_RUNTIME_DIR || "/tmp"}/vpn-rotate.json`;
 let lastKnownRotationEpoch = 0;
 
 function checkGlobalRotationEpoch(): boolean {

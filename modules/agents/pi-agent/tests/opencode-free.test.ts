@@ -178,7 +178,7 @@ if (mode === "multibyte_split") {
   fs.chmodSync(fakeBunPath, 0o755);
 
   const envOut = path.join(tmpDir, "child-env.json");
-  const vpnStateFile = path.join(tmpDir, "pi-vpn-rotate.json");
+  const vpnStateFile = path.join(tmpDir, "vpn-rotate.json");
   const writeVpnState = (state: unknown) => fs.writeFileSync(vpnStateFile, JSON.stringify(state));
 
   const prevEnv = process.env.PI_OPENCODE_FREE_BUN;

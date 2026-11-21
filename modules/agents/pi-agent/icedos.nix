@@ -96,41 +96,15 @@
           turnTimer = mkBoolOption { default = e.turnTimer; };
           toolTimer = mkBoolOption { default = e.toolTimer; };
 
+          # Used when the vpn-rotate module is enabled; it owns the daemon and its options.
           vpn-rotate = {
-            enable = mkBoolOption { default = e.vpn-rotate.enable; };
             providers = mkStrListOption { default = e.vpn-rotate.providers; };
-            countries = mkStrListOption { default = e.vpn-rotate.countries; };
-            excludedCountries = mkStrListOption { default = e.vpn-rotate.excludedCountries; };
-
-            cooldownSeconds = mkIntBetweenOption {
-              path = "icedos.ai-tools.pi-agent.extensions.vpn-rotate.cooldownSeconds";
-              source = ./config.toml;
-              default = e.vpn-rotate.cooldownSeconds;
-            } 0 86400;
-
-            maxPerHour = mkIntBetweenOption {
-              path = "icedos.ai-tools.pi-agent.extensions.vpn-rotate.maxPerHour";
-              source = ./config.toml;
-              default = e.vpn-rotate.maxPerHour;
-            } 0 60;
 
             maxRetries = mkIntBetweenOption {
               path = "icedos.ai-tools.pi-agent.extensions.vpn-rotate.maxRetries";
               source = ./config.toml;
               default = e.vpn-rotate.maxRetries;
             } 0 100;
-
-            proxyPort = mkIntBetweenOption {
-              path = "icedos.ai-tools.pi-agent.extensions.vpn-rotate.proxyPort";
-              source = ./config.toml;
-              default = e.vpn-rotate.proxyPort;
-            } 1 65535;
-
-            directRetrySeconds = mkIntBetweenOption {
-              path = "icedos.ai-tools.pi-agent.extensions.vpn-rotate.directRetrySeconds";
-              source = ./config.toml;
-              default = e.vpn-rotate.directRetrySeconds;
-            } 60 86400;
           };
 
           ghost-text = {
@@ -230,7 +204,7 @@
           # Shared entries first, so a same-named pi-agent entry wins.
           rules =
             config.icedos.ai-tools.rules
-            // lib.optionalAttrs vpn.enable {
+            // lib.optionalAttrs vpnOn {
               vpn-rotate = "When a listed provider rate-limits a request, a background service retries it through a private userspace tunnel of its own and may change servers inside that tunnel. Do not run protonvpn connect or disconnect yourself: the host network must stay as it is.";
             }
             // cfg.rules;
@@ -417,34 +391,13 @@
 
           vpn = ext.vpn-rotate;
 
-          vpnServiceScript = pkgs.writers.writePython3Bin "pi-vpn-rotate-service-unwrapped" {
-            flakeIgnore = [ "E501" ];
-            libraries = [
-              pkgs.python3Packages.proton-vpn-api-core
-              pkgs.python3Packages.proton-keyring-linux
-            ];
-          } (builtins.readFile ./lib/pi_vpn_service.py);
-
-          vpnService =
-            pkgs.runCommand "pi-vpn-rotate-service" { nativeBuildInputs = [ pkgs.makeWrapper ]; }
-              ''
-                makeWrapper ${vpnServiceScript}/bin/pi-vpn-rotate-service-unwrapped $out/bin/pi-vpn-rotate-service \
-                  --set PI_VPN_ROTATE_WIREPROXY ${pkgs.wireproxy}/bin/wireproxy \
-                  --set PI_VPN_ROTATE_PROXY_PORT ${toString vpn.proxyPort} \
-                  --set PI_VPN_ROTATE_DIRECT_TTL_S ${toString vpn.directRetrySeconds} \
-                  --set PI_VPN_ROTATE_COOLDOWN_S ${toString vpn.cooldownSeconds} \
-                  --set PI_VPN_ROTATE_MAX_PER_HOUR ${toString vpn.maxPerHour} \
-                  --set PI_VPN_ROTATE_COUNTRIES ${lib.escapeShellArg (lib.concatStringsSep "," vpn.countries)} \
-                  --set PI_VPN_ROTATE_EXCLUDED_COUNTRIES ${lib.escapeShellArg (lib.concatStringsSep "," vpn.excludedCountries)} \
-                  --set PI_VPN_ROTATE_BUN ${pkgs.bun}/bin/bun
-              '';
-
-          vpnRotate = pkgs.writers.writePython3Bin "pi-vpn-rotate" {
-            flakeIgnore = [ "E501" ];
-          } (builtins.readFile ./lib/pi_vpn_rotate.py);
+          vpnOn = icedosLib.hasModule {
+            inherit config repoUrl;
+            name = "vpn-rotate";
+          };
 
           vpnRotateHook = {
-            command = [ "${vpnRotate}/bin/pi-vpn-rotate" ];
+            command = [ "${pkgs.vpn-rotate}/bin/vpn-rotate" ];
             inherit (vpn) providers;
             errorKinds = [
               "rate_limit"
@@ -458,7 +411,7 @@
               inherit (h) command providers errorKinds;
               timeoutMs = if h.timeoutMs == 0 then 120000 else h.timeoutMs;
             }) cfg.hooks.rateLimit
-            ++ lib.optional vpn.enable vpnRotateHook;
+            ++ lib.optional vpnOn vpnRotateHook;
           errorKindNames = [
             "rate_limit"
             "usage_limit"
@@ -469,7 +422,7 @@
           # Ordered { name, path, load ? true }; name is the basename inside the bundle.
           # free-models.ts has no factory, so pi must not load it; the other two import it.
           shipped =
-            lib.optional (ext.meters.cost || ext.opencodeFree || vpn.enable) {
+            lib.optional (ext.meters.cost || ext.opencodeFree || vpnOn) {
               name = "free-models.ts";
               path = ./extensions/free-models.ts;
               load = false;
@@ -506,7 +459,7 @@
               name = "rate-limit-hook.ts";
               path = substituteTs "rate-limit-hook.ts" ./extensions/rate-limit-hook.ts {
                 rateLimitHooks = builtins.toJSON rateLimitHooks;
-                maxRetries = if vpn.enable then toString vpn.maxRetries else "3";
+                maxRetries = if vpnOn then toString vpn.maxRetries else "3";
               };
             }
             ++ lib.optional ext.opencodeFree {
@@ -529,9 +482,11 @@
               name = "tool-timer.ts";
               path = ./extensions/tool-timer.ts;
             }
-            ++ lib.optional vpn.enable {
+            ++ lib.optional vpnOn {
               name = "vpn-row.ts";
-              path = ./extensions/vpn-row.ts;
+              path = substituteTs "vpn-row.ts" ./extensions/vpn-row.ts {
+                vpnRotate = "${pkgs.vpn-rotate}/bin/vpn-rotate";
+              };
             }
             ++ lib.optional (rlm.enable && rlm.childViewer) {
               name = "rlm-children.ts";
@@ -812,7 +767,7 @@
               '';
             }
             {
-              assertion = !vpn.enable || vpn.providers != [ ];
+              assertion = !vpnOn || vpn.providers != [ ];
               message = "icedos.ai-tools.pi-agent.extensions.vpn-rotate.providers must name at least one provider.";
             }
             {
@@ -847,11 +802,6 @@
               else
                 pkgs.pi-agent
             )
-          ]
-          ++ lib.optionals vpn.enable [
-            pkgs.proton-vpn-cli
-            vpnService
-            vpnRotate
           ];
 
           icedos.ai-tools.pi-agent.users = icedosLib.users.genDefaults {
@@ -940,24 +890,10 @@
                     })
                   ];
 
-                  systemd.user.services.pi-vpn-rotate = lib.mkIf vpn.enable {
-                    Unit = {
-                      Description = "Pi VPN rotation daemon";
-                    };
-                    Service = {
-                      ExecStart = "${vpnService}/bin/pi-vpn-rotate-service";
-                      # The probe imports free-models.ts, which reads the catalog cache from the data dir.
-                      Environment = [
-                        "PI_CODING_AGENT_DIR=${dataDir}"
-                        "PI_OPENCODE_FREE_MODULE=${extensionBundle}/free-models.ts"
-                      ];
-                      Restart = "always";
-                      RestartSec = "5s";
-                    };
-                    Install = {
-                      WantedBy = [ "default.target" ];
-                    };
-                  };
+                  # The daemon's probe reads pi's free-model catalog cache from the data dir.
+                  systemd.user.services.vpn-rotate.Service.Environment = lib.mkIf vpnOn [
+                    "PI_CODING_AGENT_DIR=${dataDir}"
+                  ];
 
                   home.activation.seed-pi-agent = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
                     PATH=${

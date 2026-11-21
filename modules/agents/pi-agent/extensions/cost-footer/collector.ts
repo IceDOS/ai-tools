@@ -113,7 +113,7 @@ try {
 const tunnelIp = (): string | null => {
   try {
     const s = JSON.parse(
-      readFileSync(`${process.env.XDG_RUNTIME_DIR || "/tmp"}/pi-vpn-rotate.json`, "utf8"),
+      readFileSync(`${process.env.XDG_RUNTIME_DIR || "/tmp"}/vpn-rotate.json`, "utf8"),
     );
     return s?.mode === "tunnel" && typeof s.egressIp === "string" && s.egressIp ? s.egressIp : null;
   } catch {

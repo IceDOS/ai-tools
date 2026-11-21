@@ -1,4 +1,4 @@
-"""pi-vpn-rotate service: rotates the opencode-free egress IP without touching the host network.
+"""vpn-rotate service: rotates the opencode-free egress IP without touching the host network.
 
 Requests run direct until the host IP is rate-limited; then only the bun child is tunnelled
 through a userspace WireGuard client (wireproxy) exposing an HTTP proxy on 127.0.0.1.
@@ -6,6 +6,7 @@ through a userspace WireGuard client (wireproxy) exposing an HTTP proxy on 127.0
 import asyncio
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -16,17 +17,20 @@ import threading
 import time
 from pathlib import Path
 
-DEBOUNCE_S = int(os.environ.get("PI_VPN_ROTATE_DEBOUNCE_S", "60"))
+DEBOUNCE_S = int(os.environ.get("VPN_ROTATE_DEBOUNCE_S", "60"))
 PROBE_TIMEOUT_S = 6
 START_TIMEOUT_S = 20
 SETTLE_S = 2
 TICK_S = 30
-DEFAULT_FLAGGED_TTL_S = 3600
+DEFAULT_FLAGGED_TTL_S = 900
 DEFAULT_UNREACHABLE_TTL_S = 300
 HOUR_S = 3600
 ROTATE_BUDGET_S = 290
 CANDIDATE_COST_S = START_TIMEOUT_S + SETTLE_S + PROBE_TIMEOUT_S
-MAX_ATTEMPTS_PER_COUNTRY = 3
+# A server is flagged after this many failures within STRIKE_WINDOW_S, not on the first one.
+STRIKES_TO_FLAG = 3
+STRIKE_WINDOW_S = 900
+ALL_FAILED_RETRY_S = 180
 LOG_LINES = 200
 CERT_REFRESH_BELOW_S = 6 * HOUR_S
 CERT_RETRY_S = 600
@@ -68,7 +72,7 @@ function descendingId(timestamp = Date.now()) {
 async function probe() {
   // URL, user-agent and model come from the extensions' free-models.ts; without it, skip the probe.
   let mod;
-  try { mod = await import(process.env.PI_OPENCODE_FREE_MODULE); } catch { process.stdout.write("skip"); return; }
+  try { mod = await import(process.env.VPN_ROTATE_OPENCODE_FREE_MODULE); } catch { process.stdout.write("skip"); return; }
   const { BASE_URL, ZEN_USER_AGENT: USER_AGENT } = mod;
   const model = __PROBE_MODEL__ ?? mod.loadCatalog().models[0]?.id;
   if (!model) { process.stdout.write("skip"); return; }
@@ -130,7 +134,7 @@ class Log:
 
     def __call__(self, text):
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(self.now_fn()))
-        print(f"[{stamp}] pi-vpn-service: {text}", file=sys.stderr, flush=True)
+        print(f"[{stamp}] vpn-rotate-service: {text}", file=sys.stderr, flush=True)
         if self.path:
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,28 +177,26 @@ def fetch_egress_ip(bun_bin="bun", env=None):
     return ip if code == 0 and IP_RE.match(ip) else None
 
 
+def flag_key(name, model=None):
+    """Flags and strikes are per server (or IP) and model; a key without a model covers every model."""
+    return f"{name}|{model}" if model else name
+
+
+def flagged_names(flags, model=None):
+    """Names whose flag applies to this model."""
+    names = set()
+    for key in flags:
+        name, _, flag_model = key.partition("|")
+        if not flag_model or flag_model == model:
+            names.add(name)
+    return names
+
+
 def base_country(server):
     if not server:
         return ""
     code = server.split("-", 1)[0].split("#", 1)[0].upper()
     return "".join(c for c in code if c.isalpha())
-
-
-def next_country(pool, current, failed=None):
-    if not pool:
-        return None
-    if len(pool) == 1:
-        return pool[0]
-    start_idx = 0
-    if current and current in pool:
-        start_idx = (pool.index(current) + 1) % len(pool)
-    elif failed and failed in pool:
-        start_idx = (pool.index(failed) + 1) % len(pool)
-    for offset in range(len(pool)):
-        cand = pool[(start_idx + offset) % len(pool)]
-        if cand != current:
-            return cand
-    return pool[0]
 
 
 class ProtonSession:
@@ -353,7 +355,7 @@ class ServerCatalog:
             self.load()
         return [e for e in self.entries if e["country"] == country]
 
-    def pick(self, country, skip_servers=None, skip_ips=None):
+    def pick(self, country, skip_servers=None, skip_ips=None, rng=None):
         skip_servers = skip_servers or set()
         skip_ips = skip_ips or set()
         cands = [
@@ -361,7 +363,9 @@ class ServerCatalog:
             if e["server"] not in skip_servers and e["entry_ip"] not in skip_ips
         ]
         cands.sort(key=lambda e: (e["load"], e["server"]))
-        return cands[0] if cands else None
+        if not cands:
+            return None
+        return rng.choice(cands) if rng else cands[0]
 
 
 class ProtonCredentials:
@@ -435,7 +439,7 @@ class WireproxyTunnel:
         self.port = int(port)
         self.log = log or noop
         base = runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-        self.dir = Path(base) / "pi-vpn-rotate"
+        self.dir = Path(base) / "vpn-rotate"
         self.spawn = spawn or subprocess.Popen
         self.wait_port = wait_port or wait_for_port
         self.start_timeout_s = start_timeout_s
@@ -562,7 +566,8 @@ class VpnState:
         self.debounced_sessions = []
         self.all_rate_limited = False
         self.min_refresh_in = 0
-        self.failed_target = None
+        self.rotation_model = None
+        self.server_strikes = {}
         self.is_rotating = False
         self.mode = "direct"
         self.proxy = None
@@ -585,6 +590,10 @@ class VpnState:
         }
         cutoff = now - HOUR_S
         self.rotations = [t for t in self.rotations if t >= cutoff]
+        self.server_strikes = {
+            k: hits for k, v in self.server_strikes.items()
+            if (hits := [t for t in v if t > now - STRIKE_WINDOW_S])
+        }
 
     def load(self):
         with self.lock:
@@ -609,7 +618,7 @@ class VpnState:
                 self.last_rotation_time = data.get("lastRotationTime", 0)
                 self.last_attempt_at = data.get("lastAttemptAt", 0)
                 self.rotations = [t for t in data.get("rotations", []) if t >= now - HOUR_S]
-                self.failed_target = data.get("failedTarget")
+                self.server_strikes = data.get("serverStrikes") or {}
                 self.mode = data.get("mode") or "direct"
                 self.proxy = data.get("proxy")
                 self.host_ip_flagged_until = data.get("hostIpFlaggedUntil")
@@ -631,7 +640,7 @@ class VpnState:
                 "lastRotationTime": self.last_rotation_time,
                 "lastAttemptAt": self.last_attempt_at,
                 "rotations": self.rotations,
-                "failedTarget": self.failed_target,
+                "serverStrikes": self.server_strikes,
                 "mode": self.mode,
                 "proxy": self.proxy,
                 "hostIpFlaggedUntil": self.host_ip_flagged_until,
@@ -658,6 +667,7 @@ class VpnState:
                 "egressIp": self.current_ip,
                 "allRateLimited": self.all_rate_limited,
                 "refreshIn": self.min_refresh_in,
+                "model": self.rotation_model,
                 "rateLimitedCountries": r_countries,
                 "rateLimitedCountriesCount": len(r_countries),
                 "rotating": self.is_rotating,
@@ -677,12 +687,12 @@ class VpnState:
         self.rate_limited_countries[country] = {"at": self.now_fn(), "ttl": ttl, "reason": reason}
         self.save()
 
-    def flag_server(self, server, ip=None, country=None, ttl=DEFAULT_FLAGGED_TTL_S, reason="rate_limit"):
+    def flag_server(self, server, ip=None, country=None, ttl=DEFAULT_FLAGGED_TTL_S, reason="rate_limit", model=None):
         if not server and not ip:
             return
         now = self.now_fn()
         if server:
-            self.rate_limited_servers[server] = {
+            self.rate_limited_servers[flag_key(server, model)] = {
                 "at": now,
                 "ttl": ttl,
                 "ip": ip,
@@ -690,7 +700,7 @@ class VpnState:
                 "reason": reason,
             }
         if ip:
-            self.rate_limited_ips[ip] = {
+            self.rate_limited_ips[flag_key(ip, model)] = {
                 "at": now,
                 "ttl": ttl,
                 "server": server,
@@ -699,19 +709,31 @@ class VpnState:
             }
         self.save()
 
+    def strike_server(self, server, ip=None, country=None, reason="rate_limit", model=None):
+        """Counts a failure; returns True once the server gets flagged."""
+        if not server:
+            return False
+        self.clean_expired()
+        key = flag_key(server, model)
+        hits = self.server_strikes.get(key, []) + [self.now_fn()]
+        if len(hits) >= STRIKES_TO_FLAG:
+            self.server_strikes.pop(key, None)
+            ttl = DEFAULT_UNREACHABLE_TTL_S if reason == "unreachable" else DEFAULT_FLAGGED_TTL_S
+            self.flag_server(server, ip=ip, country=country, ttl=ttl, reason=reason, model=model)
+            return True
+        self.server_strikes[key] = hits
+        self.save()
+        return False
+
     def flag_host_ip(self, ttl=DEFAULT_FLAGGED_TTL_S):
         self.host_ip_flagged_until = self.now_fn() + ttl
         self.save()
 
-    def is_country_rate_limited(self, country):
+    def is_server_rate_limited(self, server, ip=None, model=None):
         self.clean_expired()
-        return country in self.rate_limited_countries
-
-    def is_server_rate_limited(self, server, ip=None):
-        self.clean_expired()
-        if server and server in self.rate_limited_servers:
+        if server and server in flagged_names(self.rate_limited_servers, model):
             return True
-        if ip and ip in self.rate_limited_ips:
+        if ip and ip in flagged_names(self.rate_limited_ips, model):
             return True
         return False
 
@@ -751,7 +773,7 @@ class VpnState:
             self.debounced_sessions.clear()
             self.all_rate_limited = False
             self.min_refresh_in = 0
-            self.failed_target = None
+            self.server_strikes.clear()
         self.save()
 
 
@@ -774,7 +796,10 @@ class VpnRotator:
         probe=None,
         get_ip=None,
         bun_bin=None,
+        rng=None,
     ):
+        self.rng = rng or random.Random()
+        self.cancel_event = threading.Event()
         self.state = state
         self.log = log or noop
         self.catalog = catalog or ServerCatalog(log=self.log, refresh=ProtonSession(log=self.log).fetch_server_list)
@@ -790,7 +815,7 @@ class VpnRotator:
         self.sleep = sleep_fn
         self.probe = probe
         self.get_ip = get_ip
-        self.bun_bin = bun_bin or os.environ.get("PI_VPN_ROTATE_BUN") or shutil.which("bun") or "bun"
+        self.bun_bin = bun_bin or os.environ.get("VPN_ROTATE_BUN") or shutil.which("bun") or "bun"
         self.lock = threading.Lock()
 
     def proxy_env(self):
@@ -862,11 +887,6 @@ class VpnRotator:
         finally:
             self.lock.release()
 
-    def _flag_country_failed(self, country, reasons):
-        reason = reasons.get(country, "rate_limit")
-        ttl = DEFAULT_FLAGGED_TTL_S if reason == "rate_limit" else DEFAULT_UNREACHABLE_TTL_S
-        self.state.flag_country(country, ttl=ttl, reason=reason)
-
     def _build_probe(self, req):
         if self.probe is not None:
             return self.probe
@@ -881,7 +901,18 @@ class VpnRotator:
 
     def rotate(self, req):
         with self.lock:
+            self.cancel_event.clear()
+            # The status row names the model while rotating and after a failed rotation.
+            self.state.rotation_model = req.get("model") or None
+            self.state.save()
             return self._rotate(req)
+
+    def cancel(self):
+        """Stops a running rotation before its next server; returns whether one was running."""
+        running = self.lock.locked()
+        if running:
+            self.cancel_event.set()
+        return running
 
     def _rotate(self, req):
         err_msg = req.get("errorMessage", "")
@@ -911,11 +942,16 @@ class VpnRotator:
             self.log("server list unavailable")
             return {"ok": False, "reason": "server list unavailable"}
 
+        model = req.get("model")
+        failed_servers = set()
         if self.state.mode == "tunnel":
             if flag_current:
                 server = self.state.current_server or self.tunnel.server
-                self.log(f"flagging current server {server} ({self.state.current_ip}) as rate-limited")
-                self.state.flag_server(server, ip=self.state.current_ip, country=self.state.current_country)
+                self.log(f"strike on current server {server} ({self.state.current_ip})")
+                self.state.strike_server(
+                    server, ip=self.state.current_ip, country=self.state.current_country, model=model
+                )
+                failed_servers.add(server)
         else:
             host_ip = self._get_ip(False)
             self.log(f"flagging host IP {host_ip} as rate-limited for {self.direct_ttl_s}s")
@@ -937,67 +973,48 @@ class VpnRotator:
             return {"ok": False, "reason": "no countries left after allowlist and blocklist"}
 
         single_country_mode = len(pool) == 1
-        candidates = [c for c in pool if not self.state.is_country_rate_limited(c)]
-        if not candidates and not single_country_mode:
-            min_refresh = self.state.get_min_refresh_in(pool)
-            self.state.all_rate_limited = True
-            self.state.min_refresh_in = min_refresh
-            self.state.save()
-            self.log(f"all available countries ({len(pool)}) are rate-limited; next refresh in {min_refresh}s")
-            return {
-                "ok": False,
-                "reason": "all_rate_limited",
-                "refreshIn": min_refresh,
-                "rateLimitedCountries": self.state.get_rate_limited_countries_list(),
-            }
-
         probe_fn = self._build_probe(req)
         tried_countries = set()
-        failed_servers = set()
-        country_attempts = {}
-        country_failure_reason = {}
-        failed_target = self.state.failed_target
         private_key = None
         success = None
+
+        def fail(entry, ip, country, reason, message):
+            # A dead server is dead for every model; a 429 only counts against this model.
+            flagged = self.state.strike_server(
+                entry["server"], ip=ip, country=country, reason=reason,
+                model=model if reason == "rate_limit" else None,
+            )
+            self.log(f"{message}; {'flagged' if flagged else 'strike'}, trying next")
+            failed_servers.add(entry["server"])
+            # One server per country per pass spreads the attempts over more IPs.
+            if not single_country_mode:
+                tried_countries.add(country)
 
         # Refresh the certificate up front so a long tunnel does not start with one about to expire.
         self.credentials.ensure_certificate()
 
         while True:
+            if self.cancel_event.is_set():
+                self.log("rotation cancelled")
+                self._to_direct(clear_host_flag=False)
+                return {"ok": False, "reason": "cancelled", "mode": self.state.mode}
             if self.now() + CANDIDATE_COST_S > deadline:
                 self.log("rotation time budget exhausted")
                 break
 
-            active_pool = [c for c in pool if not self.state.is_country_rate_limited(c)]
-            if not active_pool:
+            untried = [c for c in pool if c not in tried_countries]
+            if not untried:
                 break
-
-            target = next_country(active_pool, self.state.current_country, failed_target)
-            if not target or (target in tried_countries and not single_country_mode):
-                unflagged = [c for c in active_pool if c not in tried_countries]
-                if not unflagged:
-                    break
-                target = unflagged[0]
-
-            attempts = country_attempts.get(target, 0)
-            if attempts >= MAX_ATTEMPTS_PER_COUNTRY:
-                tried_countries.add(target)
-                self._flag_country_failed(target, country_failure_reason)
-                continue
-
-            country_attempts[target] = attempts + 1
-            failed_target = target
-            self.state.failed_target = target
+            target = self.rng.choice(untried)
 
             entry = self.catalog.pick(
                 target,
-                skip_servers=set(self.state.rate_limited_servers) | failed_servers,
-                skip_ips=set(self.state.rate_limited_ips),
+                skip_servers=flagged_names(self.state.rate_limited_servers, model) | failed_servers,
+                skip_ips=flagged_names(self.state.rate_limited_ips, model),
+                rng=self.rng,
             )
             if entry is None:
-                self.log(f"no usable server left in {target}")
                 tried_countries.add(target)
-                self._flag_country_failed(target, country_failure_reason)
                 continue
 
             if private_key is None:
@@ -1007,64 +1024,41 @@ class VpnRotator:
                     return {"ok": False, "reason": "no wireguard key"}
 
             if not self.tunnel.start(private_key, entry):
-                self.log(f"tunnel to {entry['server']} ({target}) failed to start")
-                failed_servers.add(entry["server"])
-                country_failure_reason.setdefault(target, "unreachable")
-                if country_attempts[target] >= MAX_ATTEMPTS_PER_COUNTRY:
-                    tried_countries.add(target)
-                    self._flag_country_failed(target, country_failure_reason)
+                fail(entry, None, target, "unreachable", f"tunnel to {entry['server']} ({target}) failed to start")
                 continue
 
             egress_ip = self._get_ip(True)
             if not egress_ip:
-                self.log(f"no egress IP through {entry['server']}; trying next")
-                failed_servers.add(entry["server"])
-                country_failure_reason.setdefault(target, "unreachable")
-                if country_attempts[target] >= MAX_ATTEMPTS_PER_COUNTRY:
-                    tried_countries.add(target)
-                    self._flag_country_failed(target, country_failure_reason)
+                fail(entry, None, target, "unreachable", f"no egress IP through {entry['server']}")
                 continue
 
-            if self.state.is_server_rate_limited(entry["server"], egress_ip):
+            if self.state.is_server_rate_limited(entry["server"], egress_ip, model):
                 self.log(f"server {entry['server']} ({egress_ip}) is known rate-limited; trying next")
                 failed_servers.add(entry["server"])
-                country_failure_reason[target] = "rate_limit"
                 continue
 
             if probe_fn:
                 self.sleep(SETTLE_S)
                 p_res = probe_fn(self.proxy_env())
+                probe_status = str(p_res)
                 if p_res is True or p_res == "200":
                     pass
                 elif p_res == "missing_bun":
                     self.log("bun not found; skipping probe")
                 elif p_res == "skip":
                     self.log("no free-models module or cached catalog; skipping probe")
-                else:
-                    probe_status = str(p_res)
-                    if probe_status == "429" or p_res is False:
-                        self.log(f"target {target} ({entry['server']}) probe returned 429; flagging server")
-                        self.state.flag_server(entry["server"], ip=egress_ip, country=target, reason="rate_limit")
-                        failed_servers.add(entry["server"])
-                        country_failure_reason[target] = "rate_limit"
-                        if country_attempts[target] >= MAX_ATTEMPTS_PER_COUNTRY:
-                            tried_countries.add(target)
-                            self._flag_country_failed(target, country_failure_reason)
-                        continue
-                    if probe_status in ("0", "timeout"):
-                        self.log(f"target {target} ({entry['server']}) probe timed out; trying next")
-                        failed_servers.add(entry["server"])
-                        country_failure_reason.setdefault(target, "unreachable")
-                        if country_attempts[target] >= MAX_ATTEMPTS_PER_COUNTRY:
-                            tried_countries.add(target)
-                            self._flag_country_failed(target, country_failure_reason)
-                        continue
-                    if probe_status in ("401", "403"):
-                        self.log(f"target {target} ({entry['server']}) probe auth error {probe_status}; stopping")
-                        return {"ok": False, "reason": f"auth error {probe_status}"}
-                    if probe_status.startswith("5"):
-                        self.log(f"target {target} ({entry['server']}) probe server error {probe_status}; stopping")
-                        return {"ok": False, "reason": f"server error {probe_status}"}
+                elif probe_status == "429" or p_res is False:
+                    fail(entry, egress_ip, target, "rate_limit", f"target {target} ({entry['server']}) probe returned 429")
+                    continue
+                elif probe_status in ("0", "timeout"):
+                    fail(entry, egress_ip, target, "unreachable", f"target {target} ({entry['server']}) probe timed out")
+                    continue
+                elif probe_status in ("401", "403"):
+                    self.log(f"target {target} ({entry['server']}) probe auth error {probe_status}; stopping")
+                    return {"ok": False, "reason": f"auth error {probe_status}"}
+                elif probe_status.startswith("5"):
+                    self.log(f"target {target} ({entry['server']}) probe server error {probe_status}; stopping")
+                    return {"ok": False, "reason": f"server error {probe_status}"}
 
             success = {
                 "server": entry["server"],
@@ -1087,7 +1081,6 @@ class VpnRotator:
             self.state.rotations.append(now_t)
             self.state.all_rate_limited = False
             self.state.min_refresh_in = 0
-            self.state.failed_target = None
             self.state.save()
             self.log(f"tunnelling through {success['server']} ({success['country']}) egress {success['egressIp']}")
             return {
@@ -1101,7 +1094,8 @@ class VpnRotator:
                 "egressIp": success["egressIp"],
             }
 
-        min_refresh = self.state.get_min_refresh_in(pool)
+        # Struck servers are eligible again at once, so report a short retry instead of the longest flag.
+        min_refresh = min(self.state.get_min_refresh_in(pool) or ALL_FAILED_RETRY_S, ALL_FAILED_RETRY_S)
         self.state.all_rate_limited = True
         self.state.min_refresh_in = min_refresh
         self._to_direct(clear_host_flag=False)
@@ -1115,6 +1109,7 @@ class VpnRotator:
         }
 
     def clear(self):
+        self.cancel()
         with self.lock:
             self.return_to_direct()
             self.state.clear()
@@ -1131,7 +1126,7 @@ class VpnService:
             self.sock_path = Path(sock_path)
         else:
             runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-            self.sock_path = Path(runtime_dir) / "pi-vpn-rotate.sock"
+            self.sock_path = Path(runtime_dir) / "vpn-rotate.sock"
         self.rotate_lock = asyncio.Lock()
         self.tick_interval_s = tick_interval_s
         self.server = None
@@ -1201,6 +1196,9 @@ class VpnService:
     async def handle_clear(self):
         return await asyncio.to_thread(self.rotator.clear)
 
+    async def handle_cancel(self):
+        return {"ok": True, "cancelled": self.rotator.cancel()}
+
     async def handle_client(self, reader, writer):
         try:
             line = await reader.readline()
@@ -1212,6 +1210,8 @@ class VpnService:
                 resp = await self.handle_status()
             elif action == "clear":
                 resp = await self.handle_clear()
+            elif action == "cancel":
+                resp = await self.handle_cancel()
             elif action == "rotate":
                 resp = await self.handle_rotate(req)
             else:
@@ -1295,27 +1295,31 @@ async def run_service(service, log):
 
 
 def main():
-    state_dir = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")) / "pi-vpn-rotate"
+    state_dir = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")) / "vpn-rotate"
+    # Keep the rate-limit history from before the rename to vpn-rotate.
+    old_state_dir = state_dir.with_name("pi-vpn-rotate")
+    if old_state_dir.is_dir() and not state_dir.exists():
+        old_state_dir.rename(state_dir)
     runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 
     state_file = state_dir / "state.json"
-    runtime_file = runtime_dir / "pi-vpn-rotate.json"
-    sock_path = runtime_dir / "pi-vpn-rotate.sock"
+    runtime_file = runtime_dir / "vpn-rotate.json"
+    sock_path = runtime_dir / "vpn-rotate.sock"
     log_file = state_dir / "service.log"
 
     log = Log(log_file)
     state = VpnState(state_file, runtime_file)
 
-    cooldown_s = int(os.environ.get("PI_VPN_ROTATE_COOLDOWN_S", "600"))
-    max_per_hour = int(os.environ.get("PI_VPN_ROTATE_MAX_PER_HOUR", "3"))
-    direct_ttl_s = int(os.environ.get("PI_VPN_ROTATE_DIRECT_TTL_S", str(DEFAULT_DIRECT_TTL_S)))
-    proxy_port = int(os.environ.get("PI_VPN_ROTATE_PROXY_PORT", str(DEFAULT_PROXY_PORT)))
-    wireproxy = os.environ.get("PI_VPN_ROTATE_WIREPROXY") or shutil.which("wireproxy") or "wireproxy"
-    serverlist = os.environ.get("PI_VPN_ROTATE_SERVERLIST") or DEFAULT_SERVERLIST
+    cooldown_s = int(os.environ.get("VPN_ROTATE_COOLDOWN_S", "600"))
+    max_per_hour = int(os.environ.get("VPN_ROTATE_MAX_PER_HOUR", "3"))
+    direct_ttl_s = int(os.environ.get("VPN_ROTATE_DIRECT_TTL_S", str(DEFAULT_DIRECT_TTL_S)))
+    proxy_port = int(os.environ.get("VPN_ROTATE_PROXY_PORT", str(DEFAULT_PROXY_PORT)))
+    wireproxy = os.environ.get("VPN_ROTATE_WIREPROXY") or shutil.which("wireproxy") or "wireproxy"
+    serverlist = os.environ.get("VPN_ROTATE_SERVERLIST") or DEFAULT_SERVERLIST
 
-    raw_countries = os.environ.get("PI_VPN_ROTATE_COUNTRIES", "")
+    raw_countries = os.environ.get("VPN_ROTATE_COUNTRIES", "")
     countries = [c.strip().upper() for c in raw_countries.split(",") if c.strip()]
-    raw_excluded = os.environ.get("PI_VPN_ROTATE_EXCLUDED_COUNTRIES", "")
+    raw_excluded = os.environ.get("VPN_ROTATE_EXCLUDED_COUNTRIES", "")
     excluded = [c.strip().upper() for c in raw_excluded.split(",") if c.strip()]
 
     if not (os.path.exists(wireproxy) or shutil.which(wireproxy)):

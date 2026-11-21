@@ -1,4 +1,4 @@
-"""pi-agent rate-limit hook client: communicates with pi-vpn-rotate-service daemon."""
+"""Rate-limit hook client for pi-agent and opencode: talks to the vpn-rotate-service daemon."""
 import json
 import os
 import socket
@@ -11,11 +11,11 @@ DEFAULT_SOCKET_TIMEOUT_S = 300.0
 
 
 def get_socket_path():
-    env_path = os.environ.get("PI_VPN_ROTATE_SOCKET")
+    env_path = os.environ.get("VPN_ROTATE_SOCKET")
     if env_path:
         return Path(env_path)
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    return Path(runtime_dir) / "pi-vpn-rotate.sock"
+    return Path(runtime_dir) / "vpn-rotate.sock"
 
 
 def ensure_service_running(sock_path):
@@ -33,7 +33,7 @@ def ensure_service_running(sock_path):
                 pass
     try:
         res = subprocess.run(
-            ["systemctl", "--user", "start", "pi-vpn-rotate"],
+            ["systemctl", "--user", "start", "vpn-rotate"],
             capture_output=True,
             timeout=5,
         )
@@ -146,6 +146,14 @@ def main(argv=None):
             return 0
         print(f"Failed to clear state: {resp.get('reason')}", file=sys.stderr)
         return 1
+
+    if subcommand == "cancel":
+        resp = send_request({"action": "cancel"})
+        if not resp.get("ok"):
+            print(f"Failed to cancel: {resp.get('reason')}", file=sys.stderr)
+            return 1
+        print("Rotation cancelled." if resp.get("cancelled") else "No rotation running.")
+        return 0
 
     payload = {}
     if not sys.stdin.isatty():

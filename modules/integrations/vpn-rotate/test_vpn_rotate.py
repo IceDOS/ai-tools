@@ -6,8 +6,8 @@ import os
 import stat
 import types
 
-import pi_vpn_rotate as client
-import pi_vpn_service as service
+import vpn_rotate as client
+import vpn_rotate_service as service
 
 HOST_IP = "100.0.0.1"
 KEY = "k" * 43 + "="
@@ -107,6 +107,13 @@ def make_state(tmp_path, clock):
     return service.VpnState(tmp_path / "state.json", tmp_path / "runtime.json", now_fn=clock.now)
 
 
+class FirstRng:
+    """Deterministic stand-in for random: always the first candidate."""
+
+    def choice(self, seq):
+        return seq[0]
+
+
 def make_rotator(tmp_path, clock=None, serverlist=None, tunnel=None, credentials=None,
                  probe=None, ips=None, **kwargs):
     clock = clock or FakeClock()
@@ -129,6 +136,7 @@ def make_rotator(tmp_path, clock=None, serverlist=None, tunnel=None, credentials
         return ips.get(tunnel.server, f"200.9.9.{len(tunnel.starts)}")
 
     kwargs.setdefault("cooldown_s", 0)
+    kwargs.setdefault("rng", FirstRng())
     kwargs.setdefault("max_per_hour", 10)
     rotator = service.VpnRotator(
         state=state,
@@ -306,7 +314,7 @@ def test_rotate_probe_receives_proxy_environment(tmp_path):
     assert seen[0]["http_proxy"] == seen[0]["HTTPS_PROXY"]
 
 
-def test_rotate_tunnel_to_tunnel_flags_current_server_and_ip(tmp_path):
+def test_rotate_tunnel_to_tunnel_strikes_current_server(tmp_path):
     rotator, state, tunnel, _ = make_rotator(
         tmp_path, ips={"DE#1": "200.1.1.1", "NL#2": "200.1.1.2"}
     )
@@ -315,13 +323,13 @@ def test_rotate_tunnel_to_tunnel_flags_current_server_and_ip(tmp_path):
     res = rotator.rotate({"errorKind": "rate_limit"})
     assert res["ok"] is True
     assert res["server"] == "NL#2"
-    assert "DE#1" in state.rate_limited_servers
-    assert "200.1.1.1" in state.rate_limited_ips
+    assert len(state.server_strikes["DE#1"]) == 1
+    assert "DE#1" not in state.rate_limited_servers
     assert [s[1] for s in tunnel.starts] == ["DE#1", "NL#2"]
     assert state.mode == "tunnel"
 
 
-def test_rotate_probe_429_flags_server_then_moves_country(tmp_path):
+def test_rotate_probe_429_strikes_server_then_moves_country(tmp_path):
     answers = iter(["429", "200"])
     rotator, state, tunnel, _ = make_rotator(
         tmp_path, probe=lambda env: next(answers), ips={"DE#1": "200.1.1.1", "NL#2": "200.1.1.2"}
@@ -330,8 +338,8 @@ def test_rotate_probe_429_flags_server_then_moves_country(tmp_path):
     assert res["ok"] is True
     assert res["country"] == "NL"
     assert "DE" not in state.rate_limited_countries
-    assert "DE#1" in state.rate_limited_servers
-    assert "200.1.1.1" in state.rate_limited_ips
+    assert len(state.server_strikes["DE#1"]) == 1
+    assert "DE#1" not in state.rate_limited_servers
     assert [s[1] for s in tunnel.starts] == ["DE#1", "NL#2"]
 
 
@@ -350,7 +358,8 @@ def test_rotate_single_country_falls_back_to_next_server(tmp_path):
 
 def test_rotate_all_rate_limited_stops_tunnel_and_returns_direct(tmp_path):
     rotator, state, tunnel, _ = make_rotator(tmp_path, probe=lambda env: "429")
-    res = rotator.rotate({"errorKind": "rate_limit"})
+    res = rotator.rotate({"errorKind": "rate_limit", "model": "m-free"})
+    assert json.loads((tmp_path / "runtime.json").read_text())["model"] == "m-free"
     assert res["ok"] is False
     assert res["reason"] == "all_rate_limited"
     assert res["refreshIn"] > 0
@@ -359,16 +368,105 @@ def test_rotate_all_rate_limited_stops_tunnel_and_returns_direct(tmp_path):
     assert state.proxy is None
     assert state.current_server is None
     assert tunnel.running() is False
-    assert set(state.rate_limited_countries) == {"DE", "NL"}
+    assert res["refreshIn"] == service.ALL_FAILED_RETRY_S
+    assert state.rate_limited_countries == {}
+    assert set(state.server_strikes) == {"DE#1|m-free", "NL#2|m-free"}
 
 
-def test_rotate_skips_when_every_country_already_flagged(tmp_path):
+def test_rotate_skips_flagged_servers(tmp_path):
     rotator, state, tunnel, calls = make_rotator(tmp_path)
-    state.flag_country("DE")
-    state.flag_country("NL")
+    state.flag_server("DE#1")
+    state.flag_server("NL#1")
+    state.flag_server("NL#2")
     res = rotator.rotate({"errorKind": "rate_limit"})
     assert res["reason"] == "all_rate_limited"
     assert tunnel.starts == []
+
+
+def test_three_strikes_in_window_flag_server_for_fifteen_minutes(tmp_path):
+    clock = FakeClock()
+    state = make_state(tmp_path, clock)
+    assert state.strike_server("DE#1", ip="200.1.1.1") is False
+    clock.t += service.STRIKE_WINDOW_S + 1
+    assert state.strike_server("DE#1", ip="200.1.1.1") is False
+    assert state.strike_server("DE#1", ip="200.1.1.1") is False
+    assert "DE#1" not in state.rate_limited_servers
+    assert state.strike_server("DE#1", ip="200.1.1.1") is True
+    assert state.rate_limited_servers["DE#1"]["ttl"] == 900
+    assert "200.1.1.1" in state.rate_limited_ips
+    assert "DE#1" not in state.server_strikes
+    assert make_state(tmp_path, clock).rate_limited_servers.keys() == {"DE#1"}
+
+
+def test_flags_are_per_model(tmp_path):
+    rotator, state, tunnel, _ = make_rotator(tmp_path, ips={"DE#1": "200.1.1.1", "NL#2": "200.1.1.2"})
+    for _ in range(service.STRIKES_TO_FLAG):
+        state.strike_server("DE#1", ip="200.1.1.1", model="a-free")
+    assert state.is_server_rate_limited("DE#1", model="a-free")
+    assert not state.is_server_rate_limited("DE#1", "200.1.1.1", model="b-free")
+    assert rotator.rotate({"errorKind": "rate_limit", "model": "b-free"})["server"] == "DE#1"
+
+
+def test_flag_without_model_covers_every_model(tmp_path):
+    state = make_state(tmp_path, FakeClock())
+    state.flag_server("DE#1", ip="200.1.1.1")
+    assert state.is_server_rate_limited("DE#1", model="a-free")
+    assert state.is_server_rate_limited(None, "200.1.1.1", model="b-free")
+
+
+def test_unreachable_strikes_ignore_model(tmp_path):
+    tunnel = FakeTunnel(fail={"DE#1"})
+    rotator, state, _, _ = make_rotator(tmp_path, tunnel=tunnel)
+    rotator.rotate({"errorKind": "rate_limit", "model": "a-free"})
+    assert "DE#1" in state.server_strikes
+
+
+def test_cancel_stops_rotation_before_next_server(tmp_path):
+    rotator = None
+
+    def probe(_env):
+        assert rotator.cancel() is True
+        return "429"
+
+    rotator, state, tunnel, _ = make_rotator(tmp_path, probe=probe)
+    res = rotator.rotate({"errorKind": "rate_limit", "model": "m-free"})
+    assert res["reason"] == "cancelled"
+    assert len(tunnel.starts) == 1
+    assert state.mode == "direct"
+    assert state.all_rate_limited is False
+    assert rotator.cancel() is False
+
+
+def test_clear_cancels_a_running_rotation(tmp_path):
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def probe(_env):
+        started.set()
+        release.wait(5)
+        return "429"
+
+    rotator, state, tunnel, _ = make_rotator(tmp_path, probe=probe)
+    worker = threading.Thread(target=rotator.rotate, args=({"errorKind": "rate_limit"},))
+    worker.start()
+    assert started.wait(5)
+    clearer = threading.Thread(target=rotator.clear)
+    clearer.start()
+    release.set()
+    worker.join(5)
+    clearer.join(5)
+    assert len(tunnel.starts) == 1
+    assert state.server_strikes == {}
+
+
+def test_rotate_picks_countries_through_rng(tmp_path):
+    class LastRng:
+        def choice(self, seq):
+            return seq[-1]
+
+    rotator, state, tunnel, _ = make_rotator(tmp_path, rng=LastRng())
+    assert rotator.rotate({"errorKind": "rate_limit"})["country"] == "NL"
 
 
 def test_rotate_hourly_cap(tmp_path):
@@ -648,10 +746,10 @@ def test_debounce_only_applies_while_tunnelling(tmp_path):
 def test_socket_roundtrip(tmp_path):
     clock = FakeClock()
     rotator, state, tunnel, _ = make_rotator(tmp_path, clock=clock)
-    sock = str(tmp_path / "pi-vpn-rotate.sock")
+    sock = str(tmp_path / "vpn-rotate.sock")
 
     async def scenario():
-        svc = service.VpnService(rotator, sock_path=tmp_path / "pi-vpn-rotate.sock", tick_interval_s=3600)
+        svc = service.VpnService(rotator, sock_path=tmp_path / "vpn-rotate.sock", tick_interval_s=3600)
         await svc.start()
         try:
             status = await asyncio.to_thread(client.send_request, {"action": "status"}, sock)
@@ -872,12 +970,9 @@ def test_fetch_egress_ip_passes_proxy_env(monkeypatch):
     assert seen["HTTPS_PROXY"] == "http://127.0.0.1:25345"
 
 
-def test_base_country_and_next_country():
+def test_base_country():
     assert service.base_country("US-FREE#1") == "US"
     assert service.base_country("NL#369") == "NL"
-    assert service.next_country(["DE", "NL"], "DE") == "NL"
-    assert service.next_country(["DE"], "DE") == "DE"
-    assert service.next_country([], None) is None
 
 
 def test_client_prints_direct_mode(capsys):

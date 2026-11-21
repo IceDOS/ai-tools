@@ -8,7 +8,7 @@ function withState(state: unknown, run: () => void) {
   const prevRuntime = process.env.XDG_RUNTIME_DIR;
   try {
     process.env.XDG_RUNTIME_DIR = dir;
-    fs.writeFileSync(path.join(dir, "pi-vpn-rotate.json"), typeof state === "string" ? state : JSON.stringify(state));
+    fs.writeFileSync(path.join(dir, "vpn-rotate.json"), typeof state === "string" ? state : JSON.stringify(state));
     run();
   } finally {
     if (prevRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
@@ -23,7 +23,7 @@ function testNoState() {
   try {
     process.env.XDG_RUNTIME_DIR = dir;
     assert.strictEqual(rowText(), undefined, "no state file means no row");
-    fs.writeFileSync(path.join(dir, "pi-vpn-rotate.json"), "{ not json");
+    fs.writeFileSync(path.join(dir, "vpn-rotate.json"), "{ not json");
     assert.strictEqual(rowText(), undefined, "an unreadable state file means no row");
   } finally {
     if (prevRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
@@ -56,11 +56,14 @@ function testTransientStates() {
   withState({ at: 1, mode: "direct", rotating: true }, () => {
     assert.strictEqual(rowText(), "vpn rotating…");
   });
-  withState({ at: 1, mode: "tunnel", server: "nl-12", allRateLimited: true, refreshIn: 42 }, () => {
-    assert.strictEqual(rowText(), "vpn all rate-limited (refresh in 42s)");
+  withState({ at: 1, mode: "direct", rotating: true, model: "m-free" }, () => {
+    assert.strictEqual(rowText(), "vpn rotating for m-free…");
   });
-  withState({ at: 1, mode: "tunnel", allRateLimited: true }, () => {
-    assert.strictEqual(rowText(), "vpn all rate-limited");
+  withState({ at: Date.now(), mode: "tunnel", server: "nl-12", allRateLimited: true, refreshIn: 42, model: "m-free" }, () => {
+    assert.strictEqual(rowText(), "vpn all rate-limited for m-free (refresh in 42s)");
+  });
+  withState({ at: Date.now() - 60_000, mode: "tunnel", server: "nl-12", allRateLimited: true, refreshIn: 42 }, () => {
+    assert.strictEqual(rowText(), "vpn tunnel nl-12", "an expired wait shows the live mode");
   });
 }
 
@@ -82,7 +85,7 @@ function testFlaggedHostIp() {
       assert.strictEqual(rowText(), "vpn tunnel nl-12 NL 1.2.3.4");
     },
   );
-  withState({ at: 1, mode: "direct", hostIpFlaggedUntil: now + 3600, allRateLimited: true, refreshIn: 42 }, () => {
+  withState({ at: Date.now(), mode: "direct", hostIpFlaggedUntil: now + 3600, allRateLimited: true, refreshIn: 42 }, () => {
     assert.strictEqual(rowText(), "vpn all rate-limited (refresh in 42s)");
   });
 }
