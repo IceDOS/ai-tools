@@ -331,6 +331,14 @@ in
                 mergedCliPlugins = tuiPlugins ++ npmEntries true ++ (cfg.cli.plugins or [ ]);
                 cliTerminal =
                   (optionalAttrs cfg.terminal-title.enable { title = false; }) // (cfg.cli.terminal or { });
+
+                getPluginSpec = p: if builtins.isString p then p else p.package or "";
+                managedNpmSpecs = lib.unique (
+                  lib.filter (s: s != "" && !lib.hasPrefix "/" s && !lib.hasPrefix "./" s) (
+                    map getPluginSpec (mergedPlugins ++ mergedCliPlugins)
+                  )
+                );
+                npmManifestSeed = pkgs.writeText "opencode-npm-plugins.json" (builtins.toJSON managedNpmSpecs);
               in
               {
                 options.icedos.managed-settings.opencode = icedosLib.mkAttrsOption {
@@ -338,6 +346,18 @@ in
                 };
 
                 config = {
+                  home.activation.prune-opencode-npm = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+                    PATH=${
+                      lib.makeBinPath [
+                        pkgs.jq
+                        pkgs.coreutils
+                      ]
+                    }:$PATH ${pkgs.bash}/bin/bash ${./lib/prune-npm.sh} \
+                      ${lib.escapeShellArg "${config.xdg.configHome}/opencode"} \
+                      ${lib.escapeShellArg "${config.xdg.cacheHome}/opencode"} \
+                      ${npmManifestSeed}
+                  '';
+
                   xdg.configFile =
                     let
                       userSkills =

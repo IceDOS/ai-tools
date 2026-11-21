@@ -1,3 +1,4 @@
+"""Run: nix-shell -p jq python3 --run "python3 -I test_seed.py" """
 import json
 import subprocess
 import tempfile
@@ -16,6 +17,12 @@ class SeedTest(unittest.TestCase):
         self.dir = root / "agent"
         self.settings_seed = root / "settings-seed.json"
         self.models_seed = root / "models-seed.json"
+        self.npm_log = root / "npm.log"
+        self.mock_npm = root / "mock-npm"
+        self.mock_npm.write_text(f"""#!/usr/bin/env bash
+echo "$@" >> "{self.npm_log}"
+""")
+        self.mock_npm.chmod(0o755)
         self.settings_seed.write_text(json.dumps(SETTINGS))
         self.models_seed.write_text(json.dumps(MODELS))
 
@@ -23,8 +30,10 @@ class SeedTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_seed(self):
-        return subprocess.run(["bash", str(SEED), str(self.dir), str(self.settings_seed), str(self.models_seed)],
-                              check=True, capture_output=True, text=True)
+        return subprocess.run(
+            ["bash", str(SEED), str(self.dir), str(self.settings_seed), str(self.models_seed), str(self.mock_npm)],
+            check=True, capture_output=True, text=True
+        )
 
     def read(self, name):
         return json.loads((self.dir / name).read_text())
@@ -72,7 +81,10 @@ class SeedTest(unittest.TestCase):
     def test_no_temp_files_left(self):
         self.run_seed()
         self.run_seed()
-        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), [".icedos-packages.json", "models.json", "settings.json"])
+        self.assertEqual(
+            sorted(p.name for p in self.dir.iterdir()),
+            [".icedos-packages.json", ".icedos-settings-paths.json", "models.json", "settings.json"]
+        )
 
     def write_settings_seed(self, data):
         self.settings_seed.write_text(json.dumps(data))
@@ -107,6 +119,63 @@ class SeedTest(unittest.TestCase):
         (self.dir / "settings.json").write_text('{"packages": [{"source": "npm:x", "skills": []}]}')
         self.run_seed()
         self.assertEqual(self.read("settings.json")["packages"], [{"source": "npm:x", "skills": []}])
+
+    def test_nested_settings_dropped_on_removal_and_user_empty_obj_survives(self):
+        self.dir.mkdir()
+        (self.dir / "settings.json").write_text(json.dumps({
+            "userCustom": "customValue",
+            "userEmptyObj": {},
+            "userParent": {"nestedEmpty": {}},
+            "defaultModel": "gpt-4",
+            "providers": {"openai": {"key": "k1", "url": "https://api.openai.com/v1"}},
+            "compaction": {"reserve": 1000}
+        }))
+        # First run establishes ledger with full settings
+        self.write_settings_seed({
+            "defaultModel": "gpt-4",
+            "providers": {"openai": {"key": "k1", "url": "https://api.openai.com/v1"}},
+            "compaction": {"reserve": 1000}
+        })
+        self.run_seed()
+        s1 = self.read("settings.json")
+        self.assertEqual(s1["userCustom"], "customValue")
+        self.assertEqual(s1["userEmptyObj"], {})
+        self.assertEqual(s1["userParent"]["nestedEmpty"], {})
+        self.assertEqual(s1["providers"]["openai"]["url"], "https://api.openai.com/v1")
+
+        # Second run: url removed and compaction removed completely
+        self.write_settings_seed({
+            "defaultModel": "gpt-4",
+            "providers": {"openai": {"key": "k1"}}
+        })
+        self.run_seed()
+        s2 = self.read("settings.json")
+        self.assertEqual(s2["userCustom"], "customValue")
+        self.assertEqual(s2["userEmptyObj"], {})
+        self.assertEqual(s2["userParent"]["nestedEmpty"], {})
+        self.assertEqual(s2["providers"]["openai"], {"key": "k1"})
+        self.assertNotIn("compaction", s2)
+
+    def test_npm_package_uninstalled_when_removed(self):
+        (self.dir / "npm").mkdir(parents=True)
+        self.write_settings_seed({
+            **SETTINGS,
+            "packages": ["npm:@apothic-ai/pi-ghost-text-x@1.0.0", "/nix/store/local-pkg"]
+        })
+        self.run_seed()
+        self.assertFalse(self.npm_log.exists())
+
+        # Now remove ghost-text package
+        self.write_settings_seed({
+            **SETTINGS,
+            "packages": ["/nix/store/local-pkg"]
+        })
+        self.run_seed()
+        self.assertTrue(self.npm_log.exists())
+        log = self.npm_log.read_text()
+        self.assertIn("uninstall @apothic-ai/pi-ghost-text-x --prefix", log)
+        self.assertIn("--offline", log)
+        self.assertNotIn("local-pkg", log)
 
 
 if __name__ == "__main__":

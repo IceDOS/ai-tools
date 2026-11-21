@@ -62,6 +62,10 @@ shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-
   `lib.mkIf (has ...)` inside one `per-agent` attrset (a shallow `//` across agents drops all but the
   last). `icedos.ai-tools.agent-views.<agent>.skills` (internal read-only) exposes the computed list of
   view skill names for agent modules to link per entry.
+- State ledgers: pi-agent tracks `.icedos-settings-paths.json` (drops removed settings paths) and
+  `.icedos-packages.json` (uninstalls removed npm packages `--offline`); opencode tracks
+  `.icedos-npm-plugins.json` (prunes removed npm cache dirs). User-added entries are never touched,
+  and the first run deletes nothing.
 - Non-agent modules (`llamacpp`, `ollama` and the `mcp` modules) have a `skills`
   option that adds to `icedos.ai-tools.skills.pool`, so a skill ships with the module it documents.
 - `icedos.ai-tools.mcp-servers` — name = `programs.mcp.servers` entry. `default` gives every hm

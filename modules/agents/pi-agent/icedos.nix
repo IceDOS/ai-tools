@@ -946,8 +946,9 @@
                       lib.makeBinPath [
                         pkgs.jq
                         pkgs.coreutils
+                        npmWrapper
                       ]
-                    }:$PATH ${pkgs.bash}/bin/bash ${./lib/seed.sh} ${lib.escapeShellArg dataDir} ${settingsSeed} ${modelsSeed}
+                    }:$PATH ${pkgs.bash}/bin/bash ${./lib/seed.sh} ${lib.escapeShellArg dataDir} ${settingsSeed} ${modelsSeed} ${npmWrapper}/bin/npm
                   '';
                 };
               }
