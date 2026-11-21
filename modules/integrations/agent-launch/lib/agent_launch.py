@@ -136,6 +136,14 @@ def choose(cfg: dict, picker=None, agent: str | None = None) -> tuple[str | None
     return name, list(agents.get(name, {}).get("command") or [name])
 
 
+RESUME_FLAGS = {"-r", "--resume", "-c", "--continue", "--conversation", "--session"}
+RESUME_PREFIXES = ("--resume=", "--continue=", "--conversation=", "--session=")
+
+
+def is_resume(args: list[str]) -> bool:
+    return any(a in RESUME_FLAGS or a.startswith(RESUME_PREFIXES) for a in args)
+
+
 def relay_env(cfg: dict, gen=None) -> dict:
     """AGENT_RELAY_ID for agent-relay, so the ID is known before the agent starts."""
     if not cfg.get("relayIds"):
@@ -170,7 +178,7 @@ def main(argv: list[str]) -> int:
     if args.print:
         print(json.dumps({"agent": name, "argv": cmd, "account": account, "env": env}), flush=True)
         return 0
-    if rid := env.get("AGENT_RELAY_ID"):
+    if (rid := env.get("AGENT_RELAY_ID")) and not is_resume(args.args):
         sys.stdout.write(relay_title(name, rid) + f"relay ID {rid}\n")
         sys.stdout.flush()
     os.environ.update(env)

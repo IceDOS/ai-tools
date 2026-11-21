@@ -126,6 +126,7 @@ shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-
 `resumeArgs`, `locator`) and the `agent-launch` fzf picker. Every agent module lists it in
 `meta.dependencies` and registers itself there. Don't set `zed.terminalInitCommand` from an
 agent module: zed's agent bridge extends agent-launch and reads this registry.
+With `relayIds`, it injects a fresh `AGENT_RELAY_ID` and prints a startup banner; it skips the banner on resume flags (`-r`, `--resume`, `-c`, `--continue`, `--conversation`, `--session`).
 
 ## Cross-repo checks
 `zed` stays in `apps`, so `hasModule` calls for it pass `url = "github:icedos/apps"`

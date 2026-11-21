@@ -238,3 +238,57 @@ def test_print_includes_relay_id(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert re.fullmatch(r"[0-9a-f]{5}", out["env"]["AGENT_RELAY_ID"])
 
+
+
+def test_relay_env_mints_fresh_id_even_with_env(monkeypatch):
+    monkeypatch.setenv("AGENT_RELAY_ID", "parent")
+    res = al.relay_env({"relayIds": True})
+    assert res["AGENT_RELAY_ID"] != "parent"
+    assert re.fullmatch(r"[0-9a-f]{5}", res["AGENT_RELAY_ID"])
+
+
+def test_launch_skips_banner_on_resume(tmp_path, capsys):
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"relayIds": True, "agents": {"claude": {"command": ["claude"]}}}))
+    with mock.patch.object(al.os, "execvp"):
+        al.main(["--config", str(cfg), "--agent", "claude", "--auto-account", "--", "--resume"])
+    out = capsys.readouterr().out
+    assert "relay ID" not in out
+    assert "\033]0;" not in out
+
+
+def test_launch_shows_banner_on_new_session(tmp_path, capsys):
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"relayIds": True, "agents": {"claude": {"command": ["claude"]}}}))
+    with mock.patch.object(al.os, "execvp"):
+        al.main(["--config", str(cfg), "--agent", "claude", "--auto-account"])
+    out = capsys.readouterr().out
+    assert "relay ID" in out
+    assert "\033]0;claude · " in out
+
+
+def test_launch_skips_banner_on_agy_conversation(tmp_path, capsys):
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"relayIds": True, "agents": {"agy": {"command": ["agy"]}}}))
+    with mock.patch.object(al.os, "execvp"):
+        al.main(["--config", str(cfg), "--agent", "agy", "--auto-account", "--", "--conversation", "c-123"])
+    out = capsys.readouterr().out
+    assert "relay ID" not in out
+    assert "\033]0;" not in out
+
+
+def test_is_resume_flags():
+    assert al.is_resume(["-r"])
+    assert al.is_resume(["--resume"])
+    assert al.is_resume(["--resume=abc"])
+    assert al.is_resume(["-c"])
+    assert al.is_resume(["--continue"])
+    assert al.is_resume(["--continue=abc"])
+    assert al.is_resume(["--conversation", "abc"])
+    assert al.is_resume(["--conversation=abc"])
+    assert al.is_resume(["--session", "abc"])
+    assert al.is_resume(["--session=abc"])
+    assert not al.is_resume(["-s"])
+    assert not al.is_resume(["-sfoo"])
+    assert not al.is_resume(["-p", "hello"])
+    assert not al.is_resume([])
