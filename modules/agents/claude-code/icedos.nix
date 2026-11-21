@@ -48,6 +48,9 @@ in
     # Whether `icedos gc` prunes stale claude session data (unshade-style).
     includeInIcedosGc = mkBoolOption { default = gcDefaults.includeInIcedosGc; };
 
+    # Whether Claude Code loads MCP servers from the claude.ai account.
+    claudeAiMcpServers = mkBoolOption { default = claudeDefaults.claudeAiMcpServers; };
+
     # Retain session transcripts/history newer than this many days on GC.
     sessionRetentionDays = mkIntBetweenOption {
       path = "icedos.ai-tools.claude-code.sessionRetentionDays";
@@ -148,6 +151,7 @@ in
           desktopEntry = config.icedos.ai-tools.claude-code.desktopEntry;
           claudeExtraArgs = config.icedos.ai-tools.claude-code.extraArgs;
           titleCfg = config.icedos.ai-tools.claude-code.terminal-title;
+          claudeAiMcpServers = config.icedos.ai-tools.claude-code.claudeAiMcpServers;
           inherit (config.icedos.ai-tools) rules;
           skills = removeAttrs config.icedos.ai-tools.skills.pool config.icedos.ai-tools.claude-code.excludeSkills;
 
@@ -455,9 +459,22 @@ in
                       removeAttrs skills (lib.attrNames config.programs.claude-code.plugins)
                     );
                     settings = {
-                      env = lib.optionalAttrs titleCfg.enable {
-                        CLAUDE_CODE_DISABLE_TERMINAL_TITLE = "1";
+                      remoteControlAtStartup = lib.mkDefault false;
+                      autoCompactWindow = lib.mkDefault 300000;
+                      promptSuggestionEnabled = lib.mkDefault false;
+                      awaySummaryEnabled = lib.mkDefault false;
+                      autoDreamEnabled = lib.mkDefault false;
+                      precomputeCompactionEnabled = lib.mkDefault false;
+                      attribution = lib.mkDefault {
+                        commit = "";
+                        pr = "";
                       };
+                      env = {
+                        ENABLE_CLAUDEAI_MCP_SERVERS = lib.boolToString claudeAiMcpServers;
+                      }
+                      // (lib.optionalAttrs titleCfg.enable {
+                        CLAUDE_CODE_DISABLE_TERMINAL_TITLE = "1";
+                      });
                       hooks = lib.mkIf titleCfg.enable {
                         SessionStart = [ { hooks = titleHook "SessionStart"; } ];
                         UserPromptSubmit = [ { hooks = titleHook "UserPromptSubmit"; } ];

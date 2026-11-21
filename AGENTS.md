@@ -263,7 +263,8 @@ Point this repo's `overrideUrl` at the local checkout in the config root
     `[[icedos.ai-tools.claude-code.users.<name>.marketplaces]]` with a `source` enum
     (`fetchFromGitHub`/`fetchFromGitLab`/`fetchgit`/`path`) and that source's fields.
     `path` is copied into the store at eval time, and pure eval forbids host paths there.
-  - It declares no hooks.
+  - `claudeAiMcpServers` controls `ENABLE_CLAUDEAI_MCP_SERVERS` (default false); sets default settings (`remoteControlAtStartup`, `autoCompactWindow`, `promptSuggestionEnabled`, `awaySummaryEnabled`, `autoDreamEnabled`, `precomputeCompactionEnabled`, `attribution`) via mkDefault.
+  - `terminal-title` (on by default) adds title hooks on SessionStart, UserPromptSubmit, Pre/PostToolUse(Failure), Stop and SessionEnd; they run `tool_timer.py`.
 - `ai-accounts` — **standalone** module that owns `icedos.ai-tools.ai-accounts.users.<name>`
   (self-materialised via `genDefaults`). `ai-account exec <agent> --` picks an account (flag,
   `AI_ACCOUNT_<AGENT>`, sticky, alimit headroom, `default`) and execs the real binary with

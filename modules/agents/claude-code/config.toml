@@ -1,6 +1,8 @@
 # Whether `icedos gc` prunes stale claude session data (unshade-style).
 [icedos.ai-tools.claude-code]
 includeInIcedosGc = false
+# Whether Claude Code loads MCP servers from the claude.ai account.
+claudeAiMcpServers = false
 # Retain session transcripts/history newer than this many days on GC.
 sessionRetentionDays = 30
 # Whether the launcher shows a desktop entry that opens in the default terminal.
@@ -10,7 +12,7 @@ extraArgs = []
 # Shared skills Claude Code skips, e.g. ones an installed plugin already ships.
 excludeSkills = []
 
-# Terminal title "<glyph> <title>"; idle glyph ✳, working frames ["◐", "◑"].
+# Terminal title "<glyph> <title>" with a tool timer; glyphs must share one width in the title font.
 [icedos.ai-tools.claude-code.terminal-title]
 enable = true
 idleGlyph = "✳"
