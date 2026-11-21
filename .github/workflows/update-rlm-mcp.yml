@@ -1,0 +1,18 @@
+name: Update rlm-mcp
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "20 3 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: rlm-mcp
+      paths: modules/mcp/rlm
+      command: nix-shell modules/mcp/rlm/update.sh
+      version-file: modules/mcp/rlm/rlm-kernel.json
+    secrets: inherit
