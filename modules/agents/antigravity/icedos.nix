@@ -178,7 +178,7 @@
               ${lib.optionalString rlmCfg.enable ''
                 # The title counts the rlm() children still running from their logs here.
                 export ANTIGRAVITY_RLM_DATA_DIR="${rlmDataDir}"
-                [ -d "$ANTIGRAVITY_RLM_DATA_DIR" ] || export ANTIGRAVITY_RLM_DATA_DIR="$HOME/.local/share/icedos-rlm"
+                [ -d "$ANTIGRAVITY_RLM_DATA_DIR" ] || export ANTIGRAVITY_RLM_DATA_DIR="$HOME/.local/state/icedos/rlm"
               ''}
               exec ${pkgs.python3}/bin/python3 ${agentScripts}/statusline.py "$@"
             '';
@@ -555,7 +555,7 @@
             ''
               D="${rlmDataDir}"
               D=''${D//\$HOME/$HOME}
-              [ -d "$D" ] || D="$HOME/.local/share/icedos-rlm"
+              [ -d "$D" ] || D="$HOME/.local/state/icedos/rlm"
               [ -d "$D" ] || exit 0
               gc_section "$D" "path"
               gc_note "Keeping paths newer than ''${DIM_GREEN}${toString rlmCfg.retentionDays}''${NC}d"

@@ -5,24 +5,24 @@ import os from "node:os";
 import path from "node:path";
 import { getDataDir, loadHarness, renderEntries, buildHarnessSection, rlmChildrenArgs } from "../index.js";
 
-test("getDataDir respects PLUGIN_DATA, XDG_DATA_HOME, and default fallback", () => {
+test("getDataDir respects PLUGIN_DATA, XDG_STATE_HOME, and default fallback", () => {
   const origPluginData = process.env.PLUGIN_DATA;
-  const origXdg = process.env.XDG_DATA_HOME;
+  const origXdg = process.env.XDG_STATE_HOME;
   try {
     process.env.PLUGIN_DATA = "/custom/plugin/data";
     assert.equal(getDataDir(), "/custom/plugin/data");
     delete process.env.PLUGIN_DATA;
 
-    process.env.XDG_DATA_HOME = "/custom/xdg";
-    assert.equal(getDataDir(), "/custom/xdg/icedos-rlm");
-    delete process.env.XDG_DATA_HOME;
+    process.env.XDG_STATE_HOME = "/custom/xdg";
+    assert.equal(getDataDir(), "/custom/xdg/icedos/rlm");
+    delete process.env.XDG_STATE_HOME;
 
-    assert.equal(getDataDir(), path.join(os.homedir(), ".local/share", "icedos-rlm"));
+    assert.equal(getDataDir(), path.join(os.homedir(), ".local/state", "icedos", "rlm"));
   } finally {
     if (origPluginData !== undefined) process.env.PLUGIN_DATA = origPluginData;
     else delete process.env.PLUGIN_DATA;
-    if (origXdg !== undefined) process.env.XDG_DATA_HOME = origXdg;
-    else delete process.env.XDG_DATA_HOME;
+    if (origXdg !== undefined) process.env.XDG_STATE_HOME = origXdg;
+    else delete process.env.XDG_STATE_HOME;
   }
 });
 

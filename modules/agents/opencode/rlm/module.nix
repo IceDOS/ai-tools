@@ -120,7 +120,7 @@ in
   postGc =
     cfg:
     lib.optional (cfg.enable && cfg.includeInIcedosGc) ''
-      D="''${XDG_DATA_HOME:-$HOME/.local/share}/icedos-rlm"
+      D="''${XDG_STATE_HOME:-$HOME/.local/state}/icedos/rlm"
       [ -d "$D" ] || exit 0
       gc_section "$D" "path"
       gc_note "Keeping paths newer than ''${DIM_GREEN}${toString cfg.retentionDays}''${NC}d"

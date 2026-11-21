@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 export function getDataDir() {
   return (
     process.env.PLUGIN_DATA ||
-    path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local/share"), "icedos-rlm")
+    path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local/state"), "icedos", "rlm")
   );
 }
 

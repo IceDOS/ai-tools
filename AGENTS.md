@@ -242,7 +242,7 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   registers MCP server `kernel` and the `opencode-rlm` server plugin; `autoload` sets `default_agent = "rlm"`.
   Agent `rlm` denies every tool except `execute`, `skill`, `kernel_*`, and dynamically generated allow rules for configured MCP servers (`<server>_*`), reached from `execute` as `tools.<server>["<tool>"]` (opencode permissions are last-match). Children run headless
   via `opencode run --format json --agent rlm --auto --standalone`; `icedos-status` renders an opencode RLM children footer row. Data lives in
-  `${XDG_DATA_HOME:-~/.local/share}/icedos-rlm`, shared with antigravity's rlm (disjoint session ids).
+  `${XDG_STATE_HOME:-~/.local/state}/icedos/rlm`, shared with antigravity's rlm (disjoint session ids).
   `/rlm-children` lists children and `/rlm-children <id>` (or `#seq` or a unique prefix) posts a child transcript, as plugin commands, and `/refine` harness notes are injected through the `context` hook.
   `codeReview` ships the `code-review` skill (needs RLM) and `freeReview` its loop on `opencode/*-free`
   children started with `opencode run --agent build`. npm extension `power` (`npmExtensions` in

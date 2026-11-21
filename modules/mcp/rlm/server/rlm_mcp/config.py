@@ -26,7 +26,7 @@ class Settings:
         env = os.environ if env is None else env
         home = env.get("HOME") or os.path.expanduser("~")
         data = env.get("PLUGIN_DATA") or os.path.join(
-            env.get("XDG_DATA_HOME") or os.path.join(home, ".local/share"), "icedos-rlm"
+            env.get("XDG_STATE_HOME") or os.path.join(home, ".local/state"), "icedos", "rlm"
         )
         self_cmd = [env["RLM_SELF"]] if env.get("RLM_SELF") else [sys.argv[0]]
         return cls(

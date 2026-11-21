@@ -30,7 +30,7 @@ def test_from_env_reads_all_fields(tmp_path):
 
 def test_defaults_without_plugin_data(tmp_path):
     s = Settings.from_env({"RLM_KERNEL": "/x/k.py", "HOME": str(tmp_path)})
-    assert s.data_dir == Path(tmp_path) / ".local/share/icedos-rlm"
+    assert s.data_dir == Path(tmp_path) / ".local/state/icedos/rlm"
     assert s.max_depth == 2
     assert s.depth == 0
     assert s.child_log is True

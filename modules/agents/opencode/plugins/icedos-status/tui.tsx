@@ -232,7 +232,7 @@ export default Plugin.define({
     if (context.options.rlmRow === true) {
       const dataDir =
         process.env.PLUGIN_DATA ||
-        `${process.env.XDG_DATA_HOME || `${process.env.HOME || ""}/.local/share`}/icedos-rlm`;
+        `${process.env.XDG_STATE_HOME || `${process.env.HOME || ""}/.local/state`}/icedos/rlm`;
       const isAlive = (pid: number) => {
         try {
           process.kill(pid, 0);
