@@ -90,7 +90,7 @@ async function eventually<T>(read: () => T, ok: (v: T) => boolean, ms = 2000): P
 const relayAt = (root: string) => new Relay({ root, isAlive: () => true, ancestorsOf: () => [] });
 
 
-test("claude: one channel notification per message, ledger delivered, inbox empty, read on the next tool call", async () => {
+test("claude: one channel notification per message, ledger delivered, inbox empty, read on the next tool call", { timeout: 30_000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-mcp-"));
   const relay = relayAt(root);
   const server = startServer(root, "claude");
