@@ -132,40 +132,7 @@ def emit_to_tty(tty, title=""):
         pass
 
 
-def read_transcript_title(transcript_path):
-    if not transcript_path:
-        return ""
-    p = Path(transcript_path)
-    if not p.is_file():
-        return ""
-    try:
-        custom, ai = "", ""
-        with open(p, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if '"custom-title"' in line:
-                    try:
-                        data = json.loads(line)
-                        if data.get("type") == "custom-title" and data.get("customTitle"):
-                            custom = data["customTitle"]
-                    except Exception:
-                        pass
-                elif '"ai-title"' in line:
-                    try:
-                        data = json.loads(line)
-                        if data.get("type") == "ai-title" and data.get("aiTitle"):
-                            ai = data["aiTitle"]
-                    except Exception:
-                        pass
-        return custom or ai or ""
-    except Exception:
-        return ""
-
-
-def conversation_title(conversation, transcript_path=None):
-    if transcript_path:
-        title = read_transcript_title(transcript_path)
-        if title:
-            return title
+def conversation_title(conversation):
     if not conversation:
         return ""
     try:
@@ -183,8 +150,8 @@ def conversation_title(conversation, transcript_path=None):
 
 def title_text(state, fallback=None):
     name = state.get("name")
-    if not name and (state.get("conversation") or state.get("transcript_path")):
-        name = conversation_title(state.get("conversation"), state.get("transcript_path"))
+    if not name and state.get("conversation"):
+        name = conversation_title(state.get("conversation"))
     text = " ".join((name or "").split())
     if not text:
         text = fallback or state.get("fallback") or FALLBACK

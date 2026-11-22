@@ -185,6 +185,15 @@ class TestTerminalTitle(unittest.TestCase):
         titles = self.tick({"agy": 7, "name": "Task", "working": False})
         self.assertEqual(titles, ["\u25b3 Task", ""])
 
+    def test_save_drops_state_left_by_a_previous_tty_owner(self):
+        # pts numbers get reused; a dead owner's pid would make the ticker quit at once.
+        terminal_title.save(self.tty, {"agent": 999, "agy": 999, "name": "Old"})
+        terminal_title.save(self.tty, {"agy": 7, "working": False})
+        self.assertEqual(terminal_title.load(self.tty), {"agy": 7, "working": False})
+        terminal_title.save(self.tty, {"working": True})
+        self.assertEqual(terminal_title.load(self.tty).get("agy"), 7)
+        self.assertEqual(terminal_title.load(self.tty, owner=8), {})
+
     def test_tick_redraws_the_same_title_after_a_state_change(self):
         # Claude's SessionEnd on /resume clears the title, then SessionStart saves new state with the same text.
         terminal_title.save(self.tty, {"agy": 7, "name": "Task", "working": False})

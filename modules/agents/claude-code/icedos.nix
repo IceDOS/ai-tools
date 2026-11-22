@@ -16,7 +16,6 @@ let
 
   claudeDefaults = (importTOML ./config.toml).icedos.ai-tools.claude-code;
   gcDefaults = claudeDefaults;
-  terminalTitleDefaults = claudeDefaults.terminal-title;
 
   marketplaceTemplate = head (importTOML ./config.toml)
     .icedos.ai-tools.claude-code.users.username.marketplaces;
@@ -69,13 +68,6 @@ in
 
     # Shared skills Claude Code skips, e.g. ones an installed plugin already ships.
     excludeSkills = mkStrListOption { default = gcDefaults.excludeSkills; };
-
-    # Terminal title "<glyph> <title>"; animated ticker driven by hooks.
-    terminal-title = {
-      enable = mkBoolOption { default = terminalTitleDefaults.enable; };
-      idleGlyph = mkStrOption { default = terminalTitleDefaults.idleGlyph; };
-      workingGlyphs = mkStrListOption { default = terminalTitleDefaults.workingGlyphs; };
-    };
 
     users = mkSubmoduleAttrsOption { default = { }; } {
       marketplaces = mkSubmoduleListOption { default = [ ]; } {
@@ -154,7 +146,6 @@ in
           gcDays = config.icedos.ai-tools.claude-code.sessionRetentionDays;
           desktopEntry = config.icedos.ai-tools.claude-code.desktopEntry;
           claudeExtraArgs = config.icedos.ai-tools.claude-code.extraArgs;
-          titleCfg = config.icedos.ai-tools.claude-code.terminal-title;
           claudeAiMcpServers = config.icedos.ai-tools.claude-code.claudeAiMcpServers;
           inherit (config.icedos.ai-tools) rules;
 
@@ -412,20 +403,6 @@ in
               { config, lib, ... }:
 
               let
-                claudeScripts = pkgs.runCommand "claude-code-title-scripts" { } ''
-                  mkdir -p $out
-                  cp ${../lib/terminal-title/terminal_title.py} $out/terminal_title.py
-                  cp ${../lib/terminal-title/tool_state.py} $out/tool_state.py
-                  cp ${./tool_timer.py} $out/tool_timer.py
-                '';
-
-                titleHook = event: [
-                  {
-                    type = "command";
-                    command = "${pkgs.python3}/bin/python3 ${claudeScripts}/tool_timer.py ${event} --idle-glyph ${lib.escapeShellArg titleCfg.idleGlyph} --working-glyphs ${lib.escapeShellArg (lib.concatStringsSep " " titleCfg.workingGlyphs)} --fallback ${lib.escapeShellArg "Claude Code"} --comm-names ${lib.escapeShellArg "claude .claude-wrapped"}";
-                  }
-                ];
-
                 claudePlugins =
                   (lib.genAttrs claudeGlobalPlugins (
                     name: "${config.xdg.dataHome}/icedos/agents/global/plugins/${name}"
@@ -497,33 +474,6 @@ in
                       };
                       env = {
                         ENABLE_CLAUDEAI_MCP_SERVERS = lib.boolToString claudeAiMcpServers;
-                      }
-                      // (lib.optionalAttrs titleCfg.enable {
-                        CLAUDE_CODE_DISABLE_TERMINAL_TITLE = "1";
-                      });
-                      hooks = lib.mkIf titleCfg.enable {
-                        SessionStart = [ { hooks = titleHook "SessionStart"; } ];
-                        UserPromptSubmit = [ { hooks = titleHook "UserPromptSubmit"; } ];
-                        PreToolUse = [
-                          {
-                            matcher = "*";
-                            hooks = titleHook "PreToolUse";
-                          }
-                        ];
-                        PostToolUse = [
-                          {
-                            matcher = "*";
-                            hooks = titleHook "PostToolUse";
-                          }
-                        ];
-                        PostToolUseFailure = [
-                          {
-                            matcher = "*";
-                            hooks = titleHook "PostToolUseFailure";
-                          }
-                        ];
-                        Stop = [ { hooks = titleHook "Stop"; } ];
-                        SessionEnd = [ { hooks = titleHook "SessionEnd"; } ];
                       };
                     };
                   };
