@@ -120,8 +120,23 @@ async def _ssh(host: str, script: str, timeout: float = 60) -> tuple[int, str]:
 
 
 async def prepare(host: str, cwd: str, need_gb: float) -> tuple[str, str]:
-    """(work dir on host, error). Refuses when the host's /tmp lacks need_gb."""
-    work = f"{remote_root()}/{key(cwd)}"
+    """(work dir on host, error). Uses host drives or falls back to /tmp."""
+    k = key(cwd)
+    work = next((d for d in _dirs.get(host, ()) if d.endswith(f"/shell-run-{k}") or d.endswith(f"/{k}")), "")
+    if not work:
+        host_cfg = await asyncio.to_thread(storage.settings, host)
+        mounts = list(host_cfg.get("drives", {}))
+        candidates = [f"{m}/ai-dump/shell-run-{k}" for m in mounts] + [f"{remote_root()}/{k}"]
+        q_cands = " ".join(shlex.quote(c) for c in candidates)
+        rc, out = await _ssh(host, f'for d in {q_cands}; do [ -d "$d" ] && echo "$d" && break; done')
+        if rc == 0 and out.strip():
+            work = out.strip().splitlines()[0]
+    if not work:
+        try:
+            picked = await asyncio.to_thread(storage.pick, need_gb, "random", f"shell-run-{k}", host)
+            work = picked["dir"]
+        except (ValueError, OSError):
+            work = f"{remote_root()}/{k}"
     q = shlex.quote(work)
     rc, out = await _ssh(host, f"mkdir -p {q}/src {q}/tmp {q}/scratch && df -Pk {q} | tail -n 1")
     if rc != 0:
@@ -132,7 +147,8 @@ async def prepare(host: str, cwd: str, need_gb: float) -> tuple[str, str]:
     except (IndexError, ValueError):
         return "", f"cannot read free space of {work} on {host}: {out.strip()[-300:]}"
     if free_gb < need_gb:
-        return "", f"{host} has {free_gb:.1f} GB free under {remote_root()}, the run needs {need_gb:g}"
+        where = remote_root() if work.startswith(remote_root()) else work
+        return "", f"{host} has {free_gb:.1f} GB free under {where}, the run needs {need_gb:g}"
     return work, ""
 
 
@@ -214,7 +230,7 @@ def cleanup(target: str = "", timeout: float = 120) -> dict[str, str]:
             report["local work dirs"] = f"deleted {len(dirs)}"
             _dirs.pop(where, None)
             continue
-        quoted = " ".join(shlex.quote(d) for d in dirs if d.startswith(remote_root() + "/"))
+        quoted = " ".join(shlex.quote(d) for d in dirs if d.startswith(remote_root() + "/") or "/ai-dump/shell-run-" in d)
         script = f"rm -rf -- {quoted}; rmdir {shlex.quote(remote_root())} 2>/dev/null; true"
         try:
             proc = subprocess.run(["ssh", *remote.SSH_OPTS, where, script],

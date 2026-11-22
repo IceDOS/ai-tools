@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import argparse
 import asyncio
 import atexit
@@ -15,7 +17,7 @@ import shlex
 import signal
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
@@ -23,6 +25,7 @@ import tomlkit
 from mcp.server.fastmcp import Context, FastMCP
 
 from . import build_hosts as remote
+from . import pkgs_host
 from . import config_files
 from . import leftovers
 from . import sandbox as sandboxes
@@ -1146,29 +1149,81 @@ async def list_packages() -> str:
 
 
 @mcp.tool()
-async def run_package(attr: str, args: list[str] | None = None, insecure: bool = False, timeout: int = 300) -> str:
+async def run_package(
+    attr: str,
+    args: list[str] | None = None,
+    insecure: bool = False,
+    host: str = "local",
+    timeout: int = 300,
+) -> str:
     """Run a nixpkgs package's main binary without installing it (`icedos pkgs run`).
 
+    A host run evaluates here and runs there; outputs stay in the host's store.
     Blocks until it exits or times out, so it is not for long-lived GUI apps.
 
     Args:
         attr: Package attribute (e.g. 'ripgrep', 'btop').
         args: Arguments for the binary, e.g. ['--version'].
         insecure: Allow packages marked insecure.
+        host: "auto" asks build_hosts, "local" runs here, or a configured host.
         timeout: Max seconds to wait before killing the process (default 300).
     """
+    if not shells._ATTR_RE.match(attr):
+        return _err("bad_args", f"invalid package attribute {attr!r}")
+    hosts = remote.settings()["hosts"]
+    if host == "auto":
+        picked = await remote.choose()
+        host = picked["pick"]
+    elif host != "local" and host not in hosts:
+        return _err("bad_args", f"unknown host {host!r}; configured hosts: {', '.join(hosts) or 'none'}")
+    if host == "local":
+        try:
+            rc, stdout, stderr = await cli_run_package(attr, args=args, insecure=insecure, timeout=timeout)
+        except TimeoutError as e:
+            return _err("timeout", str(e))
+        out = stdout + (f"\n{stderr}" if stderr else "")
+        return out if rc == 0 else f"exit {rc}:\n{out}"
     try:
-        rc, stdout, stderr = await cli_run_package(attr, args=args, insecure=insecure, timeout=timeout)
+        store_path, _ = await asyncio.to_thread(storage.store_for, 0, "auto", host)
+    except ValueError as e:
+        return _err("storage", str(e))
+    drv, err = await pkgs_host.package_drv(attr, insecure)
+    if err:
+        return _err("eval", err)
+    try:
+        rc, log, out_path = await pkgs_host.build_on_host(drv, host=host, timeout=timeout, store_path=store_path)
     except TimeoutError as e:
         return _err("timeout", str(e))
-    out = stdout + (f"\n{stderr}" if stderr else "")
-    return out if rc == 0 else f"exit {rc}:\n{out}"
+    if rc != 0:
+        return f"exit {rc}:\n{cli_summarize_log_tail(log)}"
+    exe_name = await pkgs_host.get_exe_name(attr)
+    bin_path, err = await pkgs_host.resolve_host_binary(host, out_path, exe_name, store_path=store_path)
+    if err:
+        return f"exit 1:\n{err}"
+    if store_path:
+        bin_name = PurePosixPath(bin_path).name
+        argv = ["nix", "shell", "--store", store_path, out_path, "--command", bin_name, *(args or [])]
+    else:
+        argv = [bin_path, *(args or [])]
+    try:
+        brc, bout = await pkgs_host.run_remote_binary(host, argv, timeout=timeout)
+    except TimeoutError as e:
+        return _err("timeout", str(e))
+    clean = _ANSI_RE.sub("", bout).strip()
+    return clean if brc == 0 else f"exit {brc}:\n{clean}"
 
 
 @mcp.tool()
-async def pkgs_build(path: str, run: str = "", args: list[str] | None = None, timeout: int = 1800) -> str:
+async def pkgs_build(
+    path: str,
+    run: str = "",
+    args: list[str] | None = None,
+    host: str = "local",
+    timeout: int = 1800,
+) -> str:
     """Build a package.nix against the system's pkgs (`icedos pkgs build`).
 
+    A host build evaluates here and runs there; outputs stay in the host's store.
     The package is called with icedosLib.packaging supplied, like a module's
     packages. Returns the store path, or the binary's output with `run`. Uses
     the live system's generated flake, so it needs a prior live rebuild.
@@ -1177,16 +1232,54 @@ async def pkgs_build(path: str, run: str = "", args: list[str] | None = None, ti
         path: Path to a package.nix file.
         run: Binary name to launch from the build's bin/ after building.
         args: Arguments for that binary (needs `run`).
+        host: "auto" asks build_hosts, "local" builds here, or a configured host.
         timeout: Max seconds (default 1800).
     """
     if args and not run:
         return _err("bad_args", "args need run=")
+    if run and ("/" in run or run in (".", "..")):
+        return _err("bad_args", f"run must be a plain file name: {run!r}")
+    resolved_path = str(Path(path).expanduser())
+    if not Path(resolved_path).is_file():
+        return _err("bad_args", f"package file not found: {path!r}")
+    hosts = remote.settings()["hosts"]
+    if host == "auto":
+        picked = await remote.choose()
+        host = picked["pick"]
+    elif host != "local" and host not in hosts:
+        return _err("bad_args", f"unknown host {host!r}; configured hosts: {', '.join(hosts) or 'none'}")
+    if host == "local":
+        try:
+            rc, stdout, stderr = await cli_pkgs_build(resolved_path, run=run, args=args, timeout=timeout)
+        except TimeoutError as e:
+            return _err("timeout", str(e))
+        out = _ANSI_RE.sub("", stdout + (f"\n{stderr}" if stderr else "")).strip()
+        return out if rc == 0 else f"Build failed (exit {rc}):\n{cli_summarize_log_tail(out)}"
     try:
-        rc, stdout, stderr = await cli_pkgs_build(str(Path(path).expanduser()), run=run, args=args, timeout=timeout)
+        store_path, _ = await asyncio.to_thread(storage.store_for, 0, "auto", host)
+    except ValueError as e:
+        return _err("storage", str(e))
+    drv, err = await pkgs_host.build_pkg_drv(resolved_path)
+    if err:
+        return _err("eval", err)
+    try:
+        rc, log, out_path = await pkgs_host.build_on_host(drv, host=host, timeout=timeout, store_path=store_path)
     except TimeoutError as e:
         return _err("timeout", str(e))
-    out = _ANSI_RE.sub("", stdout + (f"\n{stderr}" if stderr else "")).strip()
-    return out if rc == 0 else f"Build failed (exit {rc}):\n{cli_summarize_log_tail(out)}"
+    if rc != 0:
+        return f"Build failed (exit {rc}):\n{cli_summarize_log_tail(log)}"
+    if not run:
+        return out_path
+    if store_path:
+        argv = ["nix", "shell", "--store", store_path, out_path, "--command", run, *(args or [])]
+    else:
+        argv = [f"{out_path}/bin/{run}", *(args or [])]
+    try:
+        brc, bout = await pkgs_host.run_remote_binary(host, argv, timeout=timeout)
+    except TimeoutError as e:
+        return _err("timeout", str(e))
+    clean = _ANSI_RE.sub("", bout).strip()
+    return clean if brc == 0 else f"exit {brc}:\n{clean}"
 
 
 # --- REMOTE BUILD HOSTS ---
@@ -1295,17 +1388,16 @@ async def nix_build(
     if host == "auto":
         picked = await remote.choose(need_gb)
         host = picked["pick"]
+        if store == "auto" and picked.get("drive"):
+            store = picked["drive"]
     elif host != "local" and host not in hosts:
         return _err("bad_args", f"unknown host {host!r}; configured hosts: {', '.join(hosts) or 'none'}")
-    if host != "local" and store not in ("auto", "host"):
-        return _err("bad_args", f"store={store!r} needs a local build; {host} builds in its own store")
     store_path, store_why = "", ""
-    if host == "local":
-        try:
-            store_path, store_why = storage.store_for(need_gb, store)
-        except ValueError as e:
-            return _err("storage", str(e))
-    target = remote.remote_store(host) if host != "local" else store_path
+    try:
+        store_path, store_why = await asyncio.to_thread(storage.store_for, need_gb, store, host)
+    except ValueError as e:
+        return _err("storage", str(e))
+    target = remote.remote_store(host, store_path) if host != "local" else store_path
     try:
         rc, log, result = await remote.build(
             installable, host, timeout, on_line=_progress_reporter(ctx), store=store_path
@@ -1325,7 +1417,10 @@ async def nix_build(
     clean = _ANSI_RE.sub("", log).strip()
     out = clean if logs else cli_summarize_log_tail(clean)
     why = "; ".join(w for w in (picked["why"] if picked else "", store_why) if w)
-    where = (f"on {host}" if host != "local" else f"in {store_path or 'the host store'}") + (f" ({why})" if why else "")
+    if host != "local":
+        where = f"on {host}" + (f" in {store_path}" if store_path else "") + (f" ({why})" if why else "")
+    else:
+        where = f"in {store_path or 'the host store'}" + (f" ({why})" if why else "")
     if rc != 0:
         return f"Build failed {where} (exit {rc}):\n{out}"
     paths = remote.result_paths(result)[0]
@@ -1333,14 +1428,34 @@ async def nix_build(
     if installable != asked:
         lines.append(f"Built {installable}, every output of the .drv.")
     if store_path:
-        lines += [f"output: {p} (on disk: {store_path}{p})" for p in paths]
-        # The drive store has the outputs but not a store path's .drv.
-        run = " ".join(paths) if installable.startswith("/nix/store/") else installable
-        lines.append(f"Run it with: nix shell --store {store_path} {run}")
+        if host != "local":
+            lines += [f"output: {p} (on {host}: {store_path}{p})" for p in paths]
+            bin_name = ""
+            if installable.startswith("nixpkgs#"):
+                attr = installable.partition("#")[2]
+                with contextlib.suppress(Exception):
+                    bin_name = await pkgs_host.get_exe_name(attr)
+            if not bin_name:
+                with contextlib.suppress(Exception):
+                    rc_bin, out_bin = await shells._ssh(
+                        host, f"ls -1 {shlex.quote(store_path + paths[0] + '/bin')} 2>/dev/null", timeout=10
+                    )
+                    if rc_bin == 0 and out_bin.strip():
+                        bin_name = out_bin.strip().splitlines()[0]
+            out_paths = " ".join(paths)
+            if bin_name:
+                lines.append(f"Run it with: ssh {host} nix shell --store {store_path} {out_paths} --command {bin_name}")
+            else:
+                lines.append(f"Run it with: ssh {host} nix shell --store {store_path} {out_paths} (binary unknown)")
+            lines.append(f"The outputs live in {host}'s drive store {store_path}.")
+        else:
+            lines += [f"output: {p} (on disk: {store_path}{p})" for p in paths]
+            run = " ".join(paths) if installable.startswith("/nix/store/") else installable
+            lines.append(f"Run it with: nix shell --store {store_path} {run}")
     else:
         lines += [f"output: {p}" for p in paths]
-    if host != "local":
-        lines.append(f"The outputs live in {host}'s store; inspect them with ssh {host}.")
+        if host != "local":
+            lines.append(f"The outputs live in {host}'s store; inspect them with ssh {host}.")
     if added:
         lines.append(f"{len(added)} paths there are queued for build_cleanup.")
     return "\n".join(lines) + f"\n{out}"
@@ -1367,11 +1482,11 @@ async def shell_run(
     PC's pinned nixpkgs, or a flake's devShell. It is evaluated here either way,
     so a host gets the same toolchain.
 
-    On a host (needs build.remoteExec), cwd is rsynced to
-    /tmp/icedos-mcp-<user>/<key>/src, leaving out .git, result links and
-    .gitignore'd files, and the command runs there outside the Nix sandbox. The
-    copy and its ignored build outputs (`target/`) stay between runs of the same
-    cwd, so rebuilds are incremental. A timeout or cancel kills the remote run.
+    On a host (needs build.remoteExec), cwd is rsynced to a work dir on the host's
+    configured drives (or /tmp/icedos-mcp-<user>/<key>/src as fallback), leaving out
+    .git, result links and .gitignore'd files, and the command runs there outside the
+    Nix sandbox. The copy and its ignored build outputs (`target/`) stay between runs of
+    the same cwd, so rebuilds are incremental. A timeout or cancel kills the remote run.
 
     $ICEDOS_SCRATCH is a scratch dir: on a host its work dir, here a dir on a
     secondary SSD when need_gb > 0. Point big outputs at it, e.g.
@@ -1388,7 +1503,7 @@ async def shell_run(
         flake: Instead of packages, a flake ref whose devShell to use, e.g.
                '/abs/dir' (its default devShell) or 'path:/abs/dir#devShells.x86_64-linux.ci'.
         host: "auto" asks build_hosts, "local", or a configured host.
-        need_gb: Disk the run needs, in GB, for the host's /tmp or the local scratch dir.
+        need_gb: Disk the run needs, in GB, for the host's drives or /tmp, or local scratch.
         insecure: Allow packages marked insecure.
         fetch: Paths relative to cwd to copy back from a host after the run,
                e.g. ['target/release/foo']. They overwrite the local files.
@@ -1479,8 +1594,8 @@ async def build_cleanup(target: str = "", gc: bool = False) -> str:
     mounts = [r["mount"] for r in storage.drives()]
     if target == "host":
         stores = [leftovers.HOST_STORE]
-    elif target in hosts:
-        stores = [remote.remote_store(target)]
+    elif target in hosts or target.startswith("ssh-ng://"):
+        stores = remote.matching_stores(target)
     elif target.rstrip("/") in mounts:
         stores = [storage.store_dir(target.rstrip("/"))]
     elif target:
@@ -1488,48 +1603,73 @@ async def build_cleanup(target: str = "", gc: bool = False) -> str:
                                 f"or drive ({', '.join(mounts) or 'none'})")
     else:
         stores = []
+    drive_stores = [k for k in remote.created_stores() if "remote-store=" in k]
     report: dict[str, str] = {}
     for s in stores or [""]:
         report.update(await asyncio.to_thread(remote.cleanup, s))
     if not target or target in hosts:
         report.update(await asyncio.to_thread(shells.cleanup, target))
     if gc:
-        for s in [x for x in stores if not x.startswith("ssh-ng://")] or (
-            [] if target else [storage.store_dir(m) for m in mounts]
-        ):
+        gc_stores: list[str] = []
+        if target in hosts or target.startswith("ssh-ng://"):
+            gc_stores = [s for s in stores if "remote-store=" in s]
+        elif target.rstrip("/") in mounts:
+            s = storage.store_dir(target.rstrip("/"))
             if Path(s).is_dir():
-                report[f"gc {s}"] = await asyncio.to_thread(remote.gc, s)
+                gc_stores = [s]
+        elif not target:
+            gc_stores = [storage.store_dir(m) for m in mounts if Path(storage.store_dir(m)).is_dir()]
+            gc_stores += drive_stores
+        for s in gc_stores:
+            report[f"gc {s}"] = await asyncio.to_thread(remote.gc, s)
     return json.dumps(report or {"note": "no builds recorded"}, indent=2)
 
 
 @mcp.tool()
-async def storage_pick(need_gb: float, io: str = "random", project: str = "") -> str:
+async def storage_pick(need_gb: float, io: str = "random", project: str = "", host: str = "local") -> str:
     """Pick a secondary drive for heavy files (datasets, VM images, archives, caches).
 
     Keeps storage.reserveGb free on every drive. Prefers the asked I/O kind, then
-    storage.priority, then the most room; `matches_io` is false when only the
+    storage.priority, then the most room; matches_io is false when only the
     other kind had room.
     Keep one task on one drive.
+
+    A host uses its own storage settings, read from /etc/icedos/mcp-settings.json
+    there. Without that file it has no drives and only its host store counts.
 
     Args:
         need_gb: Space the task needs, in GB.
         io: "random" (SSD: builds, compiling, databases, VM disks, node_modules)
             or "sequential" (HDD: archives, datasets, backups, parked files).
-        project: When set, creates and returns `<mount>/ai-dump/<project>/`.
+        project: When set, creates and returns <mount>/ai-dump/<project>/.
+        host: "local" or a configured build host, whose own drives are used.
     """
+    hosts = remote.settings()["hosts"]
+    if host != "local" and host not in hosts:
+        return _err("bad_args", f"unknown host {host!r}; configured hosts: {', '.join(hosts) or 'none'}")
     try:
-        return json.dumps(storage.pick(need_gb, io, project), indent=2)
+        return json.dumps(await asyncio.to_thread(storage.pick, need_gb, io, project, host), indent=2)
     except (ValueError, OSError) as e:
         return _err("storage", str(e))
 
 
 @mcp.tool()
-async def storage_status() -> str:
+async def storage_status(host: str = "local") -> str:
     """Free space on / and every configured drive, and the size in MB of each ai-dump entry.
 
-    Use it to find leftover dumps and drive stores to clean up.
+    Use it to find leftover dumps and drive stores to clean up. A host uses its own
+    storage settings, read from /etc/icedos/mcp-settings.json there.
+
+    Args:
+        host: "local" or a configured build host, whose own drives are used.
     """
-    return json.dumps(await storage.status(), indent=2)
+    hosts = remote.settings()["hosts"]
+    if host != "local" and host not in hosts:
+        return _err("bad_args", f"unknown host {host!r}; configured hosts: {', '.join(hosts) or 'none'}")
+    try:
+        return json.dumps(await storage.status(host), indent=2)
+    except (ValueError, OSError) as e:
+        return _err("storage", str(e))
 
 
 @mcp.tool()

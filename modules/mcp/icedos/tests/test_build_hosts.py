@@ -8,6 +8,7 @@ Fake `ssh`, `sh` probes and `nix` binaries stand in for real hosts.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import shutil
@@ -16,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from icedos_mcp import build_hosts, server, settings, storage
+from icedos_mcp import build_hosts, cli, pkgs_host, server, settings, storage
 
 PROBE_OUT = """{cores}
 {load} 1.00 1.00 1/500 1234
@@ -63,12 +64,26 @@ class _EnvMixin:
         self._mount = mock.patch.object(storage.os.path, "ismount", lambda p: p in self.free)
         self._space.start()
         self._mount.start()
+        def fake_host_state(h, cfg):
+            rows = [storage._row(m, io, float(cfg["reserveGb"]), (self.free.get(m, 100.0), 1000.0, False)) for m, io in cfg["drives"].items()]
+            root_row = storage._row("/nix/store", "root", float(cfg["reserveGb"]), (self.free.get("/", 100.0), 1000.0, False))
+            root_row.pop("nix_store", None)
+            return rows, root_row
+        self._host_state = mock.patch.object(storage, "_host_state", fake_host_state)
+        self._host_state.start()
+        self._mkdir = mock.patch.object(storage, "_mkdir", lambda h, p: Path(p).mkdir(parents=True, exist_ok=True))
+        self._mkdir.start()
+        for h in ["a@h1", "b@h2"]:
+            settings._hosts[h] = copy.deepcopy(settings.DEFAULTS["storage"])
         build_hosts._created.clear()
 
     def tearDown(self) -> None:
+        self._mkdir.stop()
+        self._host_state.stop()
         self._space.stop()
         self._mount.stop()
         self._env.stop()
+        settings._hosts.clear()
         build_hosts._created.clear()
         self._tmp.cleanup()
 
@@ -76,6 +91,7 @@ class _EnvMixin:
         data = json.loads(self.cfg.read_text())
         data[section].update(values)
         self.cfg.write_text(json.dumps(data))
+        pass
 
     def fake(self, name: str, body: str) -> None:
         exe = self.bin / name
@@ -157,6 +173,21 @@ class ChooseTest(_EnvMixin, unittest.TestCase):
     def test_need_gb_adds_to_minimum(self) -> None:
         r = self.choose(probe(load=20), probe(gb=30), None, need_gb=15)
         self.assertEqual(r["pick"], "local")
+
+    def test_disk_full_qualifies_when_random_drive_has_room(self) -> None:
+        settings._hosts["a@h1"] = {
+            "drives": {self.ssd: "random"},
+            "priority": [self.ssd],
+            "reserveGb": 30,
+            "largeGb": 5,
+        }
+        r = self.choose(probe(load=20), probe(cores=16, load=1.0, gb=5), None)
+        h1 = next(x for x in r["hosts"] if x["host"] == "a@h1")
+        self.assertTrue(h1["ok"])
+        self.assertEqual(h1["drive"], self.ssd)
+        self.assertEqual(r["drive"], self.ssd)
+        self.assertIn("qualifies", h1["reason"])
+        self.assertEqual(r["pick"], "a@h1")
 
     def test_running_builds_spread_hosts(self) -> None:
         with build_hosts.lease("a@h1"):
@@ -345,6 +376,113 @@ esac
         self.assertIn(f"store delete --store {store} {out}", argv.read_text())
 
 
+
+    def test_matching_stores_does_not_prefix_match_similar_hosts(self) -> None:
+        build_hosts._created["ssh-ng://a@b"] = {"/nix/store/111"}
+        build_hosts._created["ssh-ng://a@b?remote-store=%2Fmnt%2Fssd"] = {"/nix/store/222"}
+        build_hosts._created["ssh-ng://a@bc"] = {"/nix/store/333"}
+        build_hosts._created["ssh-ng://a@bc?remote-store=%2Fmnt%2Fssd"] = {"/nix/store/444"}
+
+        matches1 = build_hosts.matching_stores("a@b")
+        matches2 = build_hosts.matching_stores("ssh-ng://a@b")
+        self.assertEqual(matches1, matches2)
+        self.assertEqual(set(matches1), {"ssh-ng://a@b", "ssh-ng://a@b?remote-store=%2Fmnt%2Fssd"})
+        self.assertNotIn("ssh-ng://a@bc", matches1)
+        self.assertNotIn("ssh-ng://a@bc?remote-store=%2Fmnt%2Fssd", matches1)
+
+    def test_nix_build_auto_drive_fallback_picks_drive_store(self) -> None:
+        settings._hosts["a@h1"] = {
+            "drives": {self.ssd: "random"},
+            "priority": [self.ssd],
+            "reserveGb": 30,
+            "largeGb": 5,
+        }
+        self.fake("ssh", f'''case "$*" in *ls*) exit 1 ;; *) cat << "EOF"\n{probe(cores=16, load=1.0, gb=5)}\nEOF\n;; esac''')
+        self.free["/"] = 5.0
+        drv, out = "/nix/store/aaa-x.drv", "/nix/store/bbb-x"
+        argv = self.tmp / "argv"
+        self.fake("nix", f"""
+echo "$*" >> {argv}
+case "$1" in
+  build) echo '[{{"drvPath":"{drv}","outputs":{{"out":"{out}"}}}}]' ;;
+  path-info) echo '{{"{drv}":null,"{out}":{{"references":[]}}}}' ;;
+esac
+""")
+        store = storage.store_dir(self.ssd)
+        orig_probe = build_hosts._probe
+        async def fake_probe(cmd, timeout=15):
+            if cmd[0] == "sh":
+                return {"reachable": True, **build_hosts.parse_probe(probe(load=20))}
+            return await orig_probe(cmd, timeout=timeout)
+        with mock.patch.object(build_hosts, "_probe", fake_probe):
+            res = asyncio.run(server.nix_build(mock.MagicMock(), drv, host="auto", store="auto", need_gb=0))
+        store_url = build_hosts.remote_store("a@h1", store)
+        self.assertIn(f"build --eval-store auto --store {store_url}", argv.read_text())
+        self.assertIn(f"output: {out} (on a@h1: {store}{out})", res)
+        self.assertIn(f"ssh a@h1 nix shell --store {store} {out} (binary unknown)", res)
+
+    def test_nix_build_host_drive_store_output_formatting(self) -> None:
+        settings._hosts["a@h1"] = {
+            "drives": {self.ssd: "random"},
+            "priority": [self.ssd],
+            "reserveGb": 30,
+            "largeGb": 5,
+        }
+        drv, out = "/nix/store/111-hello.drv", "/nix/store/222-hello"
+        self.fake("nix", f"""
+if [ "$1" = eval ]; then
+  echo "/nix/store/222-hello/bin/hello"
+  exit 0
+fi
+case "$1" in
+  build) echo '[{{"drvPath":"{drv}","outputs":{{"out":"{out}"}}}}]' ;;
+  path-info) echo '{{"{drv}":null,"{out}":{{"references":[]}}}}' ;;
+esac
+""")
+        store = storage.store_dir(self.ssd)
+        res = asyncio.run(server.nix_build(mock.MagicMock(), drv, host="a@h1", store=self.ssd))
+        self.assertIn(f"output: {out} (on a@h1: {store}{out})", res)
+        self.assertIn(f"ssh a@h1 nix shell --store {store} {out}", res)
+        self.assertNotIn("on disk:", res)
+
+    def test_build_cleanup_gc_includes_host_drive_stores(self) -> None:
+        store = storage.store_dir(self.ssd)
+        store_url = build_hosts.remote_store("a@h1", store)
+        build_hosts._created[store_url] = {"/nix/store/xxx"}
+        argv = self.tmp / "calls.log"
+        self.fake("nix", f"""
+echo "$*" >> {argv}
+if [ "$1" = store ] && [ "$2" = gc ]; then
+  echo "finding garbage collector roots..."
+  echo "deleted 10 store paths"
+fi
+""")
+        report = json.loads(asyncio.run(server.build_cleanup("a@h1", gc=True)))
+        self.assertIn(f"gc {store_url}", report)
+        self.assertIn(f"store gc --store {store_url}", argv.read_text())
+
+
+    def test_build_cleanup_empty_target_gc_runs_on_fully_deleted_host_drive_stores(self) -> None:
+        store = storage.store_dir(self.ssd)
+        store_url = build_hosts.remote_store("a@h1", store)
+        build_hosts._created[store_url] = {"/nix/store/xxx"}
+        argv = self.tmp / "calls.log"
+        self.fake("nix", f"""
+echo "$*" >> {argv}
+if [ "$1" = path-info ]; then
+  echo '{{"/nix/store/xxx":{{"references":[]}}}}'
+elif [ "$1" = store ] && [ "$2" = delete ]; then
+  exit 0
+elif [ "$1" = store ] && [ "$2" = gc ]; then
+  echo "finding garbage collector roots..."
+  echo "deleted 10 store paths"
+fi
+""")
+        report = json.loads(asyncio.run(server.build_cleanup("", gc=True)))
+        self.assertIn(f"gc {store_url}", report)
+        self.assertIn(f"store gc --store {store_url}", argv.read_text())
+
+
 class StorageTest(_EnvMixin, unittest.TestCase):
     def test_pick_prefers_io_then_room(self) -> None:
         r = storage.pick(20, "random", "proj")
@@ -421,9 +559,30 @@ fi
         self.assertIn(f"gc {store}", report)
         self.assertIn(f"store gc --store {store}", argv.read_text())
 
-    def test_store_needs_local_build(self) -> None:
-        out = json.loads(asyncio.run(server.nix_build(mock.MagicMock(), "x#y", host="a@h1", store=self.ssd)))
-        self.assertEqual(out["error"]["kind"], "bad_args")
+    def test_remote_store_uses_host_drive(self) -> None:
+        settings._hosts["a@h1"] = {
+            "drives": {self.ssd: "random"},
+            "priority": [self.ssd],
+            "reserveGb": 30,
+            "largeGb": 5,
+        }
+        calls = self.tmp / "calls"
+        self.fake("nix", f'''
+echo "$*" >> {calls}
+case "$1" in
+  path-info) echo '{{"/nix/store/y":{{"references":[]}}}}' ;;
+  *) echo '[{{"drvPath":"/nix/store/x.drv","outputs":{{"out":"/nix/store/y"}}}}]' ;;
+esac
+''')
+        out = asyncio.run(server.nix_build(mock.MagicMock(), "x#y", host="a@h1", store=self.ssd))
+        store_path = storage.store_dir(self.ssd)
+        self.assertIn(f"Build succeeded on a@h1 in {store_path}", out)
+        store_url = build_hosts.remote_store("a@h1", store_path)
+        self.assertIn(f"--store {store_url}", calls.read_text())
+        self.assertIn(store_url, build_hosts._created)
+        report = json.loads(asyncio.run(server.build_cleanup("a@h1")))
+        self.assertEqual(report[store_url], "deleted 1 paths")
+        self.assertNotIn(store_url, build_hosts._created)
 
     def test_cleanup_rejects_unknown_target(self) -> None:
         out = json.loads(asyncio.run(server.build_cleanup("/mnt/games")))
@@ -445,6 +604,183 @@ class RebuildFlagTest(unittest.TestCase):
         self.assertIn("nix_build", err or "")
         self.assertIsNone(server._check_rebuild_flags(["--builder", "a@h1"], in_sandbox=False))
 
+
+
+
+class PkgsHostTest(_EnvMixin, unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.log = self.tmp / "calls.log"
+
+    def test_run_package_bad_host(self) -> None:
+        out = json.loads(asyncio.run(server.run_package("hello", host="evil@h9")))
+        self.assertEqual(out["error"]["kind"], "bad_args")
+
+    def test_pkgs_build_missing_file(self) -> None:
+        out = json.loads(asyncio.run(server.pkgs_build("/nonexistent/package.nix", host="a@h1")))
+        self.assertEqual(out["error"]["kind"], "bad_args")
+
+    def test_run_package_on_host(self) -> None:
+        self.fake("nix-instantiate", 'echo "/nix/store/111-hello.drv"')
+        self.fake("nix", f"""
+if [ "$1" = eval ]; then
+  echo "/nix/store/222-hello/bin/hello"
+  exit 0
+fi
+echo "$*" >> {self.log}
+echo "copying path '/nix/store/222-hello' from 'x'..." >&2
+echo '[{{"drvPath":"/nix/store/111-hello.drv","outputs":{{"out":"/nix/store/222-hello"}}}}] '
+""")
+        self.fake("ssh", f"""
+echo "ssh $*" >> {self.log}
+echo "hello (GNU Hello) 2.12"
+""")
+        out = asyncio.run(server.run_package("hello", args=["--version"], host="a@h1"))
+        self.assertIn("hello (GNU Hello) 2.12", out)
+        self.assertIn("/nix/store/222-hello", build_hosts._created["ssh-ng://a@h1"])
+        log = self.log.read_text()
+        self.assertIn("--store ssh-ng://a@h1", log)
+        self.assertIn("/nix/store/222-hello/bin/hello --version", log)
+
+    def test_run_package_on_drive_store(self) -> None:
+        settings._hosts["a@h1"] = {
+            "drives": {self.ssd: "random"},
+            "priority": [self.ssd, "host"],
+            "reserveGb": 30,
+            "largeGb": 5,
+        }
+        self.fake("nix-instantiate", 'echo "/nix/store/111-hello.drv"')
+        self.fake("nix", f"""
+if [ "$1" = eval ]; then
+  echo "/nix/store/222-hello/bin/hello"
+  exit 0
+fi
+echo "$*" >> {self.log}
+echo '[{{"drvPath":"/nix/store/111-hello.drv","outputs":{{"out":"/nix/store/222-hello"}}}}] '
+""")
+        self.fake("ssh", f"""
+echo "ssh $*" >> {self.log}
+echo "hello 2.12 on drive"
+""")
+        out = asyncio.run(server.run_package("hello", args=["--version"], host="a@h1"))
+        self.assertIn("hello 2.12 on drive", out)
+        store_path = f"{self.ssd}/ai-dump/nix-store"
+        store_url = build_hosts.remote_store("a@h1", store_path)
+        self.assertIn("/nix/store/222-hello", build_hosts._created[store_url])
+        log = self.log.read_text()
+        self.assertIn(f"--store {store_url}", log)
+        self.assertIn(f"nix shell --store {store_path} /nix/store/222-hello --command hello --version", log)
+
+    def test_pkgs_build_on_host(self) -> None:
+        pkg = self.tmp / "package.nix"
+        pkg.write_text("{}: {}")
+        self.fake("nix-instantiate", 'echo "/nix/store/333-pkg.drv"')
+        self.fake("nix", f"""
+echo "$*" >> {self.log}
+echo "copying path '/nix/store/444-pkg' from 'x'..." >&2
+echo '[{{"drvPath":"/nix/store/333-pkg.drv","outputs":{{"out":"/nix/store/444-pkg"}}}}] '
+""")
+        self.fake("ssh", f"""
+echo "ssh $*" >> {self.log}
+echo "my-tool output ok"
+""")
+        with mock.patch("icedos_mcp.pkgs_host.find_build_pkg_expr", lambda: "/dummy/build-pkg.nix"):
+            out = asyncio.run(server.pkgs_build(str(pkg), host="a@h1"))
+            self.assertEqual(out, "/nix/store/444-pkg")
+            self.assertIn("/nix/store/444-pkg", build_hosts._created["ssh-ng://a@h1"])
+
+            out_run = asyncio.run(server.pkgs_build(str(pkg), run="my-tool", args=["--flag"], host="a@h1"))
+            self.assertIn("my-tool output ok", out_run)
+            self.assertIn("/nix/store/444-pkg/bin/my-tool --flag", self.log.read_text())
+
+    def test_pkgs_build_on_drive_store(self) -> None:
+        settings._hosts["a@h1"] = {
+            "drives": {self.ssd: "random"},
+            "priority": [self.ssd, "host"],
+            "reserveGb": 30,
+            "largeGb": 5,
+        }
+        pkg = self.tmp / "package.nix"
+        pkg.write_text("{}: {}")
+        self.fake("nix-instantiate", 'echo "/nix/store/333-pkg.drv"')
+        self.fake("nix", f"""
+echo "$*" >> {self.log}
+echo '[{{"drvPath":"/nix/store/333-pkg.drv","outputs":{{"out":"/nix/store/444-pkg"}}}}] '
+""")
+        self.fake("ssh", f"""
+echo "ssh $*" >> {self.log}
+echo "my-tool on drive ok"
+""")
+        with mock.patch("icedos_mcp.pkgs_host.find_build_pkg_expr", lambda: "/dummy/build-pkg.nix"):
+            out = asyncio.run(server.pkgs_build(str(pkg), run="my-tool", args=["--flag"], host="a@h1"))
+            self.assertIn("my-tool on drive ok", out)
+            store_path = f"{self.ssd}/ai-dump/nix-store"
+            store_url = build_hosts.remote_store("a@h1", store_path)
+            self.assertIn("/nix/store/444-pkg", build_hosts._created[store_url])
+            log = self.log.read_text()
+            self.assertIn(f"--store {store_url}", log)
+            self.assertIn(f"nix shell --store {store_path} /nix/store/444-pkg --command my-tool --flag", log)
+
+    def test_cleanup_removes_host_pkgs(self) -> None:
+        build_hosts.record("ssh-ng://a@h1", "", ["/nix/store/999-pkg"])
+        self.fake("nix", """
+if [ "$1" = path-info ]; then
+  echo '{"/nix/store/999-pkg":{"references":[]}}'
+fi
+if [ "$1" = store ] && [ "$2" = delete ]; then
+  exit 0
+fi
+""")
+        report = json.loads(asyncio.run(server.build_cleanup("a@h1")))
+        self.assertIn("ssh-ng://a@h1", report)
+        self.assertNotIn("/nix/store/999-pkg", build_hosts._created.get("ssh-ng://a@h1", set()))
+
+    def test_run_package_bad_attr(self) -> None:
+        out = json.loads(asyncio.run(server.run_package("invalid;attr", host="a@h1")))
+        self.assertEqual(out["error"]["kind"], "bad_args")
+
+    def test_pkgs_build_bad_run(self) -> None:
+        pkg = self.tmp / "package.nix"
+        pkg.write_text("{}: {}")
+        out1 = json.loads(asyncio.run(server.pkgs_build(str(pkg), run="../bad", host="a@h1")))
+        self.assertEqual(out1["error"]["kind"], "bad_args")
+        out2 = json.loads(asyncio.run(server.pkgs_build(str(pkg), run="sub/bad", host="a@h1")))
+        self.assertEqual(out2["error"]["kind"], "bad_args")
+
+    def test_host_already_had_output_cleanup_leaves_it(self) -> None:
+        self.fake("nix-instantiate", 'echo "/nix/store/111-hello.drv"')
+        self.fake("nix", f"""
+if [ "$1" = eval ]; then
+  echo "/nix/store/222-hello/bin/hello"
+  exit 0
+fi
+echo "$*" >> {self.log}
+echo '[{{"drvPath":"/nix/store/111-hello.drv","outputs":{{"out":"/nix/store/222-hello"}}}}] '
+""")
+        self.fake("ssh", f"""
+echo "ssh $*" >> {self.log}
+echo "hello (GNU Hello) 2.12"
+""")
+        out = asyncio.run(server.run_package("hello", args=["--version"], host="a@h1"))
+        self.assertIn("hello (GNU Hello) 2.12", out)
+        self.assertNotIn("/nix/store/222-hello", build_hosts._created.get("ssh-ng://a@h1", set()))
+        report = json.loads(asyncio.run(server.build_cleanup("a@h1")))
+        self.assertNotIn("/nix/store/222-hello", build_hosts._created.get("ssh-ng://a@h1", set()))
+
+    def test_remote_timeout_kills_process_group(self) -> None:
+        killed: list[tuple[str, str]] = []
+
+        async def fake_kill(host: str, work: str) -> None:
+            killed.append((host, work))
+
+        with mock.patch("icedos_mcp.shell_run.kill_remote", fake_kill):
+            with mock.patch("icedos_mcp.pkgs_host.run_streaming", side_effect=cli.CommandTimeout("timed out")):
+                with self.assertRaises(cli.CommandTimeout):
+                    asyncio.run(pkgs_host.run_remote_binary("a@h1", ["/bin/true"], timeout=1))
+
+        self.assertEqual(len(killed), 1)
+        self.assertEqual(killed[0][0], "a@h1")
+        self.assertIn("run-", killed[0][1])
 
 if __name__ == "__main__":
     unittest.main()

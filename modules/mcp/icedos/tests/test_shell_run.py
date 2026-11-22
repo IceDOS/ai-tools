@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from icedos_mcp import build_hosts, server
+from icedos_mcp import build_hosts, server, settings
 from icedos_mcp import shell_run as shells
 
 from .test_build_hosts import _EnvMixin
@@ -146,6 +146,82 @@ class RemoteRunTest(_ShellMixin, unittest.TestCase):
         self.assertIn('"timeout"', out)
         self.assertIn("kill -TERM", self.log.read_text())
 
+
+
+
+class HostDriveRunTest(_ShellMixin, unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.configure("build", remoteExec=True)
+        self.host_ssd = str(self.tmp / "host-ssd")
+        Path(self.host_ssd).mkdir()
+        self.host_cfg = self.tmp / "host-mcp-settings.json"
+        self.host_cfg.write_text(json.dumps({
+            "storage": {"drives": {self.host_ssd: "random"}, "priority": [self.host_ssd], "reserveGb": 1}
+        }))
+        self.fake("mountpoint", "exit 0")
+        self._host_file = mock.patch.object(settings, "HOST_FILE", str(self.host_cfg))
+        self._host_file.start()
+        settings._hosts.clear()
+
+    def tearDown(self) -> None:
+        settings._hosts.clear()
+        self._host_file.stop()
+        super().tearDown()
+
+    def test_drive_picked(self) -> None:
+        work = Path(self.host_ssd) / "ai-dump" / f"shell-run-{shells.key(str(self.src))}"
+        out = self.run_tool(command="pwd; echo ok", host="a@h1")
+        self.assertIn(f"succeeded on a@h1, in {work}/src", out)
+        self.assertTrue((work / "src").is_dir())
+        self.assertIn(str(work), shells._dirs.get("a@h1", set()))
+
+    def test_no_drives_falls_back_to_tmp(self) -> None:
+        self.host_cfg.write_text(json.dumps({"storage": {"drives": {}, "priority": []}}))
+        settings._hosts.clear()
+        work = self.root / shells.key(str(self.src))
+        out = self.run_tool(command="pwd; echo ok", host="a@h1")
+        self.assertIn(f"succeeded on a@h1, in {work}/src", out)
+        self.assertTrue((work / "src").is_dir())
+        self.assertIn(str(work), shells._dirs.get("a@h1", set()))
+
+    def test_repeat_run_reuses_same_dir(self) -> None:
+        work = Path(self.host_ssd) / "ai-dump" / f"shell-run-{shells.key(str(self.src))}"
+        self.run_tool(command="mkdir -p target && touch target/cache_marker", host="a@h1")
+        self.assertTrue((work / "src" / "target" / "cache_marker").exists())
+        out = self.run_tool(command="ls target", host="a@h1")
+        self.assertIn(f"succeeded on a@h1, in {work}/src", out)
+        self.assertIn("cache_marker", out)
+
+    def test_restart_reuses_existing_dir_after_server_restart(self) -> None:
+        ssd2 = str(self.tmp / "host-ssd2")
+        Path(ssd2).mkdir()
+        work1 = Path(self.host_ssd) / "ai-dump" / f"shell-run-{shells.key(str(self.src))}"
+        self.run_tool(command="mkdir -p target && touch target/saved", host="a@h1")
+        self.assertTrue((work1 / "src" / "target" / "saved").exists())
+        shells._dirs.clear()
+        self.host_cfg.write_text(json.dumps({
+            "storage": {
+                "drives": {self.host_ssd: "random", ssd2: "random"},
+                "priority": [ssd2, self.host_ssd],
+                "reserveGb": 1,
+            }
+        }))
+        settings._hosts.clear()
+        out = self.run_tool(command="ls target", host="a@h1")
+        self.assertIn(f"succeeded on a@h1, in {work1}/src", out)
+        self.assertIn("saved", out)
+        work2 = Path(ssd2) / "ai-dump" / f"shell-run-{shells.key(str(self.src))}"
+        self.assertFalse(work2.exists())
+
+    def test_cleanup_removes_drive_work_dir(self) -> None:
+        work = Path(self.host_ssd) / "ai-dump" / f"shell-run-{shells.key(str(self.src))}"
+        self.run_tool(command="echo hi", host="a@h1")
+        self.assertTrue(work.exists())
+        out = json.loads(asyncio.run(server.build_cleanup("a@h1")))
+        self.assertEqual(out["a@h1 work dirs"], "deleted 1")
+        self.assertFalse(work.exists())
+        self.assertEqual(shells._dirs.get("a@h1", set()), set())
 
 if __name__ == "__main__":
     unittest.main()

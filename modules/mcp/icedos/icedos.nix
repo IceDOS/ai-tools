@@ -122,6 +122,10 @@ in
           settingsFile = pkgs.writeText "icedos-mcp-settings.json" (
             builtins.toJSON { inherit (config.icedos.ai-tools.mcp-server) build storage; }
           );
+
+          hostSettingsFile = pkgs.writeText "icedos-mcp-host-settings.json" (
+            builtins.toJSON { inherit (config.icedos.ai-tools.mcp-server) storage; }
+          );
         in
         {
           # Skills for this module, added to the shared icedos.ai-tools.skills.pool.
@@ -130,6 +134,9 @@ in
           ) config.icedos.ai-tools.mcp-server.skills;
 
           environment.systemPackages = [ icedosMcpServer ];
+
+          # Host storage settings for this PC to read over ssh (no build.hosts).
+          environment.etc."icedos/mcp-settings.json".source = hostSettingsFile;
 
           icedos.ai-tools.mcp-servers.icedos = {
             command = "icedos";

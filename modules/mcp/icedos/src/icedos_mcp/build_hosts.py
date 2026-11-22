@@ -15,6 +15,7 @@ from urllib.parse import quote, unquote
 
 from . import sandbox as sandboxes
 from . import settings as settings_file
+from . import storage
 from .cli import run_streaming
 
 SSH_OPTS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=5")
@@ -148,7 +149,14 @@ async def choose(need_gb: float = 0) -> dict[str, Any]:
         elif p["load1"] >= p["cores"] / 2:
             row.update(ok=False, reason=f"load {p['load1']} not below half of {p['cores']} cores")
         elif p["free_gb"] < min_free:
-            row.update(ok=False, reason=f"{p['free_gb']} GB free, needs {min_free:g}")
+            drive = None
+            with contextlib.suppress(ValueError, OSError):
+                d_rows = await asyncio.to_thread(storage.drives, h)
+                drive = next((d for d in d_rows if d.get("mounted") and d.get("io") == "random" and d.get("room_gb", 0) >= need_gb), None)
+            if drive:
+                row.update(ok=True, drive=drive["mount"], reason=f"{p['free_gb']} GB free on /nix/store, but drive {drive['mount']} has room; qualifies")
+            else:
+                row.update(ok=False, reason=f"{p['free_gb']} GB free, needs {min_free:g}")
         else:
             row.update(ok=True, reason="qualifies")
         rows.append(row)
@@ -168,15 +176,22 @@ async def choose(need_gb: float = 0) -> dict[str, Any]:
         pick, why = ok[0]["host"], f"this PC is busy ({local['reason']})"
     else:
         pick, why = ok[0]["host"], "host comes before this PC in build.hosts"
-    return {"pick": pick, "why": why, "order": cfg["order"], "local": local, "hosts": rows}
+    drive = ok[0].get("drive", "") if ok else ""
+    return {"pick": pick, "why": why, "drive": drive, "order": cfg["order"], "local": local, "hosts": rows}
 
 
 # Paths this server's builds added, keyed by store URL (ssh-ng://host or a drive store dir).
 _created: dict[str, set[str]] = {}
 
 
-def remote_store(host: str) -> str:
-    return f"ssh-ng://{host}"
+def created_stores() -> list[str]:
+    return list(_created)
+
+
+def remote_store(host: str, store: str = "") -> str:
+    if not store:
+        return f"ssh-ng://{host}"
+    return f"ssh-ng://{host}?remote-store={quote(store, safe='')}"
 
 
 def _outputs_of(drvs: list[str]) -> set[str]:
@@ -243,9 +258,9 @@ def drv_installable(installable: str) -> str:
 
 
 def build_argv(installable: str, host: str, store: str = "") -> list[str]:
-    """`store` is a drive store dir for a local build; a remote host brings its own store."""
+    """`store` is a drive store dir for local or remote builds; "" uses host store."""
     if host != "local":
-        flags = ["--eval-store", "auto", "--store", remote_store(host)]
+        flags = ["--eval-store", "auto", "--store", remote_store(host, store)]
     else:
         flags = ["--store", store] if store else []
         # A store path lives in the host store, which a drive store cannot see.
@@ -316,6 +331,21 @@ def _delete(store: str, paths: set[str], timeout: float) -> tuple[set[str], set[
     return set(), alive, ""
 
 
+def matching_stores(target: str) -> list[str]:
+    """Store keys in _created matching target: exact key, or for a host target, exact key plus keys starting with 'ssh-ng://<host>?'"""
+    if not target:
+        return list(_created)
+    h = target.removeprefix("ssh-ng://")
+    exact = f"ssh-ng://{h}"
+    prefix = f"{exact}?"
+    matched = [k for k in _created if k == exact or k.startswith(prefix)]
+    if matched:
+        return matched
+    if "@" in h or not target.startswith("/"):
+        return [exact]
+    return [target]
+
+
 def cleanup(store: str = "", timeout: float = 300) -> dict[str, str]:
     """Delete what this server's builds added to store (every store when empty). Live paths stay.
 
@@ -323,7 +353,7 @@ def cleanup(store: str = "", timeout: float = 300) -> dict[str, str]:
     referrer still exists counts as alive.
     """
     report: dict[str, str] = {}
-    for h in [store] if store else list(_created):
+    for h in matching_stores(store):
         if not _created.get(h):
             report[h] = "nothing to delete"
             continue
