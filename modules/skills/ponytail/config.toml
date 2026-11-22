@@ -3,7 +3,7 @@
 owner = "dietrichgebert"
 repo = "ponytail"
 rev = "main"
-hash = "sha256-PhPtZbeX2wBp19GtWRy+fV93+fFYZe5S487eXPDl/us="
+hash = "sha256-5m6JW3U6EMYUg4YVLh7nRRTWGY3shrFQ0wK0bediVFc="
 
 # Skills read from the repo's skills/ dir into the shared icedos.ai-tools.skills.pool.
 skills = [
