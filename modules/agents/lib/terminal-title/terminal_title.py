@@ -205,18 +205,27 @@ def state_file(tty, suffix):
     return STATE_DIR / (tty.strip("/").replace("/", "-") + suffix)
 
 
-def load(tty):
+def _owner(state):
+    return state.get("agent", state.get("agy"))
+
+
+def load(tty, owner=None):
     try:
         data = json.loads(state_file(tty, ".json").read_text())
     except (OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    # pts numbers get reused: state left by a previous owner of this tty must not leak in.
+    if owner is not None and _owner(data) not in (None, owner):
+        return {}
+    return data
 
 
 def save(tty, state):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     path = state_file(tty, ".json")
-    merged = load(tty)
+    merged = load(tty, owner=_owner(state))
     merged.update(state)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(merged))
@@ -266,6 +275,8 @@ def tick(tty):
             break
         now, working = time.monotonic(), state.get("working")
         if state != seen or now >= refresh_at:
+            if state != seen:
+                shown = None  # a hook may have cleared the title (SessionEnd on /resume), so send it again
             text, seen, refresh_at = title_text(state, fallback=state.get("fallback")), state, now + TITLE_REFRESH
         timer = tool_timer(state.get("conversation"))
         children = children_text(counter, state)
@@ -292,7 +303,7 @@ def update(payload, start_ticker=True):
     agy = find_agy()
     if agy is None or not (tty := tty_path(agy)):
         return None
-    cur = load(tty)
+    cur = load(tty, owner=agy)
     working = payload.get("agent_state") == "working"
     was_working = bool(cur.get("working"))
     turn_start = cur.get("turn_start")

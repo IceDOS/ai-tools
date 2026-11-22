@@ -185,6 +185,18 @@ class TestTerminalTitle(unittest.TestCase):
         titles = self.tick({"agy": 7, "name": "Task", "working": False})
         self.assertEqual(titles, ["\u25b3 Task", ""])
 
+    def test_tick_redraws_the_same_title_after_a_state_change(self):
+        # Claude's SessionEnd on /resume clears the title, then SessionStart saves new state with the same text.
+        terminal_title.save(self.tty, {"agy": 7, "name": "Task", "working": False})
+        fake = FakeTime()
+        fake.sleep = lambda _s: terminal_title.save(self.tty, {"conversation": "c2"})
+        self.patch("time", fake)
+        titles = mock.Mock()
+        self.patch("emit", titles)
+        self.patch("proc_stat", mock.Mock(side_effect=[("agy", 1)] * 3 + [None] * 5))
+        terminal_title.tick(self.tty)
+        self.assertEqual([c.args[1] for c in titles.call_args_list], ["\u25b3 Task", "\u25b3 Task", ""])
+
     def test_tick_keeps_the_timer_while_agy_reports_idle_mid_call(self):
         # agy redraws its status line only on state changes and reports "idle" while a long
         # tool still runs, so the record, not the agent state, decides the timer and glyph.

@@ -170,6 +170,24 @@ class TestClaudeHookHandler(unittest.TestCase):
         state = terminal_title.load("/dev/pts/99")
         self.assertEqual(state.get("working"), False)
 
+    @patch("terminal_title.start_ticker")
+    @patch("terminal_title.tty_path", return_value="/dev/pts/99")
+    @patch("terminal_title.find_agent", return_value=12345)
+    def test_state_of_a_previous_tty_owner_is_dropped(self, mock_find, mock_tty, mock_start):
+        terminal_title.save("/dev/pts/99", {"agent": 999, "agy": 999, "name": "Old", "comm_names": ["x"]})
+        with patch("sys.stdin", io.StringIO(json.dumps({"session_id": "sess-2"}))):
+            tool_timer.main(["SessionStart"])
+        state = terminal_title.load("/dev/pts/99")
+        self.assertEqual(state.get("agent"), 12345)
+        self.assertIsNone(state.get("name"))
+        # agy writes only "agy"; a dead Claude's "agent" key would make the ticker quit at once.
+        terminal_title.save("/dev/pts/99", {"agy": 4242, "working": False})
+        state = terminal_title.load("/dev/pts/99")
+        self.assertNotIn("agent", state)
+        self.assertEqual(state.get("agy"), 4242)
+        terminal_title.save("/dev/pts/99", {"working": True})
+        self.assertEqual(terminal_title.load("/dev/pts/99").get("agy"), 4242)
+
     @patch("terminal_title.emit_to_tty")
     @patch("terminal_title.tty_path", return_value="/dev/pts/99")
     @patch("terminal_title.find_agent", return_value=12345)

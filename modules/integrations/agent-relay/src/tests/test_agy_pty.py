@@ -115,6 +115,15 @@ class InputStateTest(unittest.TestCase):
         s.agy(b"tick")
         self.assertLess(s.silent_ms(), 100)
 
+    def test_mode_toggles_alone_keep_agy_silent(self):
+        s = agy_pty.InputState()
+        s.last_output -= 5
+        s.agy(b"\x1b[?2004h\x1b[>4;2m")
+        self.assertGreaterEqual(s.silent_ms(), 4900)
+        self.assertTrue(s.bracketed)
+        s.agy(b"\x1b[?2004htick")
+        self.assertLess(s.silent_ms(), 100)
+
     def test_bracketed_mode_follows_agy_output_split_across_reads(self):
         s = agy_pty.InputState()
         s.agy(b"hello \x1b[?20")

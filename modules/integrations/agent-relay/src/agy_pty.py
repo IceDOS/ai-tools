@@ -3,6 +3,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import signal
 import socket
@@ -18,6 +19,8 @@ ENTER_DELAY = 0.15
 # Measured: a working turn redraws ~14x/s and its longest gap was 2.45s, so 2s only means "no chunk
 # this instant"; callers that need real certainty read silentMs and pick their own threshold.
 IDLE_SECONDS = 2.0
+# Under TERM=tmux-256color agy re-sends "\e[?2004h\e[>4;2m" every 2.1s while idle; mode toggles alone are not activity.
+MODES_ONLY = re.compile(rb"(?:\x1b\[[?>][0-9;]*[hlm])+")
 
 
 class InputState:
@@ -57,7 +60,8 @@ class InputState:
                 self.draft += 1
 
     def agy(self, data: bytes) -> None:
-        self.last_output = time.monotonic()
+        if not MODES_ONLY.fullmatch(data):
+            self.last_output = time.monotonic()
         buf = self._tail + data
         on, off = buf.rfind(BP_ON), buf.rfind(BP_OFF)
         if on != -1 or off != -1:

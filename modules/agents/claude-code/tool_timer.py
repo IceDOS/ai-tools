@@ -69,7 +69,7 @@ def main(argv):
     tty = terminal_title.tty_path(agent_pid) if agent_pid else None
 
     if tty:
-        cur = terminal_title.load(tty)
+        cur = terminal_title.load(tty, owner=agent_pid)
         name = session_title or cur.get("name")
         t_path = transcript_path or cur.get("transcript_path")
         meta = {
