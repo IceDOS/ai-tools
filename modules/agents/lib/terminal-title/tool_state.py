@@ -9,7 +9,6 @@ STATE_DIR = Path(
     os.environ.get("AGENT_TITLE_STATE_DIR")
     or (Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/antigravity-title-{os.getuid()}") / "antigravity-title")
 )
-MAX_AGE = 900.0
 
 
 def path(conversation):
@@ -17,7 +16,7 @@ def path(conversation):
     return STATE_DIR / "tools" / f"{name}.json" if name else None
 
 
-def save(conversation, tool, call_id=None, step=None, started=None):
+def save(conversation, tool, call_id=None, step=None, started=None, pid=None):
     record_path = path(conversation)
     if record_path is None or not tool:
         return
@@ -27,6 +26,8 @@ def save(conversation, tool, call_id=None, step=None, started=None):
         record["id"] = call_id
     if step is not None:
         record["step"] = step
+    if pid is not None:
+        record["pid"] = pid
     # Atomic replace to prevent partial reads by the ticker.
     tmp = record_path.with_name(f"{record_path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(record))
@@ -44,7 +45,14 @@ def load(conversation):
     if not isinstance(record, dict) or not record.get("tool"):
         return None
     started = record.get("start_ts")
-    if not isinstance(started, (int, float)) or time.time() - started > MAX_AGE:
+    if not isinstance(started, (int, float)):
+        return None
+    pid = record.get("pid")
+    if isinstance(pid, int) and not pid_alive(pid):
+        try:
+            record_path.unlink()
+        except OSError:
+            pass
         return None
     return record
 

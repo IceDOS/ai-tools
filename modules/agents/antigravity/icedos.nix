@@ -232,6 +232,8 @@
                         hooks = toolTimerHook "PostToolUse";
                       }
                     ];
+                    # Stop takes handlers directly; a matcher wrapper makes agy reject the whole plugin.
+                    Stop = toolTimerHook "Stop";
                   };
                 }
               )

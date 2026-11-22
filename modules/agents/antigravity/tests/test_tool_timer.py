@@ -4,6 +4,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib" / "
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -55,7 +56,7 @@ class TestToolTimerHook(unittest.TestCase):
         self.assertEqual(json.loads(out), {"decision": "ask"})
         self.assertEqual(
             tool_state.load("c1"),
-            {"tool": "run_command", "start_ts": BASE, "id": "toolu_01", "step": 19},
+            {"tool": "run_command", "start_ts": BASE, "id": "toolu_01", "step": 19, "pid": os.getppid()},
         )
 
     def test_an_mcp_call_is_named_server_slash_tool(self):
@@ -83,11 +84,20 @@ class TestToolTimerHook(unittest.TestCase):
         self.run_hook("PostToolUse", {"conversationId": "c1", "toolCall": {"id": "toolu_01"}})
         self.assertIsNotNone(tool_state.load("c1"))
 
-    def test_stop_keeps_the_call(self):
-        """Stop fires while an async tool still runs, so it must not clear the record."""
+    def test_stop_with_fully_idle_clears_the_call(self):
         self.start()
-        self.run_hook("Stop", {"conversationId": "c1"})
+        self.run_hook("Stop", {"conversationId": "c1", "fullyIdle": True})
+        self.assertIsNone(tool_state.load("c1"))
+
+    def test_stop_while_async_tool_runs_keeps_the_call(self):
+        self.start()
+        self.run_hook("Stop", {"conversationId": "c1", "fullyIdle": False, "terminationReason": "NO_TOOL_CALL"})
         self.assertIsNotNone(tool_state.load("c1"))
+
+    def test_stop_on_user_canceled_clears_the_call(self):
+        self.start()
+        self.run_hook("Stop", {"conversationId": "c1", "fullyIdle": False, "terminationReason": "USER_CANCELED"})
+        self.assertIsNone(tool_state.load("c1"))
 
     def test_a_payload_that_is_not_json_still_answers(self):
         code, out = self.run_hook("PreToolUse", "not json")
@@ -112,9 +122,18 @@ class TestToolTimerHook(unittest.TestCase):
         self.run_hook("PreToolUse", {"toolCall": {"name": "run_command"}})
         self.assertFalse(self.state_dir.joinpath("tools").exists())
 
-    def test_the_safety_net_outlasts_the_longest_tool_timeout(self):
-        self.assertGreater(tool_state.MAX_AGE, 600)
-        tool_state.save("c1", "run_command", started=BASE - 599)
+    def test_a_record_started_20_plus_min_ago_still_loads(self):
+        tool_state.save("c1", "run_command", started=BASE - 1300)
+        self.assertIsNotNone(tool_state.load("c1"))
+
+    def test_dead_pid_drops_the_record(self):
+        tool_state.save("c1", "run_command", started=BASE, pid=42)
+        with mock.patch("tool_state.pid_alive", return_value=False):
+            self.assertIsNone(tool_state.load("c1"))
+        self.assertFalse(self.state_dir.joinpath("tools/c1.json").exists())
+
+    def test_alive_pid_keeps_the_record(self):
+        tool_state.save("c1", "run_command", started=BASE, pid=os.getpid())
         self.assertIsNotNone(tool_state.load("c1"))
 
 

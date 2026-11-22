@@ -3,6 +3,7 @@
 agy runs hook commands synchronously, so this stays a single JSON read and one file write.
 """
 import json
+import os
 import sys
 
 from pathlib import Path
@@ -54,13 +55,20 @@ def main(argv):
     conversation = payload.get("conversationId")
     call = payload.get("toolCall") or {}
     if event == "PreToolUse":
-        tool_state.save(conversation, tool_name(call), call.get("id"), payload.get("stepIdx"))
+        tool_state.save(
+            conversation,
+            tool_name(call),
+            call.get("id"),
+            payload.get("stepIdx"),
+            pid=os.getppid(),
+        )
         print(json.dumps(DECISION))
         return 0
     if event == "PostToolUse":
-        # The only event that says the tool finished. Stop and the invocation events also fire
-        # while an async tool still runs, so they must not clear the record.
+        # PostToolUse clears by id; Stop clears when fully idle or on user cancel.
         tool_state.clear(conversation, call.get("id"))
+    if event == "Stop" and (payload.get("fullyIdle") is True or payload.get("terminationReason") == "USER_CANCELED"):
+        tool_state.clear(conversation)
     print("{}")
     return 0
 

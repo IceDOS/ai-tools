@@ -438,12 +438,10 @@ class TestToolTimer(unittest.TestCase):
             record, {"tool": "run_command", "start_ts": BASE - 5.0, "id": "toolu_01", "step": 19}
         )
 
-    def test_tool_state_ages_out_and_clears(self):
+    def test_tool_state_clears(self):
         tool_state.save("c1", "run_command", started=BASE - 1.0)
         self.assertIsNotNone(tool_state.load("c1"))
         tool_state.clear("c1")
-        self.assertIsNone(tool_state.load("c1"))
-        tool_state.save("c1", "run_command", started=BASE - tool_state.MAX_AGE - 1)
         self.assertIsNone(tool_state.load("c1"))
 
     def test_clear_keeps_a_newer_call(self):
