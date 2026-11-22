@@ -15,13 +15,14 @@ ENV = "ICEDOS_MCP_SETTINGS"
 HOST_FILE = "/etc/icedos/mcp-settings.json"
 SSH_OPTS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=5")
 
-DEFAULTS: dict[str, dict[str, Any]] = {
+DEFAULTS: dict[str, Any] = {
     "build": {"hosts": [], "minFreeGb": 20, "pressureLimit": 20, "remoteExec": False},
     "storage": {"drives": {}, "priority": [], "reserveGb": 30, "largeGb": 5, "maxFlakeCopyMb": 200},
+    "desktopControlTools": [],
 }
 
 
-def load() -> dict[str, dict[str, Any]]:
+def load() -> dict[str, Any]:
     """Defaults overlaid with the file at ICEDOS_MCP_SETTINGS; a missing or broken file keeps the defaults."""
     cfg = copy.deepcopy(DEFAULTS)
     path = os.environ.get(ENV)
@@ -30,6 +31,8 @@ def load() -> dict[str, dict[str, Any]]:
             for k, v in json.loads(Path(path).read_text()).items():
                 if k in cfg and isinstance(v, dict):
                     cfg[k].update(v)
+                elif k in cfg and isinstance(v, list):
+                    cfg[k] = list(v)
     if "drives" in cfg["storage"] and isinstance(cfg["storage"]["drives"], dict):
         cfg["storage"]["drives"] = {m.rstrip("/") or "/": io for m, io in cfg["storage"]["drives"].items()}
     if "priority" in cfg["storage"] and isinstance(cfg["storage"]["priority"], list):

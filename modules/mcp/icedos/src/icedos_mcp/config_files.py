@@ -25,9 +25,10 @@ import tomllib
 
 from .config_path import APPEND
 
-# Sandbox-only file holding repo overrideUrls set through the MCP. Core loads it
-# like any config file; edits never target it and sandbox diffs leave it out.
+# Server-managed sandbox files: repo overrides and VM test config.
 OVERRIDES_FILE = ".icedos-mcp-overrides.toml"
+VM_FILE = ".icedos-mcp-vm.toml"
+SERVER_FILES = (OVERRIDES_FILE, VM_FILE)
 
 DEFAULT_ORDER = 1000
 
@@ -115,7 +116,7 @@ def list_config_files(root: Path) -> list[Path]:
 
 def writable_files(root: Path) -> list[Path]:
     """list_config_files() minus the server-owned overrides file."""
-    return [f for f in list_config_files(root) if f.name != OVERRIDES_FILE]
+    return [f for f in list_config_files(root) if f.name not in SERVER_FILES]
 
 
 def _strip_loader_keys(d: dict[str, Any]) -> dict[str, Any]:
@@ -170,8 +171,8 @@ def resolve_file(root: Path, file: str | None) -> Path:
         return p
     if p.suffix != ".toml":
         raise ValueError(f"file '{file}' must be a .toml file")
-    if p.name == OVERRIDES_FILE:
-        raise ValueError(f"'{file}' is managed by sandbox_override_repo")
+    if p.name in SERVER_FILES:
+        raise ValueError(f"'{file}' is managed by the server")
     allowed = {(root_r / d).resolve() for d in extra_config_dirs(root)}
     if not any(p.is_relative_to(a) and p != a for a in allowed):
         raise ValueError(

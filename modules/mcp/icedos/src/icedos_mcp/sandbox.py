@@ -91,11 +91,11 @@ def resolve(name: str) -> Path:
 def _ignore_top(root: Path):
     def ignore(directory: str, names: list[str]) -> set[str]:
         if Path(directory) != root:
-            return {n for n in names if n == config_files.OVERRIDES_FILE}
+            return {n for n in names if n in config_files.SERVER_FILES}
         return {
             n
             for n in names
-            if n in _SKIP_TOP or n == "result" or n.startswith("result-") or n == config_files.OVERRIDES_FILE
+            if n in _SKIP_TOP or n == "result" or n.startswith("result-") or n in config_files.SERVER_FILES
         }
 
     return ignore
@@ -275,7 +275,7 @@ def _tracked_files(root: Path) -> set[str]:
         if here == root:
             dirnames[:] = [d for d in dirnames if d not in _SKIP_TOP]
             filenames = [f for f in filenames if f != "result" and not f.startswith("result-")]
-        filenames = [f for f in filenames if f != config_files.OVERRIDES_FILE]
+        filenames = [f for f in filenames if f not in config_files.SERVER_FILES]
         out.update(str((here / f).relative_to(root)) for f in filenames)
     return out
 

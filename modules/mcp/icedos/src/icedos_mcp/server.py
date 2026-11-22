@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import signal
 import sys
@@ -30,7 +31,8 @@ from . import config_files
 from . import leftovers
 from . import sandbox as sandboxes
 from . import shell_run as shells
-from . import storage
+from . import settings
+from . import storage, vm
 from .cli import (
     _ANSI_RE,
     _NOM_FRAME_RE,
@@ -1000,6 +1002,172 @@ async def sandbox_override_repo(repo: str, path: str = "") -> str:
         return _err("sandbox", str(e))
 
 
+
+@mcp.tool()
+@_sandboxable
+async def vm_build(
+    ctx: Context,
+    ssh: bool = True,
+    user: str = "",
+    gl: bool = False,
+    logs: bool = False,
+) -> str:
+    """Build a test VM from the sandbox config and return a tool-agnostic launch command.
+
+    Prepares a throwaway VM: allocates secondary SSD disk space via storage_pick,
+    generates an ephemeral SSH keypair and console password, binds a free host SSH port
+    to 127.0.0.1, injects VM-only autologin and credentials into the sandbox, and runs
+    `icedos rebuild --build-vm`.
+
+    Returns a tool-agnostic launch command (argv, env with NIX_DISK_IMAGE and QEMU_OPTS
+    holding -pidfile, cwd), credentials, and a hint for the configured desktop-control tool.
+    Does not launch the VM. Clean up with vm_cleanup.
+
+    Args:
+        ssh: Configure OpenSSH inside the VM with port forwarding (default true).
+        user: Normal user in icedos.users for autologin/ssh; default picks the first normal user.
+        gl: Enable host GPU acceleration via Virgl (-display gtk,gl=on -device virtio-vga-gl).
+        logs: Return the full build log instead of the condensed summary on error.
+    """
+    sandbox_root = root_override()
+    if sandbox_root is None:
+        return _err("sandbox", "VM builds only run in a sandbox; pass sandbox= or use sandbox mode")
+
+    sandbox_name = sandbox_root.name
+    try:
+        merged = config_files.merged_config(sandbox_root)
+        target_user = vm.pick_vm_user(merged, user)
+        need_gb, needs_disk_injection = vm.check_disk_size(merged)
+        pick_res = await asyncio.to_thread(storage.pick, need_gb, "random", f"vm-{sandbox_name}", "local")
+        disk_dir = Path(pick_res["dir"])
+        disk_image = disk_dir / "icedos.qcow2"
+        pidfile = disk_dir / "qemu.pid"
+
+        if ssh:
+            ssh_port = vm.find_free_port()
+            key_path = disk_dir / "id_ed25519"
+            ssh_pubkey = vm.generate_ssh_keypair(key_path, f"vm-{sandbox_name}")
+        else:
+            ssh_port = None
+            key_path = None
+            ssh_pubkey = ""
+        password = secrets.token_urlsafe(12)
+
+        toml_text = vm.generate_vm_toml(
+            user=target_user,
+            password=password,
+            ssh_pubkey=ssh_pubkey,
+            ssh_port=ssh_port,
+            needs_disk_size=needs_disk_injection,
+            ssh=ssh,
+        )
+        vm.write_vm_override(sandbox_root, toml_text)
+        vm.record_vm(sandbox_name, disk_dir, sandbox_root, ssh_port=ssh_port, user=target_user)
+    except Exception as e:
+        return _err("vm_build", str(e))
+
+    extra = ["--build-vm"]
+    if logs:
+        extra.append("--logs")
+
+    try:
+        rc, stdout, stderr = await cli_rebuild(*extra, timeout=3600, on_line=_progress_reporter(ctx))
+    except TimeoutError as e:
+        detail = str(e)
+        if partial := getattr(e, "partial_output", ""):
+            detail += f"\n--- last output ---\n{cli_summarize_log_tail(partial)}"
+        return _err("timeout", detail)
+
+    if rc != 0:
+        out = (stdout + (f"\n--- stderr ---\n{stderr}" if stderr else "")) if logs else cli_summarize_build(stdout, stderr)
+        return (
+            f"VM build failed (exit {rc}):\n{out}\n\n"
+            f"Injected VM config was kept at {config_files.VM_FILE} so you can fix config and retry. "
+            f"Run vm_cleanup to delete it and the disk directory ({disk_dir})."
+        )
+
+    built = _built_path(stdout)
+    build_dir = None
+    for m in reversed(_BUILD_DIR_RE.findall(_ANSI_RE.sub("", stdout))):
+        build_dir = Path(m)
+        break
+
+    if build_dir:
+        vm.record_vm(sandbox_name, disk_dir, sandbox_root, build_dir=build_dir, ssh_port=ssh_port, user=target_user)
+
+    try:
+        script_path = vm.find_vm_script(build_dir, Path(built) if built else None)
+    except Exception as e:
+        return _err("vm_build", str(e))
+
+    qemu_opts = f"-pidfile {pidfile}"
+    if gl:
+        qemu_opts = f"{qemu_opts} {vm.VIRGL_QEMU_OPTS}"
+    if vm.DEFAULT_QEMU_OPTS:
+        qemu_opts = f"{qemu_opts} {vm.DEFAULT_QEMU_OPTS}"
+
+    launch_env = {
+        "NIX_DISK_IMAGE": str(disk_image),
+        "QEMU_OPTS": qemu_opts.strip(),
+    }
+    launch = {
+        "argv": [str(script_path)],
+        "env": launch_env,
+        "cwd": str(disk_dir),
+    }
+
+    desktop_tools = settings.load().get("desktopControlTools", [])
+    hint = vm.format_hint(
+        desktop_tools,
+        str(script_path),
+        launch_env,
+        ssh_port,
+        str(key_path) if key_path else None,
+        target_user,
+    )
+
+    result = {
+        "sandbox": sandbox_name,
+        "script": str(script_path),
+        "launch": launch,
+        "disk_dir": str(disk_dir),
+        "disk_image": str(disk_image),
+        "ssh": {
+            "port": ssh_port,
+            "user": target_user,
+            "key": str(key_path),
+        } if ssh and key_path else None,
+        "login": {
+            "user": target_user,
+            "password": password,
+        },
+        "hint": hint,
+    }
+    if not pick_res.get("matches_io", True):
+        result["warning"] = f"Disk placed on sequential drive {pick_res.get('mount')} because SSDs are below reserve"
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+@_sandboxable
+async def vm_cleanup() -> str:
+    """Stop a test VM process and clean up its disk image, result link, and injected configs.
+
+    Kills the QEMU process (if running) only after verifying its PID file and cmdline,
+    deletes the VM disk directory from secondary storage, unlinks any build GC roots,
+    and removes the sandbox's injected VM override file. Idempotent.
+    """
+    sandbox_root = root_override()
+    if sandbox_root is None:
+        return _err("sandbox", "VM cleanup only runs in a sandbox; pass sandbox= or use sandbox mode")
+    sandbox_name = sandbox_root.name
+    try:
+        report = await asyncio.to_thread(vm.cleanup_vm, sandbox_name, sandbox_root)
+        return json.dumps(report, indent=2)
+    except Exception as e:
+        return _err("vm_cleanup", str(e))
+
+
 # --- SYSTEM OPERATIONS ---
 
 @mcp.tool()
@@ -1609,6 +1777,8 @@ async def build_cleanup(target: str = "", gc: bool = False) -> str:
         report.update(await asyncio.to_thread(remote.cleanup, s))
     if not target or target in hosts:
         report.update(await asyncio.to_thread(shells.cleanup, target))
+    if not target:
+        report.update(await asyncio.to_thread(vm.cleanup_all))
     if gc:
         gc_stores: list[str] = []
         if target in hosts or target.startswith("ssh-ng://"):
@@ -1983,7 +2153,7 @@ async def list_config_files() -> str:
             {
                 "file": p.relative_to(root).as_posix(),
                 "loaded": p in loaded,
-                "managed_by_server": p.name == config_files.OVERRIDES_FILE,
+                "managed_by_server": p.name in config_files.SERVER_FILES,
             }
             for p in config_files.config_tomls_in_load_order(root)
         ]
@@ -2245,6 +2415,8 @@ def _drop_unused_default() -> None:
 def _on_exit() -> None:
     _drop_unused_default()
     try:
+        for where, msg in vm.cleanup_all().items():
+            logger.info("vm cleanup %s: %s", where, msg)
         for store, msg in remote.cleanup(timeout=60).items():
             logger.info("build cleanup %s: %s", store, msg)
         for where, msg in shells.cleanup(timeout=30).items():

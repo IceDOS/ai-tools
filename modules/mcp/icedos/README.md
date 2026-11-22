@@ -37,7 +37,7 @@ blank line between blocks to match the hand-written style.
 
 ## Capabilities
 
-### Tools (50)
+### Tools (52)
 
 **Config**. The user config is the merged set of `config.toml` and every `*.toml` under `icedos.system.extraConfigs` (default `configs/`), recursively and sorted by top-level `order` (default 1000, lower first) then path, like core. Hidden `configs/.*.toml` load too but are gitignored. A file opts out with top-level `enable = false`. The server merges like core: tables recurse, arrays concatenate, and a scalar set in two files is an error. A broken TOML file is an error, not skipped. Every `extraConfigs` entry must be a relative dir inside the config root.
 
@@ -74,6 +74,8 @@ The config, module, query, repo explorer, state, input, `nix_eval`, `format_nix`
 - `sandbox_inputs_diff`: flake input revs that differ between the sandbox and the live config, in `flake.lock` and `.state/flake.lock`
 - `sandbox_delete`: removes a sandbox and its snapshot; `gc` frees the store paths its builds made
 - `sandbox_override_repo`: builds a configured repo from a local checkout inside a sandbox (`repo` url or name, `path` to the checkout, empty `path` clears). The server writes the override to `configs/.icedos-mcp-overrides.toml` in the sandbox, one entry per exact url the config uses for that repo. Core loads that file like any other config, while `sandbox_diff` and every config write skip it. An `overrideUrl` for the same url in a file that loads earlier still wins, and the result warns about it. Repos the config does not list are refused
+- `vm_build`: builds a test VM from the sandbox config and returns a tool-agnostic launch command (`script`, `launch` with argv/env/cwd, `ssh` port and ephemeral key, `login` credentials, `disk_dir`, and next-step `hint` for configured desktop tools). Allocates secondary SSD disk space via `storage_pick`, injects VM-only credentials and autologin into `configs/.icedos-mcp-vm.toml` (skipped by `sandbox_diff`), and runs `icedos rebuild --build-vm`. `user` picks the login user (default: first normal user), `ssh` enables port forwarding on 127.0.0.1, `gl` enables Virgl GPU acceleration. Does not launch the VM
+- `vm_cleanup`: stops a test VM (kills its QEMU PID only after verifying cmdline and disk dir), deletes its disk directory and qcow2 from secondary storage, unlinks build GC roots, and removes `.icedos-mcp-vm.toml`. Idempotent
 
 **System**
 - `rebuild`: `icedos rebuild --build`, which never switches; inside a sandbox it adds `--dir <sandbox>`, which skips hooks and generation records. Flags go through an allowlist: `--dry`/`-n`/`--dry-run`, `--genflake-only`, `--update*`, `--update-repos-select`, `--update-state-inputs`, `--update-except`, `--lock-only` (no `--build` added), `--build-vm`, `--github-token-path`. Live mode only: `--boot`, `--builder` (nh copies the result back, which needs a trusted remote user), `--target`, `--update-hooks`, `--nh-args`, `--build-args`. Refused: `--dir`, `--run-vm`, `--ask`, `--github-token`. `logs=true` returns the full log with `--show-trace`. A successful build reports its store path. The build dir under `/tmp/icedos-build-*` keeps a `result` GC root until `icedos gc`

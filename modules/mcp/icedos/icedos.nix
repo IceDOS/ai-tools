@@ -119,8 +119,16 @@ in
             mainProgram = "icedos-mcp-server";
           };
 
+          knownDesktopServers = [ "kwin-mcp" ];
+          enabledDesktopServers = builtins.filter (
+            s: builtins.hasAttr s (config.icedos.ai-tools.mcp-servers or { })
+          ) knownDesktopServers;
+
           settingsFile = pkgs.writeText "icedos-mcp-settings.json" (
-            builtins.toJSON { inherit (config.icedos.ai-tools.mcp-server) build storage; }
+            builtins.toJSON {
+              inherit (config.icedos.ai-tools.mcp-server) build storage;
+              desktopControlTools = enabledDesktopServers;
+            }
           );
 
           hostSettingsFile = pkgs.writeText "icedos-mcp-host-settings.json" (

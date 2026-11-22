@@ -86,6 +86,15 @@ The server keeps overrides in its own file inside the sandbox. They never touch 
 
 Edit the checkout with your normal file tools, then `rebuild` the sandbox. The build copies the checkout into the store, so later edits need another `rebuild`. Use `nix_eval` to confirm the result, e.g. `config.icedos.ai-tools.skills.pool`.
 
+## Testing a config in a VM
+
+To test a sandbox config in a throwaway VM without touching the live system, call `vm_build`:
+
+- It allocates a disk on a secondary SSD via `storage_pick`, injects VM login/SSH config (and `build-vm.diskSize` when unset/0), and builds the VM runner.
+- Pass `gl=true` to enable host GPU acceleration.
+- Launch the VM with `launch.argv`, `launch.env` and `launch.cwd` using whichever desktop-control tool the `hint` names, or any way the system provides. Connect via SSH with the returned key and port.
+- When done, call `vm_cleanup`. It kills the running QEMU process, deletes the disk directory and build GC root, and removes the injected VM config.
+
 ## Builds off the root disk
 
 For any heavy Nix build outside `rebuild` (compilers, kernels, browsers, VM tests, anything over a few minutes), use `nix_build` with `host="auto"` and a `need_gb` estimate. Small builds and evaluations use `host="local"`.
@@ -141,6 +150,7 @@ Sandbox-aware, all take `sandbox=`:
 - Modules: `enable_module`, `disable_module`, `list_modules`, `search_modules`, `get_module`, `module_graph`. Repos match by url with refs ignored. `disable_module` refuses a module that is only on as a dependency.
 - Options: `search_options`, `get_option` (returns a TOML snippet to paste).
 - Build and state: `rebuild`, `get_diff`, `list_inputs`, `list_state_files`, `read_state_file`.
+- VM: `vm_build` (allocates disk, injects credentials, builds runner), `vm_cleanup` (stops QEMU, removes disk, root, and injected config).
 - `nix_eval` evaluates an expression with `config`, `options`, `declared`, `pkgs`, `lib`, `icedosLib` and `inputs` bound, like `icedos repl`. Prefer the index tools for single options.
 - Repo source, local checkout or override first, else GitHub: `explore_repo`, `list_repo_tree`, `read_repo_file`. Use these instead of reading module files by hand.
 - `format_nix` runs nixfmt on a file or dir (`icedos nixf`). In sandbox mode it refuses paths in the live config.
@@ -167,4 +177,5 @@ Failed calls return JSON like `{"ok": false, "error": {"kind": "...", "message":
 - `validation`: the flake eval failed. The change was reverted.
 - `live_only`: the call needs live mode. Report it to the user rather than working around it.
 - `not_found`: the path is not declared. Retry `get_config_value` with `resolved=true` for defaults.
+- `vm_build`: VM preparation, user lookup, or script discovery failed.
 """
