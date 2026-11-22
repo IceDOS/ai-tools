@@ -2,8 +2,6 @@
 # GitHub source of the superpowers skills (obra/superpowers).
 owner = "obra"
 repo = "superpowers"
-rev = "main"
-hash = "sha256-rP5YsyGuPd9YSW/Fj3aukrq1bLuV+nwwQMK4JaZQgkI="
 
 # Skills read from the repo's skills/ dir into the shared icedos.ai-tools.skills.pool.
 skills = [

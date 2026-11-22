@@ -3,13 +3,14 @@
 let
   inherit (icedosLib) mkNonEmptyStrOption mkStrListOption;
   defaults = (lib.importTOML ./config.toml).icedos.ai-tools.skills.superpowers;
+  source = lib.importJSON ./source.json;
 in
 {
   options.icedos.ai-tools.skills.superpowers = {
     owner = mkNonEmptyStrOption { default = defaults.owner; };
     repo = mkNonEmptyStrOption { default = defaults.repo; };
-    rev = mkNonEmptyStrOption { default = defaults.rev; };
-    hash = mkNonEmptyStrOption { default = defaults.hash; };
+    rev = mkNonEmptyStrOption { default = source.rev; };
+    hash = mkNonEmptyStrOption { default = source.hash; };
     skills = mkStrListOption { default = defaults.skills; };
     autoload = mkStrListOption { default = defaults.autoload; };
   };
@@ -65,13 +66,13 @@ in
               uVal != null && uVal ? marketplaces && checkVal uVal.marketplaces
             ) otherDefs;
 
+          marketplace = lib.importJSON ./marketplace.json;
           officialMarketplace = {
             name = "claude-plugins-official";
             source = "fetchFromGitHub";
             owner = "anthropics";
             repo = "claude-plugins-official";
-            rev = "main";
-            hash = "sha256-g4ilhs1xWRX7Z3m8TaXbPG9gG/pXMuY18dbejmXF99A=";
+            inherit (marketplace) rev hash;
           };
         in
         {

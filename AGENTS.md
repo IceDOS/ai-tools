@@ -58,10 +58,11 @@ shared Nix helpers) and `integrations` (agent-launch, ai-accounts, alimit, code-
   for `claude-code`, `antigravity`, `opencode`, and `pi-agent`. Agent options feed into them
   (`claude-code.{skills,excludeSkills}`, `antigravity.{skills,excludeSkills}`,
   `opencode.{skills,excludeSkills}`, `pi-agent.skills.{extra-builtin,exclude}`). Skill modules
-  (`superpowers`, `ponytail`, `unslop`) set `per-agent.<agent>.{globalPlugins,excludeSkills}` under
-  `lib.mkIf (has ...)` inside one `per-agent` attrset (a shallow `//` across agents drops all but the
-  last). `icedos.ai-tools.agent-views.<agent>.skills` (internal read-only) exposes the computed list of
-  view skill names for agent modules to link per entry.
+  (`superpowers`, `ponytail`, `unslop`) pin upstream release tags in `source.json` via an
+  `update.sh` updater, and set `per-agent.<agent>.{globalPlugins,excludeSkills}` under
+  `lib.mkIf (has ...)` inside one `per-agent` attrset (a shallow `//` across agents drops all but
+  the last). `icedos.ai-tools.agent-views.<agent>.skills` (internal read-only) exposes the computed
+  list of view skill names for agent modules to link per entry.
 - State ledgers: pi-agent tracks `.icedos-settings-paths.json` (drops removed settings paths) and
   `.icedos-packages.json` (uninstalls removed npm packages `--offline`); opencode tracks
   `.icedos-npm-plugins.json` (prunes removed npm cache dirs). User-added entries are never touched,

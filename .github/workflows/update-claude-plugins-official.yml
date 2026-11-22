@@ -1,0 +1,18 @@
+name: Update claude-plugins-official
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: claude-plugins-official
+      paths: modules/skills/superpowers/marketplace.json
+      command: nix-shell modules/skills/superpowers/update-marketplace.sh
+      version-file: modules/skills/superpowers/marketplace.json
+    secrets: inherit

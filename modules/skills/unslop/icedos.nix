@@ -3,13 +3,14 @@
 let
   inherit (icedosLib) mkNonEmptyStrOption mkStrListOption;
   defaults = (lib.importTOML ./config.toml).icedos.ai-tools.skills.unslop;
+  source = lib.importJSON ./source.json;
 in
 {
   options.icedos.ai-tools.skills.unslop = {
     owner = mkNonEmptyStrOption { default = defaults.owner; };
     repo = mkNonEmptyStrOption { default = defaults.repo; };
-    rev = mkNonEmptyStrOption { default = defaults.rev; };
-    hash = mkNonEmptyStrOption { default = defaults.hash; };
+    rev = mkNonEmptyStrOption { default = source.rev; };
+    hash = mkNonEmptyStrOption { default = source.hash; };
     skills = mkStrListOption { default = defaults.skills; };
     autoload = mkStrListOption { default = defaults.autoload; };
   };

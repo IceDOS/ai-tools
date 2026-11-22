@@ -1,0 +1,18 @@
+name: Update unslop
+
+# Thin wrapper: all logic lives in .github/workflows/module-update.yml.
+on:
+  schedule:
+    - cron: "20 5 * * *"
+  workflow_dispatch:
+permissions: {}
+
+jobs:
+  update:
+    uses: ./.github/workflows/module-update.yml
+    with:
+      module: unslop
+      paths: modules/skills/unslop
+      command: nix-shell modules/skills/unslop/update.sh
+      version-file: modules/skills/unslop/source.json
+    secrets: inherit
