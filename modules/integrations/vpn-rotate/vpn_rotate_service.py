@@ -25,6 +25,8 @@ PROBE_TIMEOUT_S = 6
 START_TIMEOUT_S = 20
 SETTLE_S = 2
 TICK_S = 30
+# How long a rotation or switch to direct waits for open requests through the tunnel before cutting them.
+DRAIN_CAP_S = 60
 DEFAULT_FLAGGED_TTL_S = 900
 DEFAULT_UNREACHABLE_TTL_S = 300
 HOUR_S = 3600
@@ -473,6 +475,83 @@ def wait_for_port(port, timeout=START_TIMEOUT_S, host="127.0.0.1"):
     return False
 
 
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class Relay:
+    """The proxy port clients use: forwards each connection to wireproxy, holds new ones while rotating."""
+
+    def __init__(self, port, log=None):
+        self.port = int(port)
+        self.url = f"http://127.0.0.1:{self.port}"
+        self.log = log or noop
+        self.backend = None
+        # Forwarded connections; clients open one per request, so this counts requests in flight.
+        self.active = 0
+        self.loop = None
+        self.server = None
+        self._open = None
+
+    async def start(self):
+        self.loop = asyncio.get_running_loop()
+        self._open = asyncio.Event()
+        self._open.set()
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", self.port)
+
+    async def stop(self):
+        if self.server:
+            self.server.close()
+
+    def _call(self, fn):
+        if self.loop:
+            self.loop.call_soon_threadsafe(fn)
+
+    def hold(self):
+        self._call(self._open.clear)
+
+    def release(self, backend_port):
+        """Points new and held connections at backend_port; None closes them."""
+        self.backend = backend_port
+        self._call(self._open.set)
+
+    def drain(self, cap_s=DRAIN_CAP_S, now=time.monotonic, sleep=time.sleep):
+        """Blocks the calling thread until no request is in flight or cap_s passes."""
+        start = now()
+        while self.active and now() - start < cap_s:
+            sleep(0.2)
+        if self.active:
+            self.log(f"{self.active} request(s) still open after {cap_s}s; cutting them")
+
+    @staticmethod
+    async def _pipe(reader, writer):
+        try:
+            while data := await reader.read(65536):
+                writer.write(data)
+                await writer.drain()
+        except (OSError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            writer.close()
+
+    async def _handle(self, reader, writer):
+        await self._open.wait()
+        port = self.backend
+        try:
+            if port is None:
+                return writer.close()
+            b_reader, b_writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            return writer.close()
+        self.active += 1
+        try:
+            await asyncio.gather(self._pipe(reader, b_writer), self._pipe(b_reader, writer))
+        finally:
+            self.active -= 1
+
+
 class WireproxyTunnel:
     """wireproxy child that exposes a local HTTP proxy into a Proton WireGuard server."""
 
@@ -487,7 +566,8 @@ class WireproxyTunnel:
         start_timeout_s=START_TIMEOUT_S,
     ):
         self.bin = wireproxy_bin
-        self.port = int(port)
+        # 0 picks a free port on every start.
+        self.base_port = self.port = int(port)
         self.log = log or noop
         base = runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
         self.dir = Path(base) / "vpn-rotate"
@@ -560,6 +640,8 @@ class WireproxyTunnel:
             self.log("tunnel start without a wireguard key")
             return False
         self._secret = private_key
+        if self.base_port == 0:
+            self.port = free_port()
         conf = self._write_config(private_key, server)
         if conf is None:
             return False
@@ -923,8 +1005,10 @@ class VpnRotator:
         get_ip=None,
         bun_bin=None,
         rng=None,
+        relay=None,
     ):
         self.rng = rng or random.Random()
+        self.relay = relay
         self.cancel_event = threading.Event()
         self.state = state
         self.log = log or noop
@@ -965,7 +1049,6 @@ class VpnRotator:
         return {"connected": False, "server": None, "country": None, "location": None, "egressIp": self.state.current_ip}
 
     def _to_direct(self, clear_host_flag=False, bump_rotation=False):
-        self.tunnel.stop()
         self.state.mode = "direct"
         self.state.proxy = None
         self.state.current_server = None
@@ -975,6 +1058,13 @@ class VpnRotator:
             self.state.host_ip_flagged_until = None
         if bump_rotation:
             self.state.last_rotation_time = self.now()
+        # New requests read the direct state and skip the tunnel; open ones finish before it stops.
+        self.state.save()
+        if self.relay:
+            self.relay.drain()
+        self.tunnel.stop()
+        if self.relay:
+            self.relay.release(None)
         host_ip = self._get_ip(False)
         if host_ip:
             self.state.current_ip = host_ip
@@ -1034,7 +1124,12 @@ class VpnRotator:
             # The status row names the model while rotating and after a failed rotation.
             self.state.rotation_model = req.get("model") or None
             self.state.save()
-            return self._rotate(req)
+            try:
+                return self._rotate(req)
+            finally:
+                if self.relay:
+                    live = self.state.mode == "tunnel" and self.tunnel.running()
+                    self.relay.release(self.tunnel.port if live else None)
 
     def cancel(self):
         """Stops a running rotation before its next server; returns whether one was running."""
@@ -1106,6 +1201,7 @@ class VpnRotator:
         tried_countries = set()
         private_key = None
         success = None
+        held = False
 
         def fail(entry, ip, country, reason, message, ttl=None):
             # A dead server is dead for every model; a 429 only counts against this model.
@@ -1155,6 +1251,12 @@ class VpnRotator:
                 if not private_key:
                     self.log("no wireguard key from the proton session")
                     return {"ok": False, "reason": "no wireguard key"}
+
+            if self.relay and not held:
+                # One tunnel only: new requests wait in the relay and open ones finish before it restarts.
+                self.relay.hold()
+                self.relay.drain()
+                held = True
 
             if not self.tunnel.start(private_key, entry):
                 fail(entry, None, target, "unreachable", f"tunnel to {entry['server']} ({target}) failed to start")
@@ -1209,7 +1311,7 @@ class VpnRotator:
             self.state.current_location = success["location"]
             self.state.current_ip = success["egressIp"]
             self.state.mode = "tunnel"
-            self.state.proxy = self.tunnel.proxy_url or f"http://127.0.0.1:{self.tunnel.port}"
+            self.state.proxy = self.relay.url if self.relay else self.tunnel.proxy_url
             self.state.last_rotation_time = now_t
             self.state.last_attempt_at = now_t
             self.state.rotations.append(now_t)
@@ -1386,6 +1488,8 @@ class VpnService:
             except OSError:
                 pass
         self.server = await asyncio.start_unix_server(self.handle_client, path=str(self.sock_path))
+        if self.rotator.relay:
+            await self.rotator.relay.start()
         self._tick_task = asyncio.create_task(self._tick_loop())
 
     async def stop(self):
@@ -1407,6 +1511,8 @@ class VpnService:
                 self.sock_path.unlink()
             except OSError:
                 pass
+        if self.rotator.relay:
+            await self.rotator.relay.stop()
         self.rotator.shutdown()
 
 
@@ -1463,7 +1569,7 @@ def main():
 
     proton = ProtonSession(log=log)
     catalog = ServerCatalog(serverlist, log=log, refresh=proton.fetch_server_list)
-    tunnel = WireproxyTunnel(wireproxy, port=proxy_port, runtime_dir=runtime_dir, log=log)
+    tunnel = WireproxyTunnel(wireproxy, port=0, runtime_dir=runtime_dir, log=log)
     rotator = VpnRotator(
         state=state,
         log=log,
@@ -1475,6 +1581,7 @@ def main():
         cooldown_s=cooldown_s,
         max_per_hour=max_per_hour,
         direct_ttl_s=direct_ttl_s,
+        relay=Relay(proxy_port, log=log),
     )
     rotator.startup()
 

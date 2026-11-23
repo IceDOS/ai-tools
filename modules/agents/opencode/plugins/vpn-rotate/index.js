@@ -124,6 +124,8 @@ export async function forward(req) {
     // Passes compressed bodies through unchanged, with their content-encoding.
     decompress: false,
     proxy,
+    // One connection per request, so vpn-rotate's relay knows when requests finish before it rotates.
+    keepalive: !proxy,
   });
 }
 

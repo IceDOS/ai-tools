@@ -378,6 +378,103 @@ def test_rotate_single_country_falls_back_to_next_server(tmp_path):
     assert [s[1] for s in tunnel.starts] == ["NL#1", "NL#2"]
 
 
+class FakeRelay:
+    url = "http://127.0.0.1:25345"
+
+    def __init__(self, tunnel):
+        self.tunnel = tunnel
+        self.events = []
+
+    def hold(self):
+        self.events.append("hold")
+
+    def drain(self):
+        # Records whether the tunnel was still up while open requests drained.
+        self.events.append(("drain", self.tunnel.running()))
+
+    def release(self, port):
+        self.events.append(("release", port))
+
+
+def test_rotate_holds_and_drains_before_replacing_the_tunnel(tmp_path):
+    tunnel = FakeTunnel(port=40000)
+    relay = FakeRelay(tunnel)
+    rotator, state, tunnel, _ = make_rotator(tmp_path, tunnel=tunnel, relay=relay)
+    assert rotator.rotate({"errorKind": "rate_limit"})["ok"] is True
+    assert relay.events == ["hold", ("drain", False), ("release", 40000)]
+    assert state.proxy == relay.url
+    relay.events.clear()
+    assert rotator.rotate({"errorKind": "rate_limit"})["ok"] is True
+    # The live tunnel drains before the first candidate replaces it.
+    assert relay.events == ["hold", ("drain", True), ("release", 40000)]
+
+
+def test_rotate_failure_releases_held_requests_to_nothing(tmp_path):
+    tunnel = FakeTunnel()
+    relay = FakeRelay(tunnel)
+    rotator, state, _, _ = make_rotator(tmp_path, tunnel=tunnel, relay=relay, probe=lambda env: "429")
+    assert rotator.rotate({"errorKind": "rate_limit"})["ok"] is False
+    assert relay.events[0] == "hold" and relay.events[-1] == ("release", None)
+
+
+def test_direct_switch_drains_before_stopping_tunnel(tmp_path):
+    clock = FakeClock()
+    tunnel = FakeTunnel()
+    relay = FakeRelay(tunnel)
+    rotator, state, _, _ = make_rotator(tmp_path, clock=clock, tunnel=tunnel, relay=relay)
+    rotator.rotate({"errorKind": "rate_limit"})
+    relay.events.clear()
+    clock.t += 3601
+    rotator.tick()
+    assert relay.events == [("drain", True), ("release", None)]
+    assert state.mode == "direct"
+
+
+def test_relay_holds_new_connections_and_drains_open_ones(tmp_path):
+    async def scenario():
+        async def echo(reader, writer):
+            while data := await reader.read(1024):
+                writer.write(data)
+                await writer.drain()
+            writer.close()
+
+        backend = await asyncio.start_server(echo, "127.0.0.1", 0)
+        relay = service.Relay(service.free_port())
+        await relay.start()
+        relay.release(backend.sockets[0].getsockname()[1])
+        await asyncio.sleep(0)
+
+        r1, w1 = await asyncio.open_connection("127.0.0.1", relay.port)
+        w1.write(b"a")
+        assert await r1.read(1) == b"a"
+        assert relay.active == 1
+        # drain blocks while a request is open and returns once it closes.
+        drained = asyncio.create_task(asyncio.to_thread(relay.drain, 5))
+        relay.hold()
+        await asyncio.sleep(0.3)
+        assert not drained.done()
+        w1.close()
+        await drained
+        assert relay.active == 0
+
+        r2, w2 = await asyncio.open_connection("127.0.0.1", relay.port)
+        w2.write(b"b")
+        await asyncio.sleep(0.3)
+        assert relay.active == 0  # held, not forwarded
+        relay.release(backend.sockets[0].getsockname()[1])
+        assert await asyncio.wait_for(r2.read(1), 2) == b"b"
+        w2.close()
+
+        relay.hold()
+        r3, _ = await asyncio.open_connection("127.0.0.1", relay.port)
+        relay.release(None)
+        assert await asyncio.wait_for(r3.read(1), 2) == b""
+        await relay.stop()
+        backend.close()
+
+    asyncio.run(scenario())
+
+
 def test_rotate_all_rate_limited_stops_tunnel_and_returns_direct(tmp_path):
     rotator, state, tunnel, _ = make_rotator(tmp_path, probe=lambda env: "429")
     res = rotator.rotate({"errorKind": "rate_limit", "model": "m-free"})

@@ -337,7 +337,11 @@ Point this repo's `overrideUrl` at the local checkout in the config root
     a failure is a strike, and 3 strikes in 15 min flag the server (15 min, 5 min if unreachable). A probe 429 that carries `Retry-After` flags the server and its IP at once, until that reset (opencode free limits report about 24h); the probe logs the 429 body and `Retry-After`.
     429 strikes and flags count per server and model; unreachable ones cover every model. It never touches the host network: once the
     host IP is rate-limited it starts a private `wireproxy` tunnel (HTTP proxy on `127.0.0.1:proxyPort`),
-    rotates Proton servers inside it, and goes direct again after `directRetrySeconds`. The key comes from
+    rotates Proton servers inside it, and goes direct again after `directRetrySeconds`. Clients reach it through the
+    daemon's own relay on `proxyPort`, which forwards to wireproxy on a free port. Only one tunnel runs: a rotation holds new
+    connections in the relay, waits up to `DRAIN_CAP_S` (60s) for open ones to finish, then restarts wireproxy and releases
+    them (closes them if the rotation fails); a switch to direct drains the same way. opencode's forwarder fetches with
+    `keepalive: false` and pi uses a bun process per request, so an open relay connection is a request in flight. The key comes from
     the `protonvpn signin` session in the keyring (`proton-keyring-linux`).
   - `vpn-rotate` is the socket client (`status`, `cancel`, `clear`), exposed only as `pkgs.vpn-rotate`, not on PATH.
     Both agents wrap it as `/vpn-rotate [status|cancel|clear]` (pi's `vpn-row.ts`, opencode's `plugins/vpn-rotate`).
