@@ -66,7 +66,10 @@ rateLimit = []
 # pi example extensions to load, by name under pi's examples/extensions/.
 builtin = ["todo", "git-checkpoint", "confirm-destructive", "status-line"]
 # Registers the opencode-free provider: OpenCode Zen's free models through a Bun transport.
+# Sends your OpenCode Zen key when it finds one, else the anonymous per-IP lane ("public").
 opencodeFree = false
+# File holding the key, checked before the `opencode auth login` key in opencode.db. $HOME and ~ expand per user.
+opencodeFreeApiKeyFile = ""
 # view_image tool: shows the model a local image in every mode, including RLM mode and rlm() children, which lack read.
 viewImage = true
 turnTimer = true

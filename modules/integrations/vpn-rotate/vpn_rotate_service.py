@@ -91,7 +91,7 @@ async function probe() {
     const res = await fetch(BASE_URL + "/chat/completions", {
       method: "POST",
       headers: {
-        "authorization": "Bearer public",
+        "authorization": "Bearer " + (process.env.PI_OPENCODE_FREE_API_KEY || "public"),
         "content-type": "application/json",
         "user-agent": USER_AGENT,
         "x-opencode-client": "cli",
@@ -168,11 +168,43 @@ def retry_after(detail):
     return value if value > 0 else None
 
 
+def opencode_api_key(environ=os.environ):
+    """Zen key like pi's wrapper: env, PI_OPENCODE_FREE_API_KEY_FILE, `opencode auth login` in opencode.db, else "public"."""
+    if environ.get("PI_OPENCODE_FREE_API_KEY"):
+        return environ["PI_OPENCODE_FREE_API_KEY"]
+    try:
+        key = Path(environ.get("PI_OPENCODE_FREE_API_KEY_FILE", "")).read_text().strip()
+        if key:
+            return key
+    except OSError:
+        pass
+    data_home = environ.get("XDG_DATA_HOME") or os.path.join(environ.get("HOME", ""), ".local/share")
+    db = environ.get("OPENCODE_DB") or os.path.join(data_home, "opencode", "opencode.db")
+    try:
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            row = con.execute(
+                "SELECT json_extract(value, '$.key') FROM credential"
+                " WHERE integration_id = 'opencode' AND (active = 1 OR active IS NULL) LIMIT 1"
+            ).fetchone()
+        finally:
+            con.close()
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        pass
+    return "public"
+
+
 def probe_opencode(bun_bin="bun", model=None, env=None):
     if not shutil.which(bun_bin) and not os.path.exists(bun_bin):
         return "missing_bun"
     script = PROBE_SCRIPT.replace("__PROBE_MODEL__", json.dumps(model))
     full_env = dict(os.environ, **(env or {}))
+    # Read per probe so a new login applies without restarting the daemon.
+    full_env["PI_OPENCODE_FREE_API_KEY"] = opencode_api_key(full_env)
     code, out = capture([bun_bin, "-e", script], timeout=PROBE_TIMEOUT_S + 2, env=full_env)
     return out.strip() if code == 0 else "0"
 

@@ -1023,3 +1023,21 @@ def test_client_prints_tunnel_mode(capsys):
 def test_client_reports_errors(capsys):
     client.print_status({"ok": False, "reason": "boom"})
     assert "boom" in capsys.readouterr().err
+
+
+def test_opencode_api_key_order(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "opencode.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE credential (integration_id text, value text, active integer)")
+    con.execute("INSERT INTO credential VALUES ('opencode', '{\"type\":\"key\",\"key\":\"sk-db\"}', 1)")
+    con.commit()
+    con.close()
+    keyfile = tmp_path / "key"
+    keyfile.write_text("sk-file\n")
+    env = {"OPENCODE_DB": str(db), "PI_OPENCODE_FREE_API_KEY_FILE": str(keyfile)}
+    assert service.opencode_api_key({**env, "PI_OPENCODE_FREE_API_KEY": "sk-env"}) == "sk-env"
+    assert service.opencode_api_key(env) == "sk-file"
+    assert service.opencode_api_key({"OPENCODE_DB": str(db)}) == "sk-db"
+    assert service.opencode_api_key({"OPENCODE_DB": str(tmp_path / "none.db")}) == "public"

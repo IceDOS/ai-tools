@@ -748,7 +748,8 @@ export function ensureShaped(
 
   const cwd = process.cwd();
   const headers = new Headers(init?.headers ?? {});
-  headers.set("authorization", "Bearer public");
+  // pi sends the resolved key (an account key or "public"); keyed requests get an account quota.
+  if (!headers.has("authorization")) headers.set("authorization", "Bearer public");
   headers.set("content-type", "application/json");
   headers.set("user-agent", ZEN_USER_AGENT);
   headers.set("x-opencode-client", "cli");

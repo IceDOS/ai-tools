@@ -92,6 +92,7 @@
           };
 
           opencodeFree = mkBoolOption { default = e.opencodeFree; };
+          opencodeFreeApiKeyFile = mkStrOption { default = e.opencodeFreeApiKeyFile; };
           viewImage = mkBoolOption { default = e.viewImage; };
           turnTimer = mkBoolOption { default = e.turnTimer; };
           toolTimer = mkBoolOption { default = e.toolTimer; };
@@ -668,18 +669,28 @@
           ];
 
           # pi hides a provider without an API key; the gateway's free tier takes "public".
-          envWrapperArgs = lib.concatLists (
-            lib.mapAttrsToList
-              (k: v: [
-                "--set-default"
-                k
-                v
-              ])
-              (
-                lib.optionalAttrs ext.opencodeFree { PI_OPENCODE_FREE_API_KEY = "public"; }
-                // cfg.environmentVariables
-              )
-          );
+          # Key at launch: exported env, apiKeyFile, then `opencode auth login`'s key in opencode.db (as alimit reads it).
+          envWrapperArgs =
+            lib.optionals (ext.opencodeFree && ext.opencodeFreeApiKeyFile != "") [
+              "--run"
+              ''f="${dataDirLib.shell ext.opencodeFreeApiKeyFile}"; if [ -z "''${PI_OPENCODE_FREE_API_KEY:-}" ] && [ -r "$f" ]; then export PI_OPENCODE_FREE_API_KEY="$(< "$f")"; fi''
+            ]
+            ++ lib.optionals ext.opencodeFree [
+              "--run"
+              ''db="''${OPENCODE_DB:-''${XDG_DATA_HOME:-$HOME/.local/share}/opencode/opencode.db}"; if [ -z "''${PI_OPENCODE_FREE_API_KEY:-}" ] && [ -s "$db" ]; then k="$(${lib.getExe pkgs.sqlite} -readonly "file:$db?mode=ro" "SELECT json_extract(value, '$.key') FROM credential WHERE integration_id = 'opencode' AND (active = 1 OR active IS NULL) LIMIT 1" 2>/dev/null || true)"; if [ -n "$k" ]; then export PI_OPENCODE_FREE_API_KEY="$k"; fi; fi''
+            ]
+            ++ lib.concatLists (
+              lib.mapAttrsToList
+                (k: v: [
+                  "--set-default"
+                  k
+                  v
+                ])
+                (
+                  lib.optionalAttrs ext.opencodeFree { PI_OPENCODE_FREE_API_KEY = "public"; }
+                  // cfg.environmentVariables
+                )
+            );
 
           # Runs per user under a minimal env that only has HOME.
           gcHook = ''
@@ -936,10 +947,20 @@
                     })
                   ];
 
-                  # The daemon's probe reads pi's free-model catalog cache from the data dir.
-                  systemd.user.services.vpn-rotate.Service.Environment = lib.mkIf vpnOn [
-                    "PI_CODING_AGENT_DIR=${dataDir}"
-                  ];
+                  # The daemon's probe reads pi's free-model catalog cache from the data dir, and the same Zen key.
+                  systemd.user.services.vpn-rotate.Service.Environment = lib.mkIf vpnOn (
+                    [ "PI_CODING_AGENT_DIR=${dataDir}" ]
+                    ++
+                      lib.optional (ext.opencodeFree && ext.opencodeFreeApiKeyFile != "")
+                        "PI_OPENCODE_FREE_API_KEY_FILE=${
+                          dataDirLib.expand {
+                            raw = ext.opencodeFreeApiKeyFile;
+                            home = config.home.homeDirectory;
+                            configHome = config.xdg.configHome;
+                            dataHome = config.xdg.dataHome;
+                          }
+                        }"
+                  );
 
                   home.activation.seed-pi-agent = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
                     PATH=${

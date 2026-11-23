@@ -82,6 +82,14 @@ function testToolShaping() {
   assert.strictEqual(bodyNoTools.tools.length, 1);
   assert.strictEqual(bodyNoTools.tools[0].function.name, "read");
   assert.ok(!bodyNoTools.messages[0].content.includes("Notice: The 'read' tool is an internal placeholder"));
+  assert.strictEqual(new Headers(shapeNoTools.init.headers).get("authorization"), "Bearer public");
+
+  // An account key pi resolved is forwarded, not replaced by the anonymous lane.
+  const shapeKeyed = ensureShaped("https://opencode.ai/inference/openai/v1/chat/completions", {
+    headers: { Authorization: "Bearer sk-mine" },
+    body: JSON.stringify({ model: "big-pickle", messages: [{ role: "user", content: "hi" }] }),
+  });
+  assert.strictEqual(new Headers(shapeKeyed.init.headers).get("authorization"), "Bearer sk-mine");
 
   // Case B: user tools include read -> preserved as-is without placeholder or notice
   const userRead = {
