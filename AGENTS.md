@@ -182,7 +182,9 @@ Point this repo's `overrideUrl` at the local checkout in the config root
   `PI_OPENCODE_FREE_CATALOG=off` disables the catalog entirely, `PI_OPENCODE_FREE_CATALOG_TTL_MS`
   (12h) bounds when a launch resolves again, and `PI_OPENCODE_FREE_MODELS_URL` points the resolve at
   another endpoint. `stalePools()` warns when a pooled model is no longer served, so a retired model
-  cannot sit in a bucket nothing burns. llamacpp
+  cannot sit in a bucket nothing burns. Requests copy opencode 2.3's wire shape (header and body key
+  order, a per-prompt trace), but sessions, the project hash and traces stay per process and change on
+  every rotation, and no title request is sent, so nothing links requests across rotations. llamacpp
   adds `inline.llamacpp-lifecycle` and alimit adds `inline.alimit` with `mkDefault`. pi-clm's other
   `PI_CLM_*` env goes into the wrapper as `--set-default`. Check sources with `tests/typecheck.sh`.
   `packages` entries go into settings.json `packages` and pi installs them, with `npmCommand` set to

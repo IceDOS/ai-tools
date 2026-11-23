@@ -573,6 +573,7 @@ function readTunnelProxyEnv(): Record<string, string> {
 export function rotateZenSessions(): void {
   sessionMap.clear();
   processFallbackSessionId = null;
+  promptTraces.clear();
 }
 
 async function waitForRotation(signal?: AbortSignal): Promise<void> {
@@ -596,7 +597,6 @@ async function waitForRotation(signal?: AbortSignal): Promise<void> {
 
 const sessionMap = new Map<string, string>();
 let processFallbackSessionId: string | null = null;
-
 function getZenSessionId(key?: string): string {
   if (checkGlobalRotationEpoch()) {
     rotateZenSessions();
@@ -705,6 +705,32 @@ export function buildHarnessPrompt(displayCwd: string = process.cwd()): string {
   );
 }
 
+const textOf = (content: unknown): string =>
+  typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content.filter((p: any) => p?.type === "text").map((p: any) => p.text).join("\n")
+      : "";
+
+// Message fields in opencode's order; it always sends reasoning_content on assistant turns.
+function opencodeMessage(m: any): any {
+  if (m.role === "user" && Array.isArray(m.content) && m.content.length === 1 && m.content[0]?.type === "text")
+    return { ...m, content: m.content[0].text };
+  if (m.role === "assistant") {
+    const { role, content, tool_calls, reasoning_content, ...rest } = m;
+    return { role, content, ...(tool_calls ? { tool_calls } : {}), reasoning_content: reasoning_content ?? "", ...rest };
+  }
+  if (m.role === "tool") {
+    const { role, tool_call_id, content, ...rest } = m;
+    return { role, tool_call_id, content, ...rest };
+  }
+  return m;
+}
+
+// One trace per user prompt, shared by every tool-loop step of that prompt.
+const promptTraces = new Map<string, { prompt: string; traceId: string }>();
+const hex = (bytes: number): string => crypto.randomBytes(bytes).toString("hex");
+
 export function ensureShaped(
   url: string,
   init: RequestInit,
@@ -762,10 +788,7 @@ export function ensureShaped(
     harness += "\n\nNotice: The 'read' tool is an internal placeholder and is unavailable. Do not call 'read'.";
   }
   const combinedSystemPrompt = harness + (piSysPrompt ? "\n\n# User Instructions\n" + piSysPrompt : "");
-  body.messages = [
-    { role: "system", content: combinedSystemPrompt },
-    ...otherMessages,
-  ];
+  body.messages = [{ role: "system", content: combinedSystemPrompt }, ...otherMessages.map(opencodeMessage)];
 
   if (body.max_tokens !== undefined) {
     body.max_completion_tokens = body.max_tokens;
@@ -777,35 +800,57 @@ export function ensureShaped(
 
   body.stream = true;
   body.stream_options = { include_usage: true };
+  const { model, messages, tools, stream, stream_options, max_completion_tokens, ...bodyRest } = body;
+  const ordered = { model, messages, tools, stream, stream_options, max_completion_tokens, ...bodyRest };
 
-  const headers = new Headers(init?.headers ?? {});
+  const incoming = new Headers(init?.headers ?? {});
   // pi sends the resolved key (an account key or "public"); keyed requests get an account quota.
-  if (!headers.has("authorization")) headers.set("authorization", "Bearer public");
-  headers.set("content-type", "application/json");
-  headers.set("user-agent", ZEN_USER_AGENT);
-  headers.set("x-opencode-client", "cli");
-
-  let sesId = headers.get("x-opencode-session-id") ?? headers.get("x-opencode-session");
+  const authorization = incoming.get("authorization") ?? "Bearer public";
+  let sesId = incoming.get("x-opencode-session-id") ?? incoming.get("x-opencode-session");
   if (!sesId || !sesId.startsWith("ses_")) {
     sesId = getZenSessionId(sesId ?? undefined);
   }
-  headers.set("x-opencode-session-id", sesId);
-  headers.set("x-opencode-session", sesId);
-  headers.set("x-session-affinity", sesId);
-  headers.set("x-session-id", sesId);
+  // Drop what opencode never sends (the SDK's x-stainless-* and accept) and what is rebuilt below.
+  const extra: Record<string, string> = {};
+  for (const [name, value] of incoming) {
+    if (/^(authorization|content-type|user-agent|accept|b3|traceparent)$|^x-stainless-|^x-opencode-|^x-session-/.test(name)) continue;
+    extra[name] = value;
+  }
 
-  const projectHash = crypto.createHash("sha1").update(`directory:${effectiveCwd}:${sesId}`).digest("hex");
-  headers.set("x-opencode-project", projectHash);
-  headers.delete("x-opencode-request");
-  headers.delete("traceparent");
-  headers.delete("b3");
+  const userTurns = otherMessages.filter((m: any) => m.role === "user");
+  const prompt = `${userTurns.length}:${textOf(userTurns.at(-1)?.content)}`;
+  let trace = promptTraces.get(sesId);
+  // A retry of the same prompt keeps its trace.
+  const newPrompt = otherMessages.at(-1)?.role === "user" && trace?.prompt !== prompt;
+  if (!trace || newPrompt) {
+    trace = { prompt, traceId: hex(16) };
+    promptTraces.set(sesId, trace);
+  }
+
+  const project = crypto.createHash("sha1").update(`directory:${effectiveCwd}:${sesId}`).digest("hex");
+  // opencode's header order; Bun appends connection, accept: */*, host and the rest.
+  const spanId = hex(8);
+  const headers: Record<string, string> = {
+    authorization,
+    "content-type": "application/json",
+    "user-agent": ZEN_USER_AGENT,
+    b3: `${trace.traceId}-${spanId}-1-${hex(8)}`,
+    traceparent: `00-${trace.traceId}-${spanId}-01`,
+    "x-opencode-client": "cli",
+    "x-opencode-project": project,
+    "x-opencode-session": sesId,
+    "x-opencode-session-id": sesId,
+    "x-session-affinity": sesId,
+    "x-session-id": sesId,
+    ...extra,
+  };
 
   return {
     url: targetUrl,
-    init: { ...init, method: init?.method ?? "POST", body: JSON.stringify(body), headers },
+    init: { ...init, method: init?.method ?? "POST", body: JSON.stringify(ordered), headers },
     shaped: true,
     callerWantsStream,
-    model: body.model,
+    model,
   };
 }
 

@@ -10,6 +10,7 @@ import opencodeZenBun, {
   ensureShaped,
   bunFetch,
   tunnelProxyEnv,
+  rotateZenSessions,
 } from "../extensions/opencode-free.ts";
 import {
   FREE_MODEL_POOLS,
@@ -90,6 +91,28 @@ function testToolShaping() {
     body: JSON.stringify({ model: "big-pickle", messages: [{ role: "user", content: "hi" }] }),
   });
   assert.strictEqual(new Headers(shapeKeyed.init.headers).get("authorization"), "Bearer sk-mine");
+
+  // Headers and user content look like opencode's: no SDK headers or accept, a trace, a plain-string user turn.
+  const shapeSdk = ensureShaped("https://opencode.ai/inference/openai/v1/chat/completions", {
+    headers: { accept: "application/json", "x-stainless-os": "Linux", "X-Stainless-Lang": "js" },
+    body: JSON.stringify({
+      model: "big-pickle",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "user", content: [{ type: "text", text: "a" }, { type: "image_url", image_url: { url: "x" } }] },
+      ],
+    }),
+  });
+  const sdkHeaders = new Headers(shapeSdk.init.headers);
+  assert.deepStrictEqual([...sdkHeaders.keys()].filter((k) => k.startsWith("x-stainless")), []);
+  assert.strictEqual(sdkHeaders.has("accept"), false, "Bun adds accept: */* itself");
+  const tp = /^00-([0-9a-f]{32})-([0-9a-f]{16})-01$/.exec(sdkHeaders.get("traceparent") ?? "");
+  assert.ok(tp, "traceparent");
+  assert.match(sdkHeaders.get("b3") ?? "", new RegExp(`^${tp![1]}-${tp![2]}-1-[0-9a-f]{16}$`));
+  assert.match(sdkHeaders.get("user-agent") ?? "", /^opencode\/latest\/[^/]+\/cli$/);
+  const sdkBody = JSON.parse(shapeSdk.init.body as string);
+  assert.strictEqual(sdkBody.messages[1].content, "hi");
+  assert.ok(Array.isArray(sdkBody.messages[2].content), "mixed content stays a list");
 
   // Case B: user tools include read -> preserved as-is without placeholder or notice
   const userRead = {
@@ -266,6 +289,52 @@ if (mode === "multibyte_split") {
 }
 
 const EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+function testOpencodeMimic() {
+  const zen = "https://opencode.ai/inference/openai/v1/chat/completions";
+  const shape = (messages: any[], session = "pi-a") =>
+    ensureShaped(zen, {
+      headers: { "x-opencode-session": session, "x-stainless-os": "Linux" },
+      body: JSON.stringify({ messages, reasoning_effort: "high", model: "big-pickle", tools: [], stream: false }),
+    });
+  const hdr = (r: any) => r.init.headers as Record<string, string>;
+  const trace = (r: any) => hdr(r).traceparent.split("-")[1];
+  const user = { role: "user", content: [{ type: "text", text: "Fix the typo in README" }] };
+  const call = { id: "c1", type: "function", function: { name: "glob", arguments: "{}" } };
+
+  const first = shape([user]);
+  assert.deepStrictEqual(Object.keys(hdr(first)), [
+    "authorization", "content-type", "user-agent", "b3", "traceparent", "x-opencode-client",
+    "x-opencode-project", "x-opencode-session", "x-opencode-session-id", "x-session-affinity", "x-session-id",
+  ]);
+  assert.deepStrictEqual(Object.keys(JSON.parse(first.init.body as string)), [
+    "model", "messages", "tools", "stream", "stream_options", "max_completion_tokens", "reasoning_effort", "tool_choice",
+  ]);
+
+  // A retry and the tool-loop steps of one prompt share its trace, each with its own span.
+  const retry = shape([user]);
+  assert.strictEqual(trace(retry), trace(first));
+  assert.notStrictEqual(hdr(retry).traceparent, hdr(first).traceparent);
+  const step = shape([
+    user,
+    { role: "assistant", content: null, tool_calls: [call] },
+    { role: "tool", content: "README.md", tool_call_id: "c1" },
+  ]);
+  assert.strictEqual(trace(step), trace(first));
+  const [, , assistant, tool] = JSON.parse(step.init.body as string).messages;
+  assert.deepStrictEqual(assistant, { role: "assistant", content: null, tool_calls: [call], reasoning_content: "" });
+  assert.deepStrictEqual(Object.keys(tool), ["role", "tool_call_id", "content"]);
+
+  const next = shape([user, { role: "assistant", content: "Done." }, { role: "user", content: "thanks" }]);
+  assert.notStrictEqual(trace(next), trace(first), "a new prompt starts a new trace");
+
+  // A rotation gives a new session, project hash and trace, so nothing links across it.
+  rotateZenSessions();
+  const rotated = shape([user]);
+  assert.notStrictEqual(hdr(rotated)["x-opencode-session"], hdr(first)["x-opencode-session"]);
+  assert.notStrictEqual(hdr(rotated)["x-opencode-project"], hdr(first)["x-opencode-project"]);
+  assert.notStrictEqual(trace(rotated), trace(first));
+}
 
 function testThinkingLevelMap() {
   // No variants: nothing is mapped, so pi reports no reasoning at all.
@@ -715,6 +784,7 @@ async function runAll() {
   testIsGitRepo();
   testPromptHygiene();
   testToolShaping();
+  testOpencodeMimic();
   testThinkingLevelMap();
   testTunnelProxyEnv();
   testParseServedModels();

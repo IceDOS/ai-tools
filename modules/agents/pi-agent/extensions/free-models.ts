@@ -13,7 +13,10 @@ import type { ThinkingLevelMap } from "@earendil-works/pi-ai/compat";
 
 export const PROVIDER_ID = "opencode-free";
 export const BASE_URL = process.env.PI_OPENCODE_FREE_BASE_URL ?? "https://opencode.ai/inference/openai/v1";
-export const ZEN_USER_AGENT = process.env.PI_OPENCODE_FREE_UA ?? "opencode/latest/2.2.6/cli";
+// pkgs.opencode's version, substituted at build time; unbuilt sources (tests) fall back to "latest".
+const RAW_OPENCODE_VERSION = "@opencodeVersion@" as string;
+export const OPENCODE_VERSION = RAW_OPENCODE_VERSION.startsWith("@") ? "latest" : RAW_OPENCODE_VERSION;
+export const ZEN_USER_AGENT = process.env.PI_OPENCODE_FREE_UA ?? `opencode/latest/${OPENCODE_VERSION}/cli`;
 /** Public list of every model Zen serves, paid and free, with cost/limits/efforts. */
 export const CATALOG_URL = `${BASE_URL}/models`;
 /** opencode builds `variants` from these models.dev reasoning options. */

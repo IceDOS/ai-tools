@@ -434,7 +434,9 @@
           shipped =
             lib.optional (ext.meters.cost || ext.opencodeFree || vpnOn) {
               name = "free-models.ts";
-              path = ./extensions/free-models.ts;
+              path = substituteTs "free-models.ts" ./extensions/free-models.ts {
+                opencodeVersion = pkgs.opencode.version;
+              };
               load = false;
             }
             ++ lib.optional ext.meters.cost {

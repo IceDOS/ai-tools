@@ -56,7 +56,11 @@ in
                   ExecStart = "${vpnPkgs.service}/bin/vpn-rotate-service";
                   # The probe takes opencode Zen's URL and user-agent from this file.
                   Environment = [
-                    "VPN_ROTATE_OPENCODE_FREE_MODULE=${../../agents/pi-agent/extensions/free-models.ts}"
+                    "VPN_ROTATE_OPENCODE_FREE_MODULE=${
+                      pkgs.replaceVars ../../agents/pi-agent/extensions/free-models.ts {
+                        opencodeVersion = pkgs.opencode.version;
+                      }
+                    }"
                   ];
                   Restart = "always";
                   RestartSec = "5s";
