@@ -11,12 +11,34 @@ export function tunnelProxy(state) {
   return state?.mode === "tunnel" && typeof state.proxy === "string" && state.proxy !== "" ? state.proxy : undefined;
 }
 
-function readProxy() {
+export function readState() {
   try {
-    return tunnelProxy(JSON.parse(readFileSync(statePath(), "utf8")));
+    return JSON.parse(readFileSync(statePath(), "utf8"));
   } catch {
     return undefined;
   }
+}
+
+function readProxy() {
+  return tunnelProxy(readState());
+}
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function maskFlaggedPaths(text, flagged) {
+  if (!text || !flagged) return text;
+  const entries = Object.entries(flagged);
+  if (entries.length === 0) return text;
+
+  const sorted = entries.sort((a, b) => b[0].length - a[0].length);
+  let res = text;
+  for (const [prefix, token] of sorted) {
+    const re = new RegExp(escapeRegExp(prefix) + "(?=[/\\\\\\s\"'>]|$)", "g");
+    res = res.replace(re, token);
+  }
+  return res;
 }
 
 export const VPN_ACTIONS = ["status", "cancel", "clear"];
@@ -73,17 +95,35 @@ export function unwrapURL(url) {
   return base + (rest.length ? `/${rest.join("/")}` : "") + u.search;
 }
 
-function forward(req) {
+export async function forward(req) {
   const headers = new Headers(req.headers);
   headers.delete("host");
+  const state = readState();
+  const proxy = tunnelProxy(state);
+  let body = req.body;
+
+  if (proxy && req.method === "POST" && body) {
+    try {
+      const bodyText = await req.text();
+      body = bodyText;
+      const flagged = state?.flaggedPaths;
+      if (flagged && Object.keys(flagged).length > 0) {
+        body = bodyText.replace(/(<env>[\s\S]*?<\/env>)/g, (envBlock) =>
+          maskFlaggedPaths(envBlock, flagged),
+        );
+        headers.delete("content-length");
+      }
+    } catch {}
+  }
+
   return fetch(unwrapURL(req.url), {
     method: req.method,
     headers,
-    body: req.body,
+    body,
     redirect: "manual",
     // Passes compressed bodies through unchanged, with their content-encoding.
     decompress: false,
-    proxy: readProxy(),
+    proxy,
   });
 }
 
@@ -175,6 +215,7 @@ export default {
               errorKind,
               errorMessage: event.error.message,
               retry,
+              cwd: process.cwd(),
             },
             310_000,
           );

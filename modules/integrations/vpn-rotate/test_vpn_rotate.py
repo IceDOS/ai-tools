@@ -1041,3 +1041,61 @@ def test_opencode_api_key_order(tmp_path):
     assert service.opencode_api_key(env) == "sk-file"
     assert service.opencode_api_key({"OPENCODE_DB": str(db)}) == "sk-db"
     assert service.opencode_api_key({"OPENCODE_DB": str(tmp_path / "none.db")}) == "public"
+
+
+def test_probe_script_uses_neutral_path():
+    assert "process.cwd()" not in service.PROBE_SCRIPT
+    assert "/workspace/probe-" in service.PROBE_SCRIPT
+
+
+def test_path_tracking_two_lists_scenario(tmp_path):
+    s = service.VpnState(tmp_path / "state.json", tmp_path / "runtime.json")
+
+    # 1. Add /home/user/test and /mnt/games/2
+    s.register_path("/home/user/test")
+    s.register_path("/mnt/games/2")
+    assert s.seen_paths == ["/home/user/test", "/mnt/games/2"]
+    assert s.flagged_paths == {}
+
+    # 2. Add /home/user/test2 -> flags /home/user, leaves /mnt/games/2
+    s.register_path("/home/user/test2")
+    assert s.seen_paths == ["/mnt/games/2"]
+    assert list(s.flagged_paths.keys()) == ["/home/user"]
+    token = s.flagged_paths["/home/user"]
+    assert token in [f"/home/{n}" for n in service.COMMON_NAMES]
+    assert "_" not in token
+
+    # 3. Add /mnt/games/3/test/home/user -> flags /mnt/games, seen_paths becomes empty
+    s.register_path("/mnt/games/3/test/home/user")
+    assert s.seen_paths == []
+    assert sorted(s.flagged_paths.keys()) == ["/home/user", "/mnt/games"]
+    assert s.flagged_paths["/mnt/games"] in [f"/mnt/{n}" for n in service.MNT_NAMES]
+    assert "_" not in s.flagged_paths["/mnt/games"]
+
+    # 4. /home/usercream/proj should NOT be covered by /home/user
+    s.register_path("/home/usercream/proj")
+    assert "/home/usercream/proj" in s.seen_paths
+    assert sorted(s.flagged_paths.keys()) == ["/home/user", "/mnt/games"]
+
+    # 5. Persisted and reloaded from disk
+    s2 = service.VpnState(tmp_path / "state.json", tmp_path / "runtime.json")
+    assert s2.seen_paths == ["/home/usercream/proj"]
+    assert sorted(s2.flagged_paths.keys()) == ["/home/user", "/mnt/games"]
+    assert s2.flagged_paths["/home/user"] == s.flagged_paths["/home/user"]
+
+
+def test_path_tracking_token_dedup_across_sort_order(tmp_path):
+    s = service.VpnState(tmp_path / "state.json", tmp_path / "runtime.json")
+    s.path_secret = "testsecret123456"
+
+    # Flag /home/oscar first (maps to /home/bob under testsecret123456)
+    s.register_path("/home/oscar/1")
+    s.register_path("/home/oscar/2")
+    assert s.flagged_paths == {"/home/oscar": "/home/bob"}
+
+    # Flag /home/carol second (sorts before /home/oscar; natural hash would also be /home/bob)
+    s.register_path("/home/carol/1")
+    s.register_path("/home/carol/2")
+    assert s.flagged_paths["/home/oscar"] == "/home/bob"
+    assert s.flagged_paths["/home/carol"] != "/home/bob"
+    assert s.flagged_paths["/home/carol"] in [f"/home/{n}" for n in service.COMMON_NAMES]

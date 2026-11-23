@@ -4,10 +4,13 @@ Requests run direct until the host IP is rate-limited; then only the bun child i
 through a userspace WireGuard client (wireproxy) exposing an HTTP proxy on 127.0.0.1.
 """
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import random
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -49,6 +52,8 @@ FEATURE_TOR = 2
 STATUS_UP = 1
 PROXY_ENV_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
 IP_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
+COMMON_NAMES = ("bob", "alex", "sam", "taylor", "jordan", "casey", "riley", "morgan", "quinn", "avery")
+MNT_NAMES = ("data", "storage", "media", "share", "drive")
 
 USAGE_LIMIT_RE = re.compile(
     r"GoUsageLimitError|Monthly usage limit|available balance"
@@ -77,7 +82,7 @@ async function probe() {
   const model = __PROBE_MODEL__ ?? mod.loadCatalog().models[0]?.id;
   if (!model) { process.stdout.write("skip"); return; }
   const sesId = descendingId();
-  const cwd = process.cwd();
+  const cwd = "/workspace/probe-" + sesId;
   const projectHash = crypto.createHash("sha1").update("directory:" + cwd).digest("hex");
   const harness = `You are an AI agent running in OpenCode, a coding agent harness. Help the user accomplish their goals using the tools you have available.
 
@@ -618,6 +623,9 @@ class VpnState:
         self.mode = "direct"
         self.proxy = None
         self.host_ip_flagged_until = None
+        self.seen_paths = []
+        self.flagged_paths = {}
+        self.path_secret = None
         self.load()
 
     def clean_expired(self):
@@ -668,6 +676,9 @@ class VpnState:
                 self.mode = data.get("mode") or "direct"
                 self.proxy = data.get("proxy")
                 self.host_ip_flagged_until = data.get("hostIpFlaggedUntil")
+                self.path_secret = data.get("pathSecret") or secrets.token_hex(16)
+                self.seen_paths = list(data.get("seenPaths", []))
+                self.flagged_paths = data.get("flaggedPaths") or {}
             except Exception:
                 pass
 
@@ -690,6 +701,9 @@ class VpnState:
                 "mode": self.mode,
                 "proxy": self.proxy,
                 "hostIpFlaggedUntil": self.host_ip_flagged_until,
+                "seenPaths": self.seen_paths,
+                "flaggedPaths": self.flagged_paths,
+                "pathSecret": self.path_secret,
                 "at": int(now * 1000),
             }
             ident = threading.get_ident()
@@ -718,6 +732,8 @@ class VpnState:
                 "rateLimitedCountriesCount": len(r_countries),
                 "rotating": self.is_rotating,
                 "rotatedAt": self.last_rotation_time,
+                "seenPaths": self.seen_paths,
+                "flaggedPaths": self.flagged_paths,
             }
             try:
                 self.runtime_file.parent.mkdir(parents=True, exist_ok=True)
@@ -726,6 +742,68 @@ class VpnState:
                 tmp_r.replace(self.runtime_file)
             except OSError:
                 pass
+
+    def _mask_token(self, path: str, used_tokens: set[str] = None) -> str:
+        if not self.path_secret:
+            self.path_secret = secrets.token_hex(16)
+        used = used_tokens or set()
+        digest = hmac.new(self.path_secret.encode("utf-8"), path.encode("utf-8"), hashlib.sha1).hexdigest()
+        val = int(digest[:4], 16)
+        if path.startswith("/home/"):
+            for i in range(len(COMMON_NAMES)):
+                candidate = f"/home/{COMMON_NAMES[(val + i) % len(COMMON_NAMES)]}"
+                if candidate not in used:
+                    return candidate
+            return f"/home/{COMMON_NAMES[val % len(COMMON_NAMES)]}"
+        if path.startswith("/mnt/"):
+            for i in range(len(MNT_NAMES)):
+                candidate = f"/mnt/{MNT_NAMES[(val + i) % len(MNT_NAMES)]}"
+                if candidate not in used:
+                    return candidate
+            return f"/mnt/{MNT_NAMES[val % len(MNT_NAMES)]}"
+        return "/workspace"
+
+    def register_path(self, path: str):
+        if not path:
+            return
+        path = os.path.normpath(str(path)).rstrip("/")
+        if not path or path == "/":
+            return
+        with self.lock:
+            new_flags = set()
+            for p in self.seen_paths:
+                try:
+                    c = os.path.commonpath([p, path])
+                    if c and c != "/" and c != "":
+                        new_flags.add(c)
+                except ValueError:
+                    pass
+
+            all_flags = set(self.flagged_paths.keys()) | new_flags
+            final_flags = set()
+            for candidate in sorted(all_flags, key=len):
+                if not any(candidate != kept and candidate.startswith(kept + "/") for kept in final_flags):
+                    final_flags.add(candidate)
+
+            updated = {}
+            used = {self.flagged_paths[f] for f in final_flags if f in self.flagged_paths}
+            for f in sorted(final_flags):
+                if f in self.flagged_paths:
+                    updated[f] = self.flagged_paths[f]
+                else:
+                    tok = self._mask_token(f, used)
+                    updated[f] = tok
+                    used.add(tok)
+            self.flagged_paths = updated
+
+            self.seen_paths = [
+                p for p in self.seen_paths
+                if not any(f == p or p.startswith(f + "/") for f in self.flagged_paths)
+            ]
+            if not any(f == path or path.startswith(f + "/") for f in self.flagged_paths):
+                if path not in self.seen_paths:
+                    self.seen_paths.append(path)
+        self.save()
 
     def flag_country(self, country, ttl=DEFAULT_FLAGGED_TTL_S, reason="rate_limit"):
         if not country:
@@ -820,6 +898,8 @@ class VpnState:
             self.all_rate_limited = False
             self.min_refresh_in = 0
             self.server_strikes.clear()
+            self.seen_paths.clear()
+            self.flagged_paths.clear()
         self.save()
 
 
@@ -948,6 +1028,9 @@ class VpnRotator:
     def rotate(self, req):
         with self.lock:
             self.cancel_event.clear()
+            req_cwd = req.get("cwd")
+            if req_cwd:
+                self.state.register_path(req_cwd)
             # The status row names the model while rotating and after a failed rotation.
             self.state.rotation_model = req.get("model") or None
             self.state.save()
@@ -1242,6 +1325,8 @@ class VpnService:
             "refreshIn": s.min_refresh_in,
             "rateLimitedCountries": s.get_rate_limited_countries_list(),
             "rotating": s.is_rotating,
+            "flaggedPaths": s.flagged_paths,
+            "seenPaths": list(s.seen_paths),
         }
 
     async def handle_clear(self):

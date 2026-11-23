@@ -126,6 +126,12 @@ def print_status(resp):
         print("Rate-limited countries:")
         for item in rate_limited:
             print(f"  - {item['country']}: refresh in {item['refreshIn']}s ({item.get('reason', 'rate_limit')})")
+    flagged = resp.get("flaggedPaths")
+    if flagged:
+        print(f"Flagged paths: {', '.join(flagged.keys())}")
+    seen = resp.get("seenPaths", [])
+    if seen:
+        print(f"Seen paths: {', '.join(seen)}")
 
 
 def main(argv=None):
@@ -172,6 +178,7 @@ def main(argv=None):
         "errorKind": payload.get("error_kind") or payload.get("errorKind", "rate_limit"),
         "provider": payload.get("provider", ""),
         "model": payload.get("model", ""),
+        "cwd": payload.get("cwd", "") or os.getcwd(),
     }
 
     resp = send_request(req)

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import plugin, { abandoned, control, isFree, nextModel, returnAfter, tunnelProxy, unwrapURL, wrapBaseURL } from "./index.js";
+import plugin, { abandoned, control, isFree, maskFlaggedPaths, nextModel, returnAfter, tunnelProxy, unwrapURL, wrapBaseURL } from "./index.js";
 
 test("tunnelProxy only returns the proxy in tunnel mode", () => {
   assert.equal(tunnelProxy({ mode: "tunnel", proxy: "http://127.0.0.1:25345" }), "http://127.0.0.1:25345");
@@ -139,4 +139,28 @@ test("isFree goes by price", () => {
   assert.equal(isFree({ cost: [] }), true);
   assert.equal(isFree({ cost: [{ input: 0, output: 0 }] }), true);
   assert.equal(isFree({ cost: [{ input: 0, output: 0 }, { input: 0.5, output: 2 }] }), false);
+});
+
+test("maskFlaggedPaths masks paths deterministically with word boundaries", () => {
+  const envBlock = `<env>\n  Working directory: /mnt/games/3/test/home/ice\n  Workspace root folder: /home/icecream/proj\n</env>`;
+  const flagged = { "/home/ice": "/home/bob_1234", "/mnt/games": "/mnt/drive_5678" };
+  const masked = maskFlaggedPaths(envBlock, flagged);
+  assert.equal(masked.includes("/home/icecream/proj"), true);
+  assert.equal(masked.includes("/home/bob_1234"), true);
+  assert.equal(masked.includes("/mnt/drive_5678/3/test/home/bob_1234"), true);
+});
+
+test("maskFlaggedPaths masks cwd equal to flagged path inside JSON.stringify body", () => {
+  const flagged = { "/home/ice/proj": "/home/bob_proj" };
+  const rawBody = JSON.stringify({
+    messages: [{
+      role: "system",
+      content: "You are an agent.\n<env>\n  Working directory: /home/ice/proj\n  Workspace root folder: /home/ice/proj\n</env>"
+    }]
+  });
+  const masked = maskFlaggedPaths(rawBody, flagged);
+  assert.equal(masked.includes("/home/ice/proj"), false);
+  assert.equal(masked.includes("/home/bob_proj"), true);
+  const parsed = JSON.parse(masked);
+  assert.equal(parsed.messages[0].content.includes("Working directory: /home/bob_proj"), true);
 });

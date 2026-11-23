@@ -665,15 +665,40 @@ export function isGitRepo(dir: string): boolean {
   return false;
 }
 
-export function buildHarnessPrompt(): string {
-  const cwd = process.cwd();
-  const isGit = isGitRepo(cwd);
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function maskFlaggedPaths(text: string, flagged: Record<string, string>): string {
+  if (!text || !flagged) return text;
+  const entries = Object.entries(flagged);
+  if (entries.length === 0) return text;
+
+  const sorted = entries.sort((a, b) => b[0].length - a[0].length);
+  let res = text;
+  for (const [prefix, token] of sorted) {
+    const re = new RegExp(escapeRegExp(prefix) + "(?=[/\\\\\\s\"'>]|$)", "g");
+    res = res.replace(re, token);
+  }
+  return res;
+}
+
+function readVpnRuntimeState(): any {
+  try {
+    return JSON.parse(fs.readFileSync(statePath(), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export function buildHarnessPrompt(displayCwd: string = process.cwd()): string {
+  const isGit = isGitRepo(process.cwd());
   return (
     "You are an AI agent running in OpenCode, a coding agent harness. Help the user accomplish their goals using the tools you have available.\n\n" +
     "Here is some useful information about the environment you are running in:\n" +
     "<env>\n" +
-    "  Working directory: " + cwd + "\n" +
-    "  Workspace root folder: " + cwd + "\n" +
+    "  Working directory: " + displayCwd + "\n" +
+    "  Workspace root folder: " + displayCwd + "\n" +
     "  Is directory a git repo: " + (isGit ? "yes" : "no") + "\n" +
     "  Platform: linux\n" +
     "</env>"
@@ -721,11 +746,18 @@ export function ensureShaped(
     }
   }
 
+  const vpnState = readVpnRuntimeState();
+  const proxyEnv = tunnelProxyEnv(vpnState);
+  const isTunnel = Boolean(proxyEnv.HTTPS_PROXY || proxyEnv.HTTP_PROXY);
+  const flagged = vpnState?.flaggedPaths;
+  const hasFlags = Boolean(flagged && Object.keys(flagged).length > 0);
+  const effectiveCwd = isTunnel && hasFlags ? maskFlaggedPaths(process.cwd(), flagged) : process.cwd();
+
   const incomingMessages = Array.isArray(body.messages) ? body.messages : [];
   const systemMsg = incomingMessages.find((m: any) => m.role === "system");
   const otherMessages = incomingMessages.filter((m: any) => m.role !== "system");
   const piSysPrompt = typeof systemMsg?.content === "string" ? systemMsg.content : "";
-  let harness = buildHarnessPrompt();
+  let harness = buildHarnessPrompt(effectiveCwd);
   if (injectedDummyRead) {
     harness += "\n\nNotice: The 'read' tool is an internal placeholder and is unavailable. Do not call 'read'.";
   }
@@ -746,7 +778,6 @@ export function ensureShaped(
   body.stream = true;
   body.stream_options = { include_usage: true };
 
-  const cwd = process.cwd();
   const headers = new Headers(init?.headers ?? {});
   // pi sends the resolved key (an account key or "public"); keyed requests get an account quota.
   if (!headers.has("authorization")) headers.set("authorization", "Bearer public");
@@ -763,7 +794,7 @@ export function ensureShaped(
   headers.set("x-session-affinity", sesId);
   headers.set("x-session-id", sesId);
 
-  const projectHash = crypto.createHash("sha1").update(`directory:${cwd}:${sesId}`).digest("hex");
+  const projectHash = crypto.createHash("sha1").update(`directory:${effectiveCwd}:${sesId}`).digest("hex");
   headers.set("x-opencode-project", projectHash);
   headers.delete("x-opencode-request");
   headers.delete("traceparent");
