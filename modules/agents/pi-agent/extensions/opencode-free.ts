@@ -1027,6 +1027,16 @@ async function resolveInBackground(pi: ExtensionAPI): Promise<void> {
   if (resolution.status === "updated") notify(`opencode-free catalog updated: ${resolution.change}`, "warning");
 }
 
+// pi resolves --model/--provider before extensions run, so a mismatch is a provider that failed
+// to register, not a choice. No API exposes the parsed argv, so scan it.
+function explicitModelOnArgv(): boolean {
+  const argv = process.argv;
+  for (let i = 0; i < argv.length; i++) {
+    if ((argv[i] === "--model" || argv[i] === "--provider") && (argv[i + 1] ?? "") !== "") return true;
+  }
+  return false;
+}
+
 export default function opencodeZenBun(pi: ExtensionAPI): void {
   // off means no fetch and no models, so there is nothing to route either.
   if (catalogDisabled()) return;
@@ -1053,7 +1063,7 @@ export default function opencodeZenBun(pi: ExtensionAPI): void {
     });
   };
 
-  pi.on("session_start", (_event, ctx: any) => {
+  pi.on("session_start", async (event: any, ctx: any) => {
     notifier = (text, level) => {
       if (!ctx.hasUI) return;
       try {
@@ -1063,6 +1073,28 @@ export default function opencodeZenBun(pi: ExtensionAPI): void {
     for (const note of pendingNotes.splice(0)) notifier(note.text, note.level);
     // Unresolved at launch: keep trying while there is no model table to serve.
     if (registeredIds.size === 0) resolve();
+
+    // A launch where this provider was not registered yet falls back to the first available model;
+    // put the session back on the configured default. Not persisted: setModel only touches history.
+    if (event?.reason !== "startup") return;
+    if (ctx?.model?.provider === PROVIDER_ID) return;
+    if (explicitModelOnArgv() || (ctx?.scopedModels?.length ?? 0) > 0) return;
+    let settings: { defaultProvider?: string; defaultModel?: string } | undefined;
+    try {
+      settings = pi.getSettings();
+    } catch {}
+    if (settings?.defaultProvider !== PROVIDER_ID) return;
+    const wanted = settings.defaultModel;
+    if (!wanted || !registeredIds.has(wanted)) return;
+    const target = ctx?.modelRegistry?.find?.(PROVIDER_ID, wanted);
+    if (!target) return;
+    try {
+      if (!(await pi.setModel(target))) {
+        notify(`opencode-free: could not switch to ${PROVIDER_ID}/${wanted}; no API key configured`, "warning");
+      }
+    } catch (error) {
+      notify(`opencode-free: could not switch to ${PROVIDER_ID}/${wanted}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    }
   });
 
   // A fresh cache is the point of the cache, so only an expired (or absent) one resolves now.

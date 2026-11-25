@@ -206,6 +206,30 @@ export default function (pi: ExtensionAPI) {
   };
   const notifier = (ctx: any) => (s: string) => ctx?.ui?.notify?.(s);
 
+  // Only a configured or explicitly chosen local model may warm the weights: a session that fell
+  // back to the first available model (a cloud provider failed to register) must not load the GPU.
+  const localIsDefault = (): boolean => {
+    try {
+      return (pi as any).getSettings?.()?.defaultProvider === PROVIDER;
+    } catch {
+      return false;
+    }
+  };
+  // pi exposes no parsed argv, and --model=x is a flag it does not know, so only the spaced forms.
+  const localOnCommandLine = (): boolean => {
+    const argv = process.argv;
+    for (let i = 0; i < argv.length; i++) {
+      const next = argv[i + 1] ?? "";
+      if (argv[i] === "--provider" && next === PROVIDER) return true;
+      if (argv[i] === "--model" && next.startsWith(`${PROVIDER}/`)) return true;
+      if (argv[i] === "--models" && next.includes(PROVIDER)) return true;
+    }
+    return false;
+  };
+  // --models and enabledModels both scope the session to an explicit set of models.
+  const localInScope = (ctx: any): boolean =>
+    (ctx?.scopedModels ?? []).some((scoped: any) => scoped?.model?.provider === PROVIDER);
+
   // Not awaited: set_model's RPC times out before a ~35 s cold load, which would fail the
   // selection. before_provider_request waits on the same promise instead.
   const beginLoad = (ctx: any) => {
@@ -220,6 +244,9 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_e: any, ctx: any) => {
     if (!enabled || !isLocal(ctx)) return;
     startIdleWatch();
+    // Watch either way so an idle server still gets stopped, but preload only a wanted model:
+    // before_provider_request still starts it on the first real request.
+    if (!localIsDefault() && !localOnCommandLine() && !localInScope(ctx)) return;
     beginLoad(ctx);
   });
   pi.on("model_select", async (event: any, ctx: any) => {

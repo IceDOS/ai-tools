@@ -777,6 +777,74 @@ function testCatalogOff() {
   }
 }
 
+async function testStartupSwitchBack() {
+  resetModelTable();
+  const dir = fs.mkdtempSync(path.join("/tmp", "free-switch-"));
+  const prevDir = process.env.PI_CODING_AGENT_DIR;
+  const provider = "opencode-free";
+  const free = (id: string) => ({ id, name: id, contextWindow: 1000, maxTokens: 100, input: ["text"], variants: [] });
+  const handlers: Record<string, any> = {};
+  const switched: string[] = [];
+  const notes: string[] = [];
+  const target = { provider, id: "deepseek-v4.1-flash-free" };
+  let settings: any = { defaultProvider: provider, defaultModel: "deepseek-v4.1-flash-free" };
+  let setModelResult = true;
+  const pi = {
+    on: (event: string, handler: any) => {
+      handlers[event] = handler;
+    },
+    registerProvider: () => {},
+    getSettings: () => settings,
+    setModel: async (model: any) => {
+      switched.push(`${model.provider}/${model.id}`);
+      return setModelResult;
+    },
+  } as any;
+  const local = { provider: "llamacpp", id: "RVN-Qwen3.8-27B" };
+  const ctx = (current: any, extra: any = {}) => ({
+    hasUI: false,
+    model: current,
+    scopedModels: [],
+    modelRegistry: { find: (p: string, id: string) => (p === provider && id === target.id ? target : undefined) },
+    ui: { notify: (text: string) => notes.push(text) },
+    ...extra,
+  });
+  const start = (reason: string, c: any) => handlers.session_start({ reason }, c);
+  try {
+    process.env.PI_CODING_AGENT_DIR = dir;
+    writeCatalogCache([free("deepseek-v4.1-flash-free"), free("big-pickle")]);
+    opencodeZenBun(pi);
+
+    await start("startup", ctx(local));
+    assert.deepStrictEqual(switched, [`${provider}/deepseek-v4.1-flash-free`], "a fresh startup switches back to the default");
+
+    switched.length = 0;
+    await start("startup", ctx(target));
+    await start("resume", ctx(local));
+    await start("new", ctx(local));
+    await start("startup", ctx(local, { scopedModels: [{ model: target }] }));
+    process.argv.push("--model", "anthropic/claude-opus-5-5");
+    try {
+      await start("startup", ctx(local));
+    } finally {
+      process.argv.length -= 2;
+    }
+    settings = { defaultProvider: provider, defaultModel: "gone-free" };
+    await start("startup", ctx(local));
+    assert.deepStrictEqual(switched, [], "every other selection is left alone");
+
+    settings = { defaultProvider: provider, defaultModel: "deepseek-v4.1-flash-free" };
+    setModelResult = false;
+    await start("startup", ctx(local, { hasUI: true }));
+    assert.ok(notes.some((note) => note.includes("no API key")), `expected a switch warning, got ${JSON.stringify(notes)}`);
+    setModelResult = true;
+  } finally {
+    if (prevDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prevDir;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function runAll() {
   await primeModelTable(["big-pickle"]);
   testMultibyteSse();
@@ -795,6 +863,7 @@ async function runAll() {
   await testResolveCatalog();
   await testNoModelsUntilResolved();
   testCatalogOff();
+  await testStartupSwitchBack();
   console.log("All opencode-free tests passed successfully.");
 }
 

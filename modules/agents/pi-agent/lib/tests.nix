@@ -4,6 +4,7 @@ let
   dataDir = import ./data-dir.nix { inherit lib; };
   mcp = import ./mcp-json.nix { inherit lib; };
   ext = import ./extensions.nix { inherit lib; };
+  renderProviders = (import ./providers.nix { inherit lib; }).render;
   exists =
     p:
     builtins.elem p [
@@ -218,5 +219,52 @@ lib.runTests {
       "15"
       "2x"
     ];
+  };
+  testProvidersAddsFreeKey = {
+    expr = renderProviders {
+      providers = {
+        llamacpp = {
+          apiKey = null;
+          baseUrl = null;
+        };
+      };
+      opencodeFree = true;
+    };
+    expected = {
+      llamacpp = { };
+      opencode-free.apiKey = "\${PI_OPENCODE_FREE_API_KEY}";
+    };
+  };
+  testProvidersMergesOverride = {
+    expr = renderProviders {
+      providers = {
+        opencode-free.modelOverrides."deepseek-v4.1-flash-free".contextWindow = 1000000;
+      };
+      opencodeFree = true;
+    };
+    expected = {
+      opencode-free = {
+        apiKey = "\${PI_OPENCODE_FREE_API_KEY}";
+        modelOverrides."deepseek-v4.1-flash-free".contextWindow = 1000000;
+      };
+    };
+  };
+  testProvidersKeepsExplicitKey = {
+    expr = renderProviders {
+      providers.opencode-free.apiKey = "literal";
+      opencodeFree = true;
+    };
+    expected.opencode-free.apiKey = "literal";
+  };
+  testProvidersOff = {
+    expr = renderProviders {
+      providers.opencode-free.modelOverrides.x.name = "X";
+      opencodeFree = false;
+    };
+    expected = {
+      opencode-free = {
+        modelOverrides.x.name = "X";
+      };
+    };
   };
 }

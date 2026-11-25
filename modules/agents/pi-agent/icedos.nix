@@ -246,6 +246,7 @@
           # The wrapper exports PI_CODING_AGENT_DIR; the fallback covers scripts run outside it.
           agentDirSh = "\${PI_CODING_AGENT_DIR:-${dataDirLib.shell cfg.settings.dataDir}}";
           mcpJson = import ./lib/mcp-json.nix { inherit lib; };
+          providersJson = import ./lib/providers.nix { inherit lib; };
 
           hasAccounts = import ../../integrations/ai-accounts/lib/has-accounts.nix { inherit lib; } config;
           wrapAccounts = import ../../integrations/ai-accounts/lib/wrap.nix { inherit lib pkgs; };
@@ -254,19 +255,10 @@
             name = "ai-accounts";
           };
 
-          providers = lib.mapAttrs (
-            _: p:
-            let
-              attrs =
-                lib.filterAttrs (_: v: v != null) { inherit (p) api apiKey baseUrl; }
-                // lib.optionalAttrs (p.headers != { }) { inherit (p) headers; };
-              overrides = lib.mapAttrs (_: o: lib.filterAttrs (_: v: v != null) o) p.modelOverrides;
-              models = map (m: lib.filterAttrs (_: v: v != null) m) p.models;
-            in
-            attrs
-            // lib.optionalAttrs (overrides != { }) { modelOverrides = overrides; }
-            // lib.optionalAttrs (models != [ ]) { inherit models; }
-          ) cfg.settings.providers;
+          providers = providersJson.render {
+            inherit (cfg.settings) providers;
+            opencodeFree = ext.opencodeFree;
+          };
 
           ext = cfg.extensions;
           title = cfg.terminal-title;
