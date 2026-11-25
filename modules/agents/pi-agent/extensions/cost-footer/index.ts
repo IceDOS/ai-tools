@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { WidgetRows } from "../widget-rows.ts";
 import {
   FREE_CAP_DEFAULT,
   FREE_POOL_CAPS,
@@ -431,7 +432,8 @@ export default function (pi: ExtensionAPI) {
         refresh(lastCtx);
       }, SAMPLE_MS);
     }
-    ctx.ui.setWidget("cost", lines, { placement: "belowEditor" });
+    // Leading space matches the padding pi's own string widgets add.
+    ctx.ui.setWidget("cost", () => new WidgetRows(lines.map((l) => ` ${l}`)), { placement: "belowEditor" });
   };
 
   // -- hooks --

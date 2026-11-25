@@ -432,7 +432,13 @@
           # Ordered { name, path, load ? true }; name is the basename inside the bundle.
           # free-models.ts has no factory, so pi must not load it; the other two import it.
           shipped =
-            lib.optional (ext.meters.cost || ext.opencodeFree || vpnOn) {
+            # Shared by rlm-children and cost-footer; pi must not load it.
+            lib.optional (ext.meters.cost || (rlm.enable && rlm.childViewer)) {
+              name = "widget-rows.ts";
+              path = ./extensions/widget-rows.ts;
+              load = false;
+            }
+            ++ lib.optional (ext.meters.cost || ext.opencodeFree || vpnOn) {
               name = "free-models.ts";
               path = substituteTs "free-models.ts" ./extensions/free-models.ts {
                 opencodeVersion = pkgs.opencode.version;

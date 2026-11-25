@@ -2,6 +2,7 @@ import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, rea
 import { join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type TUI, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { WidgetRows } from "./widget-rows.ts";
 
 // pi-rlm-child-log.patch makes rlm() write each child's JSONL stream into this dir.
 const WIDGET = "rlm-children";
@@ -362,6 +363,8 @@ class ChildrenView {
   invalidate(): void {}
 }
 
+export const lib = { WidgetRows, childRow, oneLine };
+
 export default function (pi: ExtensionAPI) {
   let store: ChildStore | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -382,9 +385,9 @@ export default function (pi: ExtensionAPI) {
     const th = ctx.ui.theme;
     const done = store.children.size - running.length;
     const head = th.fg("dim", `rlm ${running.length} running · ${done} finished · /rlm-children to inspect`);
-    ctx.ui.setWidget(WIDGET, [head, ...running.slice(0, 4).map((c) => ` ${childRow(c, th, now)}`)], {
-      placement: "belowEditor",
-    });
+    // Leading space matches the padding pi's own string widgets add.
+    const rows = [` ${head}`, ...running.slice(0, 4).map((c) => `  ${childRow(c, th, now)}`)];
+    ctx.ui.setWidget(WIDGET, () => new WidgetRows(rows), { placement: "belowEditor" });
   };
 
   pi.on("session_start", (_event, ctx) => {
