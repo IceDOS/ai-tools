@@ -365,6 +365,44 @@ def test_rotate_probe_429_strikes_server_then_moves_country(tmp_path):
     assert [s[1] for s in tunnel.starts] == ["DE#1", "NL#2"]
 
 
+def test_rotate_connection_error_strikes_current_server_for_every_model(tmp_path):
+    rotator, state, tunnel, _ = make_rotator(
+        tmp_path, ips={"DE#1": "200.1.1.1", "NL#2": "200.1.1.2"}
+    )
+    rotator.rotate({"errorKind": "rate_limit", "model": "m"})
+    res = rotator.rotate({"errorKind": "connection", "model": "m"})
+    assert res["ok"] is True
+    assert res["server"] == "NL#2"
+    # A bad server is bad for every model, so the strike is not scoped to the failing one.
+    assert len(state.server_strikes["DE#1"]) == 1
+    assert "DE#1|m" not in state.server_strikes
+    assert [s[1] for s in tunnel.starts] == ["DE#1", "NL#2"]
+
+
+def test_connection_error_with_a_dead_tunnel_does_not_strike_the_server(tmp_path):
+    rotator, state, tunnel, _ = make_rotator(
+        tmp_path, ips={"DE#1": "200.1.1.1", "NL#2": "200.1.1.2"}
+    )
+    rotator.rotate({"errorKind": "rate_limit", "model": "m"})
+    strikes = len(state.server_strikes.get("DE#1", []))
+    # A reset while the local tunnel is down says nothing about the server.
+    tunnel.running_flag = False
+    res = rotator.rotate({"errorKind": "connection", "model": "m"})
+    # The tunnel is restarted instead of the server being blamed, so it may land on the same one.
+    assert res["ok"] is True
+    assert tunnel.running_flag is True
+    assert len(state.server_strikes.get("DE#1", [])) == strikes
+
+
+def test_connection_strike_flags_for_every_model_with_a_short_ttl(tmp_path):
+    _, state, _, _ = make_rotator(tmp_path)
+    for _ in range(service.STRIKES_TO_FLAG):
+        state.strike_server("DE#1", reason="connection", model=None)
+    assert state.rate_limited_servers["DE#1"]["reason"] == "connection"
+    assert state.rate_limited_servers["DE#1"]["ttl"] == service.DEFAULT_UNREACHABLE_TTL_S
+    assert state.is_server_rate_limited("DE#1", model="m") is True
+
+
 def test_rotate_single_country_falls_back_to_next_server(tmp_path):
     logicals = [logical("NL#1", "NL", load=1, ips=["190.2.132.1"]),
                 logical("NL#2", "NL", load=5, ips=["190.2.132.2"])]

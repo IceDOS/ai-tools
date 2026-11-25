@@ -264,18 +264,24 @@
           title = cfg.terminal-title;
           extLib = import ./lib/extensions.nix { inherit lib; };
 
-          # pi rewrites "Pi - <session> - <cwd>" from interactive mode on session events and
-          # offers no setting to stop it, so its writer is blanked and the extension owns it.
+          # A hook-driven retry is spent from pi's own 3-retry budget, so a patcher restarts it after an
+          # extension rewrote the message; the title writer has no setting and is blanked instead.
           piUnwrapped =
-            if title.enable then
-              pkgs.pi-coding-agent.overrideAttrs (old: {
-                postInstall = (old.postInstall or "") + ''
-                  ${pkgs.nodejs}/bin/node ${./patches/pi-terminal-title-noop.mjs} \
-                    $out/lib/node_modules/pi-monorepo/dist
-                '';
-              })
+            if rateLimitHooks == [ ] && !title.enable then
+              pkgs.pi-coding-agent
             else
-              pkgs.pi-coding-agent;
+              pkgs.pi-coding-agent.overrideAttrs (old: {
+                postInstall =
+                  (old.postInstall or "")
+                  + lib.optionalString (rateLimitHooks != [ ]) ''
+                    ${pkgs.nodejs}/bin/node ${./patches/pi-retry-after-hook.mjs} \
+                      $out/lib/node_modules/pi-monorepo/dist
+                  ''
+                  + lib.optionalString title.enable ''
+                    ${pkgs.nodejs}/bin/node ${./patches/pi-terminal-title-noop.mjs} \
+                      $out/lib/node_modules/pi-monorepo/dist
+                  '';
+              });
 
           # pathExists on the package forces it at eval time, as 0.9.8 did.
           examplesDir = "${piUnwrapped}/lib/node_modules/pi-monorepo/examples/extensions";
@@ -404,6 +410,7 @@
             errorKinds = [
               "rate_limit"
               "usage_limit"
+              "connection"
             ];
             timeoutMs = 310000;
           };
@@ -419,6 +426,7 @@
             "usage_limit"
             "not_found"
             "timeout"
+            "connection"
           ];
 
           # Ordered { name, path, load ? true }; name is the basename inside the bundle.

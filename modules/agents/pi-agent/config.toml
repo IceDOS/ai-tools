@@ -59,7 +59,8 @@ workingGlyphs = ["◴", "◷", "◶", "◵"]
 [icedos.ai-tools.pi-agent.hooks]
 # Commands run when a listed provider fails; exit 0 makes pi retry the request. Each entry:
 # command (argv, gets a JSON payload on stdin), providers, errorKinds (rate_limit, usage_limit,
-# not_found, timeout; default ["rate_limit"]) and timeoutMs (0 means 120000).
+# not_found, timeout, connection; default ["rate_limit"]) and timeoutMs (0 means 120000).
+# connection covers transport failures such as ECONNRESET, "fetch failed" and socket hang up.
 rateLimit = []
 
 [icedos.ai-tools.pi-agent.extensions]

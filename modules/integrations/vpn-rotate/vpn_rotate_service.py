@@ -924,7 +924,7 @@ class VpnState:
         hits = self.server_strikes.get(key, []) + [self.now_fn()]
         if len(hits) >= STRIKES_TO_FLAG:
             self.server_strikes.pop(key, None)
-            ttl = DEFAULT_UNREACHABLE_TTL_S if reason == "unreachable" else DEFAULT_FLAGGED_TTL_S
+            ttl = DEFAULT_UNREACHABLE_TTL_S if reason in ("unreachable", "connection") else DEFAULT_FLAGGED_TTL_S
             self.flag_server(server, ip=ip, country=country, ttl=ttl, reason=reason, model=model)
             return True
         self.server_strikes[key] = hits
@@ -1160,7 +1160,9 @@ class VpnRotator:
                 return {"ok": False, "reason": "cool-down"}
 
         deadline = now + self.rotate_budget_s
-        flag_current = req.get("errorKind") in ("rate_limit", "usage_limit")
+        kind = req.get("errorKind")
+        # A reset is not a rate limit, but the server we are on still cannot serve the request.
+        flag_current = kind in ("rate_limit", "usage_limit", "connection")
 
         if not self.catalog.load():
             self.log("server list unavailable")
@@ -1169,11 +1171,16 @@ class VpnRotator:
         model = req.get("model")
         failed_servers = set()
         if self.state.mode == "tunnel":
-            if flag_current:
+            # A reset while the local tunnel is down says nothing about the server.
+            if flag_current and (kind != "connection" or self.tunnel.running()):
                 server = self.state.current_server or self.tunnel.server
                 self.log(f"strike on current server {server} ({self.state.current_ip})")
                 self.state.strike_server(
-                    server, ip=self.state.current_ip, country=self.state.current_country, model=model
+                    server,
+                    ip=self.state.current_ip,
+                    country=self.state.current_country,
+                    reason="connection" if kind == "connection" else "rate_limit",
+                    model=None if kind == "connection" else model,
                 )
                 failed_servers.add(server)
         else:

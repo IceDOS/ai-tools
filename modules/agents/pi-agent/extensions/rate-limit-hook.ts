@@ -1,7 +1,11 @@
 import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-export type Kind = "rate_limit" | "usage_limit" | "not_found" | "timeout";
+export type Kind = "rate_limit" | "usage_limit" | "not_found" | "timeout" | "connection";
+
+// kitty/modifyOtherKeys Esc, with Caps/Num Lock bits (65/129/193); Ctrl+Esc (;5) must not cancel.
+export const ESC = /^\x1b\[27(?:;(?:1|65|129|193))?(?::\d+)?u$/;
+export const isEscape = (data: string) => data === "\u001b" || ESC.test(data);
 export type Entry = { command: string[]; providers: string[]; errorKinds: Kind[]; timeoutMs: number };
 type Message = { role: string; stopReason?: string; errorMessage?: string; provider?: string; model?: string };
 type State = { timeouts: number; retries: number };
@@ -12,10 +16,23 @@ type Ctx = {
   modelRegistry?: { getAvailable(): ModelRef[] };
   sessionManager: { getSessionId(): string };
   hasUI?: boolean;
-  ui: { notify(message: string, type?: "info" | "warning" | "error"): void };
+  ui: {
+    notify(message: string, type?: "info" | "warning" | "error"): void;
+    onTerminalInput?(handler: (data: string) => { consume?: boolean } | undefined): () => void;
+  };
   signal?: AbortSignal;
+  isIdle?(): boolean;
+  compact?(options?: { customInstructions?: string }): void;
 };
 type Run = (entry: Entry, body: string, signal?: AbortSignal) => Promise<boolean>;
+// Pi's session_compact_failed: reason is manual, threshold or overflow.
+type CompactFailed = {
+  reason?: string;
+  errorMessage?: string;
+  aborted?: boolean;
+  willRetry?: boolean;
+  fromExtension?: boolean;
+};
 
 // JSON of icedos.ai-tools.pi-agent.hooks.rateLimit, substituted at build time.
 const RAW = "@rateLimitHooks@";
@@ -75,14 +92,26 @@ const USAGE_LIMIT =
 const RATE_LIMIT = /(?<![a-z0-9])429(?![a-z0-9])|rate.?limit|too many requests/i;
 const NOT_FOUND = /(?<![a-z0-9])404(?![a-z0-9])/i;
 const TIMEOUT = /timed out|timeout|ETIMEDOUT/i;
+// pi classifies these as retryable transport failures (pi-ai utils/retry); ETIMEDOUT stays a timeout.
+const CONNECTION =
+  /ECONNRESET|ECONNABORTED|ECONNREFUSED|EPIPE|ENOTFOUND|EAI_AGAIN|socket hang up|socket connection was closed|connection.? (?:error|lost|closed|refused|reset)|fetch failed|network.?error|other side closed|stream (?:was )?interrupted|upstream.?connect|websocket/i;
 const TIMEOUTS_BEFORE_HOOK = 2;
+const COMPACTION_ATTEMPTS = 10;
+
+// The kind of a bare error string, as compaction and branch-summary failures report it.
+function classifyText(text: string): Kind | null {
+  if (USAGE_LIMIT.test(text)) return "usage_limit";
+  if (RATE_LIMIT.test(text)) return "rate_limit";
+  if (CONNECTION.test(text)) return "connection";
+  if (NOT_FOUND.test(text)) return "not_found";
+  return null;
+}
 
 function classify(message: Message, state: State): Kind | null {
   if (message.role !== "assistant" || message.stopReason !== "error") return null;
   const text = message.errorMessage ?? "";
-  if (USAGE_LIMIT.test(text)) return "usage_limit";
-  if (RATE_LIMIT.test(text)) return "rate_limit";
-  if (NOT_FOUND.test(text)) return "not_found";
+  const kind = classifyText(text);
+  if (kind) return kind;
   if (!TIMEOUT.test(text)) return null;
   state.timeouts += 1;
   if (state.timeouts < TIMEOUTS_BEFORE_HOOK) return null;
@@ -189,6 +218,11 @@ function createHandlers(hooks: Entry[], run: Run = runHook, maxRetries = MAX_RET
   // What to switch back to, while the session runs on a fallback model.
   let back: { original: ModelRef; model: ModelRef; ctx: Ctx; timer?: NodeJS.Timeout } | undefined;
   const resetMs = fallback ? returnAfter(fallback.back) : undefined;
+  // Compaction failures never reach message_end, so they carry their own retry count and instructions.
+  let compactRetries = 0;
+  let capNotified = false;
+  let instructions: string | undefined;
+  let pending: Ctx | undefined;
 
   // Switches back only while the session still uses the fallback, so a model the user picked stays.
   async function restore() {
@@ -222,6 +256,34 @@ function createHandlers(hooks: Entry[], run: Run = runHook, maxRetries = MAX_RET
     return { message: { ...message, errorMessage: `rate limit: ${provider} hook failed (${kind}), retrying on ${key(next)}` } };
   }
 
+  // Runs the entries in order; "cancelled" means Esc or a signal, not a failing hook.
+  async function runEntries(
+    entries: Entry[],
+    body: string,
+    ctx: Ctx,
+    provider: string,
+    signal: AbortSignal | undefined = ctx.signal,
+  ): Promise<boolean | "cancelled"> {
+    if (entries.length === 0) return false;
+    let cancelled = false;
+    const onCancel = () => { cancelled = true; };
+    process.on("SIGINT", onCancel);
+    process.on("SIGTERM", onCancel);
+    try {
+      for (const entry of entries) {
+        if (cancelled || signal?.aborted) return "cancelled";
+        notify(ctx, `running rate-limit hook for ${provider}... (press Esc to cancel)`);
+        const ok = await run(entry, body, signal);
+        if (cancelled || signal?.aborted) return "cancelled";
+        if (ok) return true;
+      }
+      return false;
+    } finally {
+      process.off("SIGINT", onCancel);
+      process.off("SIGTERM", onCancel);
+    }
+  }
+
   return {
     async messageEnd(event: { message: Message }, ctx: Ctx): Promise<{ message: Message } | undefined> {
       const message = event.message;
@@ -231,33 +293,89 @@ function createHandlers(hooks: Entry[], run: Run = runHook, maxRetries = MAX_RET
       const entries = entriesFor(hooks, provider, kind);
       if (entries.length === 0) return undefined;
       const body = JSON.stringify(payload(ctx, message, kind, state.retries));
-      let cancelled = false;
-      const onCancel = () => { cancelled = true; };
-      process.on("SIGINT", onCancel);
-      process.on("SIGTERM", onCancel);
-      try {
-        for (const entry of entries) {
-          if (cancelled || ctx.signal?.aborted) return undefined;
-          notify(ctx, `running rate-limit hook for ${provider}... (press Esc to cancel)`);
-          const ok = await run(entry, body, ctx.signal);
-          if (cancelled || ctx.signal?.aborted) return undefined;
-          if (!ok) continue;
-          state.retries += 1;
-          notify(ctx, `rate-limit hook ran for ${provider}: ${message.errorMessage ?? ""}`);
-          // The original text can hold names pi never retries, so it is replaced.
-          return { message: { ...message, errorMessage: `rate limit: ${provider} hook ran (${kind}), retrying` } };
-        }
-        if (cancelled || ctx.signal?.aborted) return undefined;
-        return await switchToFallback(message, ctx, kind);
-      } finally {
-        process.off("SIGINT", onCancel);
-        process.off("SIGTERM", onCancel);
-      }
+      const done = await runEntries(entries, body, ctx, provider);
+      if (done === "cancelled") return undefined;
+      if (!done) return await switchToFallback(message, ctx, kind);
+      state.retries += 1;
+      notify(ctx, `rate-limit hook ran for ${provider}: ${message.errorMessage ?? ""}`);
+      // The original text can hold names pi never retries, so it is replaced.
+      return { message: { ...message, errorMessage: `rate limit: ${provider} hook ran (${kind}), retrying` } };
     },
-    settled() {
+    async compactFailed(event: CompactFailed, ctx: Ctx): Promise<void> {
+      const text = event.errorMessage ?? "";
+      if (event.aborted || event.fromExtension || !text || !ctx.compact) return;
+      // Nothing signals an abort while compaction is idle except Esc below, so cap this loop too.
+      const cap = maxRetries > 0 ? maxRetries : COMPACTION_ATTEMPTS;
+      if (compactRetries >= cap) {
+        if (!capNotified) {
+          capNotified = true;
+          notify(ctx, `compaction still limited after ${cap} rotations; stopping`);
+        }
+        return;
+      }
+      const kind = classifyText(text);
+      if (!kind) return;
+      const provider = ctx.model?.provider ?? "";
+      const message: Message = { role: "assistant", stopReason: "error", errorMessage: text, provider, model: ctx.model?.id };
+      const entries = entriesFor(hooks, provider, kind);
+      // Esc is the only abort available while compaction is idle; the TUI restores its default before this event.
+      const esc = new AbortController();
+      const offEsc = ctx.ui.onTerminalInput?.((data) => {
+        if (!isEscape(data)) return undefined;
+        esc.abort();
+        return { consume: true };
+      });
+      let done: boolean | "cancelled";
+      try {
+        done = await runEntries(
+          entries,
+          JSON.stringify(payload(ctx, message, kind, compactRetries)),
+          ctx,
+          provider,
+          esc.signal,
+        );
+      } finally {
+        offEsc?.();
+      }
+      if (done === "cancelled") return;
+      if (done) notify(ctx, `rate-limit hook ran for ${provider}: ${text}`);
+      const rotated = done === true;
+      if (!rotated && !(await switchToFallback(message, ctx, kind))) return;
+      compactRetries += 1;
+      notify(ctx, "compaction hit a provider limit; compacting again");
+      // ctx.compact() aborts a live run, and a failed auto compaction still holds its controller.
+      if (ctx.isIdle?.() === false) {
+        pending = ctx;
+        return;
+      }
+      ctx.compact({ customInstructions: instructions });
+    },
+    beforeCompact(event: { customInstructions?: string }) {
+      instructions = event.customInstructions;
+    },
+    compacted() {
+      compactRetries = 0;
+      capNotified = false;
+      instructions = undefined;
+    },
+    // Esc, /new, /resume and a busy session all drop the parked compaction retry.
+    settled(aborted = false) {
       state.timeouts = 0;
       state.retries = 0;
       tried.clear();
+      const ctx = pending;
+      pending = undefined;
+      if (!aborted) {
+        compactRetries = 0;
+        capNotified = false;
+      }
+      if (!aborted && ctx && ctx.isIdle?.() !== false) ctx.compact?.({ customInstructions: instructions });
+    },
+    reset() {
+      pending = undefined;
+      instructions = undefined;
+      compactRetries = 0;
+      capNotified = false;
     },
     async input() {
       if (fallback?.back === "prompt") await restore();
@@ -265,7 +383,7 @@ function createHandlers(hooks: Entry[], run: Run = runHook, maxRetries = MAX_RET
   };
 }
 
-export const lib = { classify, entriesFor, payload, runHook, createHandlers, candidates, nextModel, returnAfter };
+export const lib = { classify, classifyText, isEscape, entriesFor, payload, runHook, createHandlers, candidates, nextModel, returnAfter };
 
 export default function rateLimitHook(pi: ExtensionAPI) {
   const handlers = createHandlers(HOOKS, runHook, MAX_RETRIES, {
@@ -274,6 +392,12 @@ export default function rateLimitHook(pi: ExtensionAPI) {
     switchModel: (model) => pi.setModel(model as any).catch(() => false),
   });
   pi.on("message_end", (event, ctx) => handlers.messageEnd(event as any, ctx as any) as any);
-  pi.on("agent_settled", () => handlers.settled());
+  // A 429 during compaction bypasses message_end; rotate there too and compact again.
+  pi.on("session_before_compact", (event) => handlers.beforeCompact(event as any));
+  pi.on("session_compact", () => handlers.compacted());
+  pi.on("session_compact_failed", (event, ctx) => handlers.compactFailed(event as any, ctx as any));
+  pi.on("agent_settled", (event) => handlers.settled((event as any).aborted === true));
+  pi.on("session_start", () => handlers.reset());
+  pi.on("session_shutdown", () => handlers.reset());
   pi.on("input", () => handlers.input());
 }

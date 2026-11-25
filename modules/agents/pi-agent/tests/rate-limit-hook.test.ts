@@ -48,6 +48,19 @@ test("classify sorts errors into kinds", () => {
   assert.equal(lib.classify({ role: "user", stopReason: "error", errorMessage: "429" }, fresh()), null);
 });
 
+test("connection failures are their own kind", () => {
+  const reset =
+    "Connection error.: TypeError: ECONNRESET: The socket connection was closed unexpectedly. " +
+    "For more information, pass `verbose: true` in the second argument to fetch()";
+  assert.equal(lib.classify(failed(reset), fresh()), "connection");
+  assert.equal(lib.classify(failed("fetch failed"), fresh()), "connection");
+  assert.equal(lib.classify(failed("socket hang up"), fresh()), "connection");
+  assert.equal(lib.classify(failed("FreeUsageLimitError: connection error"), fresh()), "usage_limit");
+  assert.equal(lib.classifyText("Compaction failed: write EPIPE"), "connection");
+  assert.equal(lib.classifyText("Summary failed: 429 rate limited"), "rate_limit");
+  assert.equal(lib.classifyText("Compaction failed: Already compacted"), null);
+});
+
 test("only the second timeout in a prompt counts", () => {
   const state = fresh();
   assert.equal(lib.classify(failed("request timed out"), state), null);
@@ -325,3 +338,196 @@ test("an explicit fallback list keeps its order, takes provider/id or bare ids, 
   assert.equal(lib.returnAfter("15m"), 900_000);
   assert.equal(lib.returnAfter("prompt"), undefined);
 });
+
+function compactSetup(fallback?: Parameters<typeof lib.createHandlers>[3], run = async () => true, maxRetries = 0) {
+  const calls: { customInstructions?: string }[] = [];
+  const notes: string[] = [];
+  const available = [model("m"), model("a")];
+  const live = { model: model("m") as ReturnType<typeof model> | undefined };
+  const cctx = {
+    ...ctx,
+    get model() { return live.model; },
+    modelRegistry: { getAvailable: () => available },
+    hasUI: true,
+    ui: { notify(m: string) { notes.push(m); } },
+    isIdle: () => true,
+    compact(options?: { customInstructions?: string }) { calls.push(options ?? {}); },
+  };
+  const handlers = lib.createHandlers([entry({ errorKinds: ["rate_limit", "connection"] })], run, maxRetries, fallback);
+  const failedEvent = (errorMessage: string, more = {}) => ({
+    reason: "manual",
+    errorMessage,
+    aborted: false,
+    willRetry: false,
+    fromExtension: false,
+    ...more,
+  });
+  return { calls, notes, cctx, handlers, live, failedEvent };
+}
+
+test("a rate-limited compaction runs the hook and compacts again", async () => {
+  const { calls, cctx, handlers, failedEvent, notes } = compactSetup();
+  await handlers.compactFailed(failedEvent("Compaction failed: 429 Too Many Requests"), cctx);
+  assert.equal(calls.length, 1);
+  assert.ok(notes.some((n) => n.includes("compacting again")));
+});
+
+test("a connection failure during compaction rotates too", async () => {
+  const seen: string[] = [];
+  const { calls, cctx, handlers, failedEvent } = compactSetup({}, async (_e, body) => {
+    seen.push(JSON.parse(body).errorKind);
+    return true;
+  });
+  await handlers.compactFailed(failedEvent("Compaction failed: fetch failed"), cctx);
+  assert.deepEqual(seen, ["connection"]);
+  assert.equal(calls.length, 1);
+});
+
+test("aborted, extension-built and unrelated compaction failures do nothing", async () => {
+  let runs = 0;
+  const { calls, cctx, handlers, failedEvent } = compactSetup({}, async () => {
+    runs += 1;
+    return true;
+  });
+  await handlers.compactFailed(failedEvent("Compaction failed: 429", { aborted: true }), cctx);
+  await handlers.compactFailed(failedEvent(undefined as any, { aborted: true }), cctx);
+  await handlers.compactFailed(failedEvent("Compaction failed: 429", { fromExtension: true }), cctx);
+  await handlers.compactFailed(failedEvent("Compaction failed: Nothing to compact (session too small)"), cctx);
+  assert.equal(runs, 0);
+  assert.equal(calls.length, 0);
+});
+
+test("a failed compaction retry falls back to another model", async () => {
+  const switched: string[] = [];
+  const { calls, cctx, handlers, failedEvent } = compactSetup({
+    models: [],
+    back: "prompt",
+    switchModel: async (m) => { switched.push(m.id); return true; },
+  }, async () => false);
+  await handlers.compactFailed(failedEvent("Compaction failed: 429"), cctx);
+  assert.deepEqual(switched, ["a"]);
+  assert.equal(calls.length, 1);
+});
+
+test("no fallback and a failed hook leave the compaction alone", async () => {
+  const { calls, cctx, handlers, failedEvent } = compactSetup(undefined, async () => false);
+  await handlers.compactFailed(failedEvent("Compaction failed: 429"), cctx);
+  assert.equal(calls.length, 0);
+});
+
+test("compaction retries stop at maxRetries and start over after a success", async () => {
+  const { calls, cctx, handlers, failedEvent } = compactSetup(undefined, async () => true, 2);
+  const event = failedEvent("Compaction failed: 429");
+  await handlers.compactFailed(event, cctx);
+  await handlers.compactFailed(event, cctx);
+  await handlers.compactFailed(event, cctx);
+  assert.equal(calls.length, 2);
+  handlers.compacted();
+  await handlers.compactFailed(event, cctx);
+  assert.equal(calls.length, 3);
+});
+
+test("an unlimited retry setting still caps the compaction loop", async () => {
+  const { calls, cctx, handlers, failedEvent } = compactSetup(undefined, async () => true, 0);
+  const event = failedEvent("Compaction failed: 429");
+  for (let i = 0; i < 20; i++) await handlers.compactFailed(event, cctx);
+  assert.equal(calls.length, 10);
+});
+
+test("compaction retries keep the instructions of the failed attempt", async () => {
+  const { calls, cctx, handlers, failedEvent } = compactSetup();
+  handlers.beforeCompact({ customInstructions: "keep the plan" });
+  await handlers.compactFailed(failedEvent("Compaction failed: 429"), cctx);
+  assert.deepEqual(calls, [{ customInstructions: "keep the plan" }]);
+});
+
+test("a compaction that fails while the session is busy retries once it settles", async () => {
+  const { calls, cctx, handlers, failedEvent } = compactSetup();
+  let idle = false;
+  const busy = { ...cctx, isIdle: () => idle };
+  handlers.beforeCompact({ customInstructions: "keep the plan" });
+  await handlers.compactFailed(failedEvent("Compaction failed: 429", { reason: "threshold" }), busy);
+  assert.equal(calls.length, 0);
+  idle = true;
+  handlers.settled();
+  assert.deepEqual(calls, [{ customInstructions: "keep the plan" }]);
+});
+
+test("another provider's compaction failure runs nothing", async () => {
+  const { calls, cctx, handlers, failedEvent } = compactSetup();
+  await handlers.compactFailed(failedEvent("Compaction failed: 429"), { ...cctx, model: model("m", 0, "anthropic") });
+  assert.equal(calls.length, 0);
+});
+
+test("an aborted settle drops the parked compaction retry", async () => {
+  const { calls, cctx, handlers, failedEvent } = compactSetup();
+  await handlers.compactFailed(failedEvent("Compaction failed: 429"), { ...cctx, isIdle: () => false });
+  handlers.settled(true);
+  assert.equal(calls.length, 0);
+});
+
+test("a session reset drops the parked compaction retry", async () => {
+  const { calls, cctx, handlers, failedEvent } = compactSetup();
+  await handlers.compactFailed(failedEvent("Compaction failed: 429"), { ...cctx, isIdle: () => false });
+  handlers.reset();
+  handlers.settled(false);
+  assert.equal(calls.length, 0);
+});
+
+test("a parked retry is dropped when the session is still busy when it settles", async () => {
+  const { calls, cctx, handlers, failedEvent } = compactSetup();
+  const busy = { ...cctx, isIdle: () => false };
+  await handlers.compactFailed(failedEvent("Compaction failed: 429"), busy);
+  handlers.settled(false);
+  assert.equal(calls.length, 0);
+});
+
+test("a non-aborted settle clears the compaction retry count and the cap notice", async () => {
+  const notes: string[] = [];
+  const { calls, cctx, handlers, failedEvent } = compactSetup(undefined, async () => true, 1);
+  const withNotes = { ...cctx, ui: { notify: (m: string) => notes.push(m), onTerminalInput: () => () => {} } };
+  const event = failedEvent("Compaction failed: 429");
+  await handlers.compactFailed(event, withNotes);
+  await handlers.compactFailed(event, withNotes);
+  assert.equal(calls.length, 1);
+  assert.ok(notes.some((n) => n.includes("still limited after 1 rotations")));
+  handlers.settled(false);
+  await handlers.compactFailed(event, withNotes);
+  assert.equal(calls.length, 2);
+});
+
+test("the Esc predicate takes kitty and modifyOtherKeys forms but not Ctrl+Esc", () => {
+  for (const data of ["\u001b", "\x1b[27u", "\x1b[27;1u", "\x1b[27;1:3u", "\x1b[27;65u", "\x1b[27;129u"])
+    assert.equal(lib.isEscape(data), true, data);
+  for (const data of ["\x1b[27;5u", "\x1b[27;69u", "\x1b[27;2u", "\x1b[A", "a"]) assert.equal(lib.isEscape(data), false, data);
+});
+
+test("Esc in every encoding aborts a compaction hook and skips the retry", async () => {
+  for (const esc of ["\u001b", "\u001b[27u", "\u001b[27;1u"]) await escAborts(esc);
+});
+
+async function escAborts(key: string) {
+  let handler: ((d: string) => { consume?: boolean } | undefined) | undefined;
+  let unsubscribed = 0;
+  const compacts: unknown[] = [];
+  const cctx = {
+    ...ctx,
+    model: { provider: "opencode", id: "m" },
+    isIdle: () => true,
+    compact(options: unknown) { compacts.push(options); },
+    hasUI: true,
+    ui: {
+      notify() {},
+      onTerminalInput(h: typeof handler) { handler = h; return () => { unsubscribed += 1; }; },
+    },
+  };
+  const handlers = lib.createHandlers([entry()], async (_e, _b, signal) => {
+    assert.ok(handler?.(key)?.consume);
+    assert.equal(signal?.aborted, true);
+    return false;
+  });
+  await handlers.compactFailed({ reason: "manual", errorMessage: "Compaction failed: 429", aborted: false }, cctx);
+  assert.equal(unsubscribed, 1);
+  // The abort must skip the retry, not just cancel the hook.
+  assert.deepEqual(compacts, []);
+}
